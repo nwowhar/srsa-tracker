@@ -5,12 +5,12 @@ import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc } 
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyA7zlWExbsgf-pPyufv4iY_ClV5Hbh5ydA",
-  authDomain: "srsa-job-tracker.firebaseapp.com",
-  projectId: "srsa-job-tracker",
-  storageBucket: "srsa-job-tracker.firebasestorage.app",
-  messagingSenderId: "798872913181",
-  appId: "1:798872913181:web:cd753b22ab70432f1f8df4"
+  apiKey: "AIzaSyDvvwcT083aF2H5SiuSvvDyWepwpfkMQO0",
+  authDomain: "srsa-tracker.firebaseapp.com",
+  projectId: "srsa-tracker",
+  storageBucket: "srsa-tracker.firebasestorage.app",
+  messagingSenderId: "965914092258",
+  appId: "1:965914092258:web:b49b8a98c4fbfda9f434bb"
 };
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
