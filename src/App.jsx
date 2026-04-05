@@ -1184,7 +1184,7 @@ export default function App() {
             </div>
           </div>
           <input ref={fileRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={onPhotos}/>
-          <input ref={cameraRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
+          <input ref={adminCamRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
           {ph.length===0?(
             <div style={{background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:22,textAlign:"center"}}>
               <Camera size={22} color={BDR2} style={{margin:"0 auto 6px",display:"block"}}/>
