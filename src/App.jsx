@@ -232,7 +232,8 @@ export default function App() {
   const isIn    = (jid, t) => !t.opt || !getExcl(jid).has(t.id);
   const getEnt  = (jid, tid) => entries[eKey(jid,tid)] || [];
   const getPh   = (jid, tid) => photos[eKey(jid,tid)] || [];
-  const logged  = (jid, tid) => getEnt(jid,tid).reduce((s,e) => s+e.hours, 0);
+  const logged      = (jid, tid) => getEnt(jid,tid).reduce((s,e) => s+e.hours, 0);
+  const entryCost   = (jid, tid) => getEnt(jid,tid).reduce((s,e) => s + e.hours*(e.rate||getLR(jid))*1.1, 0);
 
   const getLR     = jid => jobs.find(j=>j.id===jid)?.lockedRate || 145;
   const getStatus = (jid, tid) => taskStatus[eKey(jid,tid)] || "ongoing";
@@ -259,13 +260,13 @@ export default function App() {
     const ts = [...builtin, ...custom];
     const act = ts.reduce((s,t)=>s+logged(jid,t.id),0);
     return {
-      est:       ts.reduce((s,t)=>s+t.est,0),
-      actual:    act,
-      estCost:   ts.reduce((s,t)=>s+t.est*lr,0),
-      actualCost:act*lr,
-      total:     ts.length,
-      photos:    ts.reduce((s,t)=>s+getPh(jid,t.id).length,0),
-      completed: ts.filter(t=>getStatus(jid,t.id)==='completed').length,
+      est:        ts.reduce((s,t)=>s+t.est,0),
+      actual:     act,
+      estCost:    ts.reduce((s,t)=>s+t.est*lr*1.1,0),
+      actualCost: ts.reduce((s,t)=>s+entryCost(jid,t.id),0),
+      total:      ts.length,
+      photos:     ts.reduce((s,t)=>s+getPh(jid,t.id).length,0),
+      completed:  ts.filter(t=>getStatus(jid,t.id)==='completed').length,
     };
   };
   const jStats = jid => {
@@ -277,8 +278,8 @@ export default function App() {
     return {
       est:        ts.reduce((s,t)=>s+t.est,0),
       actual:     act,
-      estCost:    ts.reduce((s,t)=>s+t.est*lr,0),
-      actualCost: act*lr,
+      estCost:    ts.reduce((s,t)=>s+t.est*lr*1.1,0),
+      actualCost: ts.reduce((s,t)=>s+entryCost(jid,t.id),0),
       lr,
     };
   };
@@ -493,15 +494,17 @@ export default function App() {
 
   const AddModal = () => {
     const dateRef = useRef(); const hoursRef = useRef();
-    const workerRef = useRef(); const notesRef = useRef();
+    const workerRef = useRef(); const notesRef = useRef(); const entryRateRef = useRef();
+    const jobRate = jobs.find(j=>j.id===selJob)?.lockedRate || 145;
     const handleSave = async () => {
       const h = parseFloat(hoursRef.current?.value);
       if (!h || h <= 0) return;
+      const rate = parseFloat(entryRateRef.current?.value) || jobRate;
       await addDoc(collection(db,"entries"), {
-        jobId:selJob, taskId:selTask, hours:h,
+        jobId:selJob, taskId:selTask, hours:h, rate,
         notes:notesRef.current?.value||"",
         date:dateRef.current?.value||today(),
-        worker:workerRef.current?.value||"Admin"
+        worker:workerRef.current?.value||"Alan"
       });
       setShowAdd(false);
     };
@@ -518,12 +521,22 @@ export default function App() {
             <input ref={dateRef} type="date" defaultValue={today()} style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
           </div>
           <div style={{marginBottom:14}}>
-            <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>HOURS</div>
-            <input ref={hoursRef} type="number" step="0.5" min="0" placeholder="0.0" style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:22,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+            <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WORKER</div>
+            <input ref={workerRef} type="text" defaultValue="Alan" style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
           </div>
-          <div style={{marginBottom:14}}>
-            <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WORKER NAME (optional)</div>
-            <input ref={workerRef} type="text" placeholder="e.g. Dave" style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            <div>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>HOURS</div>
+              <input ref={hoursRef} type="number" step="0.5" min="0" placeholder="0.0" style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:20,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+            </div>
+            <div>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>RATE +GST</div>
+              <div style={{display:"flex",alignItems:"center",gap:4}}>
+                <span style={{fontFamily:MONO,fontSize:16,color:Y}}>$</span>
+                <input ref={entryRateRef} type="number" step="5" min="1" defaultValue={jobRate} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 10px",color:TXT,fontSize:16,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+              </div>
+              <div style={{fontSize:9,color:MUTED,marginTop:3}}>inc 10% GST = ${(jobRate*1.1).toFixed(0)}</div>
+            </div>
           </div>
           <div style={{marginBottom:14}}>
             <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>NOTES (optional)</div>
@@ -1155,6 +1168,7 @@ export default function App() {
             <div key={e.id} style={{background:CARD,borderRadius:9,padding:"11px 13px",marginBottom:7,border:`1px solid ${BDR}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div>
                 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:2}}><span style={{fontFamily:MONO,fontSize:17,color:Y}}>{e.hours}h</span><span style={{fontSize:12,color:MUTED}}>{e.date}</span></div>
+                <div style={{fontSize:11,color:MUTED,marginBottom:2}}>${e.rate||145}/hr · ${((e.rate||145)*e.hours*1.1).toFixed(2)} inc GST</div>
                 {e.notes&&<div style={{fontSize:12,color:MUTED,marginBottom:2}}>{e.notes}</div>}
                 <div style={{fontFamily:MONO,fontSize:10,color:BDR2}}>{e.worker}</div>
               </div>
