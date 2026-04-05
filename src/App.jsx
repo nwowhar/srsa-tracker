@@ -8,7 +8,7 @@ const firebaseConfig = {
   apiKey: "AIzaSyDvvwcT083aF2H5SiuSvvDyWepwpfkMQO0",
   authDomain: "srsa-tracker.firebaseapp.com",
   projectId: "srsa-tracker",
- storageBucket: "srsa-tracker.firebasestorage.app",
+  storageBucket: "srsa-tracker.firebasestorage.app",
   messagingSenderId: "965914092258",
   appId: "1:965914092258:web:b49b8a98c4fbfda9f434bb"
 };
@@ -443,16 +443,17 @@ export default function App() {
 
   const JobForm = () => {
     const clientRef = useRef(); const serialRef = useRef();
-    const makeRef = useRef(); const modelRef = useRef(); const startedRef = useRef();
+    const makeRef = useRef(); const modelRef = useRef(); const startedRef = useRef(); const rateRef = useRef();
     const handleSave = async () => {
       const client = clientRef.current?.value||"";
       const serial = serialRef.current?.value||"";
       if (!client || !serial) return;
-      const data = { client, serial, make:makeRef.current?.value||"John Deere", model:modelRef.current?.value||"", started:startedRef.current?.value||today() };
+      const lr = parseFloat(rateRef.current?.value)||hourlyRate;
+      const data = { client, serial, make:makeRef.current?.value||"John Deere", model:modelRef.current?.value||"", started:startedRef.current?.value||today(), lockedRate:lr };
       if (editJob) {
         await setDoc(doc(db,"jobs",editJob.id), data, {merge:true});
       } else {
-        await addDoc(collection(db,"jobs"), {...data, status:"in_progress", lockedRate:hourlyRate});
+        await addDoc(collection(db,"jobs"), {...data, status:"in_progress"});
       }
       setShowJob(false); setEditJob(null);
     };
@@ -471,6 +472,16 @@ export default function App() {
                 style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
             </div>
           ))}
+          <div style={{marginBottom:14}}>
+            <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>HOURLY RATE +GST</div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontFamily:MONO,fontSize:18,color:Y}}>$</span>
+              <input ref={rateRef} type="number" step="5" min="1" defaultValue={jForm.lockedRate||hourlyRate}
+                style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:18,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+              <span style={{fontFamily:MONO,fontSize:14,color:MUTED}}>/hr</span>
+            </div>
+            <div style={{fontSize:11,color:MUTED,marginTop:5}}>Locked to this job — changing global rate won't affect it</div>
+          </div>
           <button onClick={handleSave}
             style={{width:"100%",background:Y,border:"none",borderRadius:10,padding:15,cursor:"pointer",fontFamily:FF,fontSize:16,fontWeight:800,color:BG,letterSpacing:1,marginTop:4}}>
             {editJob?"SAVE CHANGES":"CREATE JOB"}
@@ -773,6 +784,7 @@ export default function App() {
   };
 
   const TechTaskView = () => {
+    const cameraRef = useRef();
     const task = taskMap[selTask] || getCTById(selJob, selTask);
     if (!task) return null;
     const sec  = SECTIONS.find(s => s.id===task.sId);
@@ -785,11 +797,17 @@ export default function App() {
         <div style={{padding:"14px 14px 0"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
             <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2}}>PHOTOS {ph.length>0&&`(${ph.length})`}</div>
-            <button onClick={()=>fileRef.current?.click()} style={{display:"flex",alignItems:"center",gap:5,background:Y,border:"none",borderRadius:8,padding:"10px 16px",cursor:"pointer"}}>
-              <Camera size={14} color={BG}/><span style={{fontFamily:FF,fontSize:13,fontWeight:800,color:BG}}>TAKE PHOTO</span>
-            </button>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>cameraRef.current?.click()} style={{display:"flex",alignItems:"center",gap:5,background:Y,border:"none",borderRadius:8,padding:"10px 14px",cursor:"pointer"}}>
+                <Camera size={14} color={BG}/><span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:BG}}>CAMERA</span>
+              </button>
+              <button onClick={()=>fileRef.current?.click()} style={{display:"flex",alignItems:"center",gap:5,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"10px 14px",cursor:"pointer"}}>
+                <Camera size={14} color={Y}/><span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y}}>GALLERY</span>
+              </button>
+            </div>
           </div>
-          <input ref={fileRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
+          <input ref={fileRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={onPhotos}/>
+          <input ref={cameraRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
           {ph.length===0 ? (
             <div style={{background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:28,textAlign:"center",marginBottom:16}}>
               <Camera size={28} color={BDR2} style={{margin:"0 auto 8px",display:"block"}}/>
@@ -837,11 +855,7 @@ export default function App() {
             <div style={{fontFamily:FF,fontSize:11,color:Y,letterSpacing:2}}>ADMINISTRATOR VIEW</div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center",marginTop:4}}>
-            <button onClick={()=>{setRateInput(String(hourlyRate));setShowRateModal(true);}}
-              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 10px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center"}}>
-              <span style={{fontFamily:MONO,fontSize:11,color:Y}}>${hourlyRate}/hr</span>
-              <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:.5}}>RATE</span>
-            </button>
+
             <button onClick={()=>{setEditJob(null);setJForm({client:"",serial:"",make:"John Deere",model:"",started:today()});setShowJob(true);}}
               style={{display:"flex",alignItems:"center",gap:5,background:Y,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>
               <Plus size={14} color={BG}/><span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:BG}}>NEW JOB</span>
@@ -1094,6 +1108,7 @@ export default function App() {
   };
 
   const AdminTaskView = () => {
+    const adminCamRef = useRef();
     const task = taskMap[selTask] || getCTById(selJob, selTask);
     if (!task) return null;
     const isCT = isCustom(selJob, selTask);
@@ -1159,11 +1174,17 @@ export default function App() {
         <div style={{padding:"14px 14px 28px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2}}>PHOTOS {ph.length>0&&`(${ph.length})`}</div>
-            <button onClick={()=>fileRef.current?.click()} style={{display:"flex",alignItems:"center",gap:5,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 13px",cursor:"pointer"}}>
-              <Camera size={13} color={Y}/><span style={{fontFamily:FF,fontSize:12,fontWeight:700,color:Y}}>UPLOAD</span>
-            </button>
+            <div style={{display:"flex",gap:6}}>
+              <button onClick={()=>adminCamRef.current?.click()} style={{display:"flex",alignItems:"center",gap:4,background:Y,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>
+                <Camera size={12} color={BG}/><span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:BG}}>CAMERA</span>
+              </button>
+              <button onClick={()=>fileRef.current?.click()} style={{display:"flex",alignItems:"center",gap:4,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>
+                <Camera size={12} color={Y}/><span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:Y}}>GALLERY</span>
+              </button>
+            </div>
           </div>
-          <input ref={fileRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
+          <input ref={fileRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={onPhotos}/>
+          <input ref={cameraRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
           {ph.length===0?(
             <div style={{background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:22,textAlign:"center"}}>
               <Camera size={22} color={BDR2} style={{margin:"0 auto 6px",display:"block"}}/>
@@ -1248,7 +1269,14 @@ export default function App() {
   const isAdmin = mode==="admin";
 
   return (
-    <div style={{background:BG,minHeight:"100dvh",maxWidth:480,margin:"0 auto",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column"}}>
+    <div style={{background:BG,minHeight:"100dvh",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column",alignItems:"center"}}>
+      <style>{`
+        .app-shell { width:100%; max-width:480px; display:flex; flex-direction:column; min-height:100dvh; position:relative; }
+        @media(min-width:900px){
+          .app-shell { max-width:420px; box-shadow:0 0 60px rgba(0,0,0,.5); border-left:1px solid #272A35; border-right:1px solid #272A35; }
+        }
+      `}</style>
+      <div className="app-shell">
       <div style={{flex:1,overflowY:"auto"}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
@@ -1270,7 +1298,7 @@ export default function App() {
       {showJob    && <JobForm/>}
       {lightbox   && <Lightbox/>}
       {confirmDel && <ConfirmDel/>}
+      </div>
     </div>
   );
 }
- 
