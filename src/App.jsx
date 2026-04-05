@@ -8,7 +8,7 @@ const firebaseConfig = {
   apiKey: "AIzaSyDvvwcT083aF2H5SiuSvvDyWepwpfkMQO0",
   authDomain: "srsa-tracker.firebaseapp.com",
   projectId: "srsa-tracker",
-  storageBucket: "srsa-tracker.firebasestorage.app",
+ storageBucket: "srsa-tracker.firebasestorage.app",
   messagingSenderId: "965914092258",
   appId: "1:965914092258:web:b49b8a98c4fbfda9f434bb"
 };
