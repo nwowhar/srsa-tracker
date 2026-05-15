@@ -122,6 +122,7 @@ const today = () => new Date().toISOString().split("T")[0];
 const eKey = (jid, tid) => `${jid}_${tid}`;
 
 export default function App() {
+  const [isDesktop, setIsDesktop] = useState(window.innerWidth >= 900);
   useEffect(() => {
     const l = document.createElement("link");
     l.href = "https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600;700&family=DM+Mono:wght@500&display=swap";
@@ -130,6 +131,9 @@ export default function App() {
     s.textContent = "@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}";
     document.head.appendChild(s);
     signInAnonymously(auth).catch(e => console.warn("Auth failed:", e));
+    const onResize = () => setIsDesktop(window.innerWidth >= 900);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   useEffect(() => {
@@ -722,23 +726,23 @@ export default function App() {
       ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"SWITCH",Icon:LogOut,action:()=>setMode("select"),active:false}]
       : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"SWITCH",Icon:Lock,action:()=>setMode("select"),active:false}];
     const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
-    return (<>
-      {/* Desktop top nav - admin only */}
-      <div className="admin-top-nav" style={{display:"none",background:CARD,borderBottom:`1px solid ${BDR}`,padding:"0 24px",alignItems:"center",gap:4,position:"sticky",top:0,zIndex:20}}>
-        <div style={{display:"flex",alignItems:"center",gap:12,marginRight:"auto"}}>
-          <img src={LOGO} alt="SRSA" style={{height:36,width:"auto"}}/>
+    if (isAdmin && isDesktop) return (
+      <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"0 24px",display:"flex",alignItems:"center",gap:4,position:"sticky",top:0,zIndex:20,order:-1}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginRight:"auto",padding:"10px 0"}}>
+          <img src={LOGO} alt="SRSA" style={{height:38,width:"auto"}}/>
           <div style={{fontFamily:FF,fontSize:11,color:Y,letterSpacing:2}}>ADMINISTRATOR</div>
         </div>
         {navItems.map(({label,Icon,action,active}) => (
           <button key={label} onClick={action}
-            style={{display:"flex",alignItems:"center",gap:6,background:active?CARD2:"none",border:`1px solid ${active?BDR2:"transparent"}`,borderRadius:8,padding:"8px 14px",cursor:"pointer",color:active?Y:MUTED}}>
+            style={{display:"flex",alignItems:"center",gap:6,background:active?CARD2:"transparent",border:`1px solid ${active?BDR2:"transparent"}`,borderRadius:8,padding:"8px 16px",cursor:"pointer"}}>
             <Icon size={15} color={active?Y:MUTED}/>
             <span style={{fontFamily:FF,fontSize:12,fontWeight:700,letterSpacing:.5,color:active?Y:MUTED}}>{label}</span>
           </button>
         ))}
       </div>
-      {/* Mobile bottom nav - hidden on desktop via CSS */}
-      <div className="admin-bottom-nav" style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex"}}>
+    );
+    return (
+      <div style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex"}}>
         {navItems.map(({label,Icon,action,active}) => (
           <button key={label} onClick={action} style={BtnStyle(active)}>
             <Icon size={20} color={active?Y:MUTED}/>
@@ -746,7 +750,7 @@ export default function App() {
           </button>
         ))}
       </div>
-    </>);
+    );
   };
 
 
@@ -818,7 +822,7 @@ export default function App() {
               <div key={t.id} onClick={()=>go("task",{task:t.id})} style={{background:CARD,borderRadius:10,padding:"12px 14px",marginBottom:7,border:`1px solid ${BDR}`,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontFamily:MONO,fontSize:10,color:MUTED,marginBottom:3}}>{t.id}</div>
+                    {/^\d+\.\d+$/.test(t.id||"")&&<div style={{fontFamily:MONO,fontSize:10,color:MUTED,marginBottom:3}}>{t.id}</div>}
                     <div style={{fontSize:13,fontWeight:600,color:TXT,lineHeight:1.3}}>{t.desc}</div>
                     <div style={{display:"flex",gap:10,marginTop:6}}>
                       {ph.length>0 && <span style={{fontSize:11,color:Y,display:"flex",alignItems:"center",gap:3}}><Camera size={10}/>{ph.length} photo{ph.length>1?"s":""}</span>}
@@ -900,8 +904,7 @@ export default function App() {
   // ADMINISTRATOR VIEWS
   const AdminJobsView = () => (
     <div>
-      {/* Mobile header - hidden on desktop since top nav handles it */}
-      <div className="admin-mobile-header" style={{background:CARD,padding:"20px 18px 16px",borderBottom:`1px solid ${BDR}`}}>
+      {!isDesktop && <div style={{background:CARD,padding:"20px 18px 16px",borderBottom:`1px solid ${BDR}`}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div>
             <div style={{borderRadius:10,padding:"8px 12px",maxWidth:160,marginBottom:8}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
@@ -912,17 +915,15 @@ export default function App() {
             <Plus size={14} color={BG}/><span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:BG}}>NEW JOB</span>
           </button>
         </div>
-      </div>
-      {/* Desktop subheader */}
-      <div className="admin-desktop-subheader" style={{display:"none",padding:"20px 24px 12px",borderBottom:`1px solid ${BDR}`,justifyContent:"space-between",alignItems:"center"}}>
+      </div>}
+      {isDesktop && <div style={{padding:"20px 24px 12px",borderBottom:`1px solid ${BDR}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>ACTIVE JOBS</div>
         <button onClick={()=>{setEditJob(null);setJForm({client:"",serial:"",make:"John Deere",model:"",started:today()});setShowJob(true);}}
           style={{display:"flex",alignItems:"center",gap:6,background:Y,border:"none",borderRadius:8,padding:"10px 18px",cursor:"pointer"}}>
           <Plus size={15} color={BG}/><span style={{fontFamily:FF,fontSize:13,fontWeight:800,color:BG}}>NEW JOB</span>
         </button>
-      </div>
-      <div style={{padding:"16px 14px"}} className="admin-content">
-        <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2,marginBottom:12}} className="admin-hide-desktop">ACTIVE JOBS</div>
+      </div>}
+      <div style={{padding: isDesktop?"16px 24px":"16px 14px"}}>
         <div className="admin-grid-2">
         {jobs.map(j => {
           const o = jStats(j.id);
@@ -990,8 +991,8 @@ export default function App() {
               </div>
               <Bar v={o.actual} max={o.est} h={6}/>
             </div>
-            <div style={{padding:"12px 14px"}} className="admin-content">
-              <div className="admin-section-grid">
+            <div style={{padding: isDesktop?"12px 24px":"12px 14px"}}>
+              <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(3,1fr)":"1fr",gap:10}}>
               {SECTIONS.map(sec => {
                 const st = sStats(selJob, sec.id);
                 const over = st.actual>st.est&&st.est>0;
@@ -1019,7 +1020,7 @@ export default function App() {
                   </div>
                 );
               })}
-              </div>{/* end admin-section-grid */}
+              </div>
               <button onClick={()=>setConfirmDel(selJob)} style={{width:"100%",marginTop:8,background:"rgba(255,76,76,.08)",border:"1px solid rgba(255,76,76,.25)",borderRadius:10,padding:14,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:RED}}>
                 DELETE THIS JOB
               </button>
@@ -1114,7 +1115,7 @@ export default function App() {
             <div style={{display:"flex",justifyContent:"space-between",gap:10}}>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{display:"flex",gap:5,alignItems:"center",marginBottom:3,flexWrap:"wrap"}}>
-                  {t.id&&<span style={{fontFamily:MONO,fontSize:10,color:MUTED}}>{t.id}</span>}
+                  {t.id&&/^\d+\.\d+$/.test(t.id)&&<span style={{fontFamily:MONO,fontSize:10,color:MUTED}}>{t.id}</span>}
 
                   {t.opt&&<Chip label={excl?"EXCL":"OPT"} col={excl?MUTED:Y} bg={excl?BDR2:"rgba(232,176,0,.12)"}/>}
                   <StatusChip jid={selJob} tid={t.id}/>
@@ -1157,7 +1158,7 @@ export default function App() {
           </div>
           <Bar v={st.actual} max={st.est} h={5}/>
         </div>
-        <div style={{padding:"12px 14px"}} className="admin-content">
+        <div style={{padding: isDesktop?"12px 24px":"12px 14px"}}>
           {builtIn.map(t=><TaskCard key={t.id} t={t}/>)}
           {ctTop.map(t=><TaskCard key={t.id} t={t}/>)}
           <button onClick={()=>{setCtParentId(null);setCtForm({desc:"",est:"",cost:"",opt:false});setShowCtModal(true);}}
@@ -1332,14 +1333,14 @@ export default function App() {
   const isAdmin = mode==="admin";
 
   return (
-    <div style={{background:BG,minHeight:"100dvh",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column",alignItems:"center"}}>
+    <div style={{background:BG,minHeight:"100dvh",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-start"}}>
       <style>{`
         .app-shell { width:100%; max-width:480px; display:flex; flex-direction:column; min-height:100dvh; position:relative; }
         @media(min-width:900px){
           .app-shell { max-width:420px; box-shadow:0 0 60px rgba(0,0,0,.5); border-left:1px solid #272A35; border-right:1px solid #272A35; }
         }
       `}</style>
-      <div className={`app-shell${mode==="admin"?" admin":""}`}>
+      <div style={{width:"100%",maxWidth: isAdmin&&isDesktop?"1100px":"480px",display:"flex",flexDirection:"column",minHeight:"100dvh",boxShadow: isDesktop?"0 0 60px rgba(0,0,0,.5)":"none",borderLeft: isDesktop?`1px solid ${BDR}`:"none",borderRight: isDesktop?`1px solid ${BDR}`:"none"}}>
       <div style={{flex:1,overflowY:"auto"}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
