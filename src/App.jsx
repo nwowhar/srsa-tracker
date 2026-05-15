@@ -388,7 +388,7 @@ export default function App() {
     return <div style={{background:BDR2,borderRadius:h,height:h,overflow:"hidden"}}><div style={{width:`${pct}%`,height:"100%",background:v>max&&max>0?RED:Y,borderRadius:h,transition:"width .4s"}}/></div>;
   };
   const TopBar = ({title, sub, action}) => (
-    <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"14px 16px",position:"sticky",top:0,zIndex:10}}>
+    <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"14px 16px",position:"sticky",top:0,zIndex:10}} className={isAdmin?"admin-sub-header":""}>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
         <button onClick={back} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
           <ChevronLeft size={18} color={TXT}/>
@@ -698,30 +698,39 @@ export default function App() {
     );
   };
 
-  const BottomNav = () => (
-    <div style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex"}}>
-      {mode==="admin" ? (<>
-        <button onClick={goHome} style={{flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-          <Home size={20} color={view==="jobs"?Y:MUTED}/><span style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:1,color:view==="jobs"?Y:MUTED}}>JOBS</span>
-        </button>
-        <button onClick={()=>go("dashboard")} style={{flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-          <BarChart3 size={20} color={view==="dashboard"?Y:MUTED}/><span style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:1,color:view==="dashboard"?Y:MUTED}}>DASHBOARD</span>
-        </button>
-        <button onClick={()=>setMode("select")} style={{flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-          <LogOut size={20} color={MUTED}/><span style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:1,color:MUTED}}>SWITCH</span>
-        </button>
-      </>) : (<>
-        <button onClick={goHome} style={{flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-          <Home size={20} color={view==="jobs"?Y:MUTED}/><span style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:1,color:view==="jobs"?Y:MUTED}}>JOBS</span>
-        </button>
-        <button onClick={()=>setMode("select")} style={{flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-          <Lock size={20} color={MUTED}/><span style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:1,color:MUTED}}>SWITCH</span>
-        </button>
-      </>)}
-    </div>
-  );
+  const BottomNav = () => {
+    const navItems = mode==="admin"
+      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"SWITCH",Icon:LogOut,action:()=>setMode("select"),active:false}]
+      : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"SWITCH",Icon:Lock,action:()=>setMode("select"),active:false}];
+    const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
+    return (<>
+      {/* Desktop top nav - admin only */}
+      <div className="admin-top-nav" style={{display:"none",background:CARD,borderBottom:`1px solid ${BDR}`,padding:"0 24px",alignItems:"center",gap:4,position:"sticky",top:0,zIndex:20}}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginRight:"auto"}}>
+          <img src={LOGO} alt="SRSA" style={{height:36,width:"auto"}}/>
+          <div style={{fontFamily:FF,fontSize:11,color:Y,letterSpacing:2}}>ADMINISTRATOR</div>
+        </div>
+        {navItems.map(({label,Icon,action,active}) => (
+          <button key={label} onClick={action}
+            style={{display:"flex",alignItems:"center",gap:6,background:active?CARD2:"none",border:`1px solid ${active?BDR2:"transparent"}`,borderRadius:8,padding:"8px 14px",cursor:"pointer",color:active?Y:MUTED}}>
+            <Icon size={15} color={active?Y:MUTED}/>
+            <span style={{fontFamily:FF,fontSize:12,fontWeight:700,letterSpacing:.5,color:active?Y:MUTED}}>{label}</span>
+          </button>
+        ))}
+      </div>
+      {/* Mobile bottom nav */}
+      <div className="admin-bottom-nav" style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex"}}>
+        {navItems.map(({label,Icon,action,active}) => (
+          <button key={label} onClick={action} style={BtnStyle(active)}>
+            <Icon size={20} color={active?Y:MUTED}/>
+            <span style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:1,color:active?Y:MUTED}}>{label}</span>
+          </button>
+        ))}
+      </div>
+    </>);
+  };
 
-  // TECHNICIAN VIEWS
+
   const TechJobsView = () => (
     <div>
       <div style={{background:CARD,padding:"24px 18px 18px",borderBottom:`1px solid ${BDR}`}}>
@@ -889,6 +898,7 @@ export default function App() {
       </div>
       <div style={{padding:"16px 14px"}}>
         <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2,marginBottom:12}}>ACTIVE JOBS</div>
+        <div className="admin-grid-2">
         {jobs.map(j => {
           const o = jStats(j.id);
           const pct = o.est>0?((o.actual/o.est)*100).toFixed(0):0;
@@ -954,7 +964,8 @@ export default function App() {
               </div>
               <Bar v={o.actual} max={o.est} h={6}/>
             </div>
-            <div style={{padding:"12px 14px"}}>
+            <div style={{padding:"12px 14px"}} className="admin-content">
+              <div className="admin-section-grid">
               {SECTIONS.map(sec => {
                 const st = sStats(selJob, sec.id);
                 const over = st.actual>st.est&&st.est>0;
@@ -982,6 +993,7 @@ export default function App() {
                   </div>
                 );
               })}
+              </div>{/* end admin-section-grid */}
               <button onClick={()=>setConfirmDel(selJob)} style={{width:"100%",marginTop:8,background:"rgba(255,76,76,.08)",border:"1px solid rgba(255,76,76,.25)",borderRadius:10,padding:14,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:RED}}>
                 DELETE THIS JOB
               </button>
@@ -1119,7 +1131,7 @@ export default function App() {
           </div>
           <Bar v={st.actual} max={st.est} h={5}/>
         </div>
-        <div style={{padding:"12px 14px"}}>
+        <div style={{padding:"12px 14px"}} className="admin-content">
           {builtIn.map(t=><TaskCard key={t.id} t={t}/>)}
           {ctTop.map(t=><TaskCard key={t.id} t={t}/>)}
           <button onClick={()=>{setCtParentId(null);setCtForm({desc:"",est:"",cost:"",opt:false});setShowCtModal(true);}}
@@ -1301,7 +1313,7 @@ export default function App() {
           .app-shell { max-width:420px; box-shadow:0 0 60px rgba(0,0,0,.5); border-left:1px solid #272A35; border-right:1px solid #272A35; }
         }
       `}</style>
-      <div className="app-shell">
+      <div className={`app-shell${mode==="admin"?" admin":""}`}>
       <div style={{flex:1,overflowY:"auto"}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
