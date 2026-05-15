@@ -777,7 +777,9 @@ export default function App() {
 
   const TechSectionView = () => {
     const sec = SECTIONS.find(s => s.id===selSec);
-    const tasks = TASKS.filter(t => t.sId===selSec && isIn(selJob,t));
+    const builtIn = TASKS.filter(t => t.sId===selSec && isIn(selJob,t));
+    const custom  = (customTasks[selJob]||[]).filter(t => t.sId===selSec);
+    const tasks   = [...builtIn, ...custom];
     return (
       <div>
         <TopBar title={sec?.name} sub={`${tasks.length} tasks`}/>
