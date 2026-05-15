@@ -188,7 +188,8 @@ export default function App() {
       snap.docs.forEach(d => {
         const data = d.data();
         if (!ct[data.jobId]) ct[data.jobId] = [];
-        ct[data.jobId].push({id:d.id, ...data});
+        // Use the stored numeric id (e.g. "8.06") if present, else fall back to Firestore doc id
+        ct[data.jobId].push({...data, id: data.id || d.id});
       });
       setCustomTasks(ct);
     }));
@@ -736,7 +737,7 @@ export default function App() {
           </button>
         ))}
       </div>
-      {/* Mobile bottom nav */}
+      {/* Mobile bottom nav - hidden on desktop via CSS */}
       <div className="admin-bottom-nav" style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex"}}>
         {navItems.map(({label,Icon,action,active}) => (
           <button key={label} onClick={action} style={BtnStyle(active)}>
@@ -899,29 +900,35 @@ export default function App() {
   // ADMINISTRATOR VIEWS
   const AdminJobsView = () => (
     <div>
-      <div style={{background:CARD,padding:"24px 18px 18px",borderBottom:`1px solid ${BDR}`}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+      {/* Mobile header - hidden on desktop since top nav handles it */}
+      <div className="admin-mobile-header" style={{background:CARD,padding:"20px 18px 16px",borderBottom:`1px solid ${BDR}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div>
-            <div style={{borderRadius:10,padding:"8px 12px",maxWidth:160,marginBottom:12}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
+            <div style={{borderRadius:10,padding:"8px 12px",maxWidth:160,marginBottom:8}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
             <div style={{fontFamily:FF,fontSize:11,color:Y,letterSpacing:2}}>ADMINISTRATOR VIEW</div>
           </div>
-          <div style={{display:"flex",gap:8,alignItems:"center",marginTop:4}}>
-
-            <button onClick={()=>{setEditJob(null);setJForm({client:"",serial:"",make:"John Deere",model:"",started:today()});setShowJob(true);}}
-              style={{display:"flex",alignItems:"center",gap:5,background:Y,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>
-              <Plus size={14} color={BG}/><span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:BG}}>NEW JOB</span>
-            </button>
-          </div>
+          <button onClick={()=>{setEditJob(null);setJForm({client:"",serial:"",make:"John Deere",model:"",started:today()});setShowJob(true);}}
+            style={{display:"flex",alignItems:"center",gap:5,background:Y,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>
+            <Plus size={14} color={BG}/><span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:BG}}>NEW JOB</span>
+          </button>
         </div>
       </div>
-      <div style={{padding:"16px 14px"}}>
-        <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2,marginBottom:12}}>ACTIVE JOBS</div>
+      {/* Desktop subheader */}
+      <div className="admin-desktop-subheader" style={{display:"none",padding:"20px 24px 12px",borderBottom:`1px solid ${BDR}`,justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>ACTIVE JOBS</div>
+        <button onClick={()=>{setEditJob(null);setJForm({client:"",serial:"",make:"John Deere",model:"",started:today()});setShowJob(true);}}
+          style={{display:"flex",alignItems:"center",gap:6,background:Y,border:"none",borderRadius:8,padding:"10px 18px",cursor:"pointer"}}>
+          <Plus size={15} color={BG}/><span style={{fontFamily:FF,fontSize:13,fontWeight:800,color:BG}}>NEW JOB</span>
+        </button>
+      </div>
+      <div style={{padding:"16px 14px"}} className="admin-content">
+        <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2,marginBottom:12}} className="admin-hide-desktop">ACTIVE JOBS</div>
         <div className="admin-grid-2">
         {jobs.map(j => {
           const o = jStats(j.id);
           const pct = o.est>0?((o.actual/o.est)*100).toFixed(0):0;
           return (
-            <div key={j.id} onClick={()=>go("job",{job:j.id})} style={{background:CARD,borderRadius:14,border:`1px solid ${BDR}`,overflow:"hidden",cursor:"pointer",marginBottom:12}}>
+            <div key={j.id} onClick={()=>go("job",{job:j.id})} style={{background:CARD,borderRadius:14,border:`1px solid ${BDR}`,overflow:"hidden",cursor:"pointer"}}>
               <div style={{height:4,background:`linear-gradient(90deg,${Y},${YD})`}}/>
               <div style={{padding:16}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
