@@ -227,8 +227,10 @@ export default function App() {
   const [jForm, setJForm]         = useState({client:"",serial:"",make:"John Deere",model:"",started:today()});
   const [hForm, setHForm]         = useState({hours:"",notes:"",date:today(),worker:""});
   const [lightbox, setLightbox]   = useState(null);
+  const [lightboxList, setLightboxList] = useState([]);
   const [confirmDel, setConfirmDel] = useState(null);
   const fileRef = useRef(null);
+  const openLightbox = (photos, photo) => { setLightboxList(photos); setLightbox(photo); };
   const taskMap = useMemo(() => Object.fromEntries(TASKS.map(t => [t.id, t])), []);
 
   const getExcl = jid => exclMap[jid] || new Set();
@@ -559,14 +561,30 @@ export default function App() {
     );
   };
 
-  const Lightbox = () => (
-    <div onClick={()=>setLightbox(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.96)",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
-      <button onClick={()=>setLightbox(null)} style={{position:"absolute",top:18,right:18,background:CARD,border:"none",borderRadius:10,padding:8,cursor:"pointer"}}><X size={20} color={TXT}/></button>
-      <img src={lightbox.url} alt={lightbox.name} style={{maxWidth:"95%",maxHeight:"75vh",objectFit:"contain",borderRadius:6}}/>
-      <div style={{color:MUTED,fontSize:12,marginTop:12}}>{lightbox.name}</div>
-      <div style={{fontFamily:MONO,color:BDR2,fontSize:10,marginTop:4}}>{lightbox.ts}</div>
-    </div>
-  );
+  const Lightbox = () => {
+    const idx = lightboxList.findIndex(p => p.id === lightbox?.id);
+    const total = lightboxList.length;
+    const goPrev = (e) => { e.stopPropagation(); if(idx>0) setLightbox(lightboxList[idx-1]); };
+    const goNext = (e) => { e.stopPropagation(); if(idx<total-1) setLightbox(lightboxList[idx+1]); };
+    const handleKey = (e) => { if(e.key==="ArrowLeft") goPrev(e); if(e.key==="ArrowRight") goNext(e); if(e.key==="Escape") setLightbox(null); };
+    return (
+      <div onClick={()=>setLightbox(null)} onKeyDown={handleKey} tabIndex={0}
+        style={{position:"fixed",inset:0,background:"rgba(0,0,0,.96)",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",outline:"none"}}
+        ref={el=>el?.focus()}>
+        <button onClick={()=>setLightbox(null)} style={{position:"absolute",top:18,right:18,background:CARD,border:"none",borderRadius:10,padding:8,cursor:"pointer"}}><X size={20} color={TXT}/></button>
+        {total>1&&<div style={{position:"absolute",top:18,left:"50%",transform:"translateX(-50%)",fontFamily:MONO,fontSize:12,color:MUTED}}>{idx+1} / {total}</div>}
+        {idx>0&&(
+          <button onClick={goPrev} style={{position:"absolute",left:16,top:"50%",transform:"translateY(-50%)",background:"rgba(0,0,0,.6)",border:`1px solid ${BDR2}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",fontSize:22,color:TXT,lineHeight:1}}>‹</button>
+        )}
+        {idx<total-1&&(
+          <button onClick={goNext} style={{position:"absolute",right:16,top:"50%",transform:"translateY(-50%)",background:"rgba(0,0,0,.6)",border:`1px solid ${BDR2}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",fontSize:22,color:TXT,lineHeight:1}}>›</button>
+        )}
+        <img src={lightbox.url} alt={lightbox.name} style={{maxWidth:"85%",maxHeight:"75vh",objectFit:"contain",borderRadius:6}}/>
+        <div style={{color:MUTED,fontSize:12,marginTop:12}}>{lightbox.name}</div>
+        <div style={{fontFamily:MONO,color:BDR2,fontSize:10,marginTop:4}}>{lightbox.ts}</div>
+      </div>
+    );
+  };
 
   const ConfirmDel = () => (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:24}} onClick={e=>e.target===e.currentTarget&&setConfirmDel(null)}>
@@ -850,7 +868,7 @@ export default function App() {
           ) : (
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7,marginBottom:16}}>
               {ph.map(p => (
-                <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer"}} onClick={()=>setLightbox(p)}>
+                <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer"}} onClick={()=>openLightbox(ph,p)}>
                   <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
                   <div style={{position:"absolute",inset:0,background:"linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.6))"}}/>
                   <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
@@ -1230,7 +1248,7 @@ export default function App() {
           ):(
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
               {ph.map(p=>(
-                <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer"}} onClick={()=>setLightbox(p)}>
+                <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer"}} onClick={()=>openLightbox(ph,p)}>
                   <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
                   <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
                     <X size={9} color="white"/>
