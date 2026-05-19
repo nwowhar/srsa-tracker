@@ -338,6 +338,10 @@ export default function App() {
     setShowAdd(false); setHForm({hours:"",notes:"",date:today(),worker:""});
   };
   const delEntry = async (jid, tid, id) => { await deleteDoc(doc(db,"entries",id)); };
+  const updateEntry = async (id, data) => {
+    await setDoc(doc(db,"entries",id), data, {merge:true});
+    setEditEntry(null);
+  };
   const toggleExcl = async (jid, tid) => {
     const excId = `${jid}_${tid}`;
     if (getExcl(jid).has(tid)) {
@@ -520,6 +524,72 @@ export default function App() {
             style={{width:"100%",background:Y,border:"none",borderRadius:10,padding:15,cursor:"pointer",fontFamily:FF,fontSize:16,fontWeight:800,color:BG,letterSpacing:1,marginTop:4}}>
             {editJob?"SAVE CHANGES":"CREATE JOB"}
           </button>
+        </div>
+      </div>
+    );
+  };
+
+  const EditEntryModal = () => {
+    if (!editEntry) return null;
+    const dateRef = useRef(); const hoursRef = useRef();
+    const workerRef = useRef(); const notesRef = useRef(); const rateRef = useRef();
+    const jobRate = jobs.find(j=>j.id===selJob)?.lockedRate || 145;
+    const handleSave = async () => {
+      const h = parseFloat(hoursRef.current?.value);
+      if (!h || h <= 0) return;
+      await updateEntry(editEntry.id, {
+        jobId: editEntry.jobId,
+        taskId: editEntry.taskId,
+        hours: h,
+        rate: parseFloat(rateRef.current?.value) || jobRate,
+        notes: notesRef.current?.value || "",
+        date: dateRef.current?.value || today(),
+        worker: workerRef.current?.value || "Alan"
+      });
+    };
+    return (
+      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:100,display:"flex",alignItems:"flex-end"}} onClick={e=>e.target===e.currentTarget&&setEditEntry(null)}>
+        <div style={{background:CARD,borderRadius:"18px 18px 0 0",padding:"22px 18px 32px",width:"100%",border:`1px solid ${BDR}`,boxSizing:"border-box"}}>
+          <div style={{width:36,height:4,background:BDR2,borderRadius:2,margin:"0 auto 20px"}}/>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+            <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>EDIT ENTRY</div>
+            <button onClick={()=>setEditEntry(null)} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer"}}><X size={16} color={MUTED}/></button>
+          </div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>DATE</div>
+            <input ref={dateRef} type="date" defaultValue={editEntry.date} style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
+          </div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WORKER</div>
+            <input ref={workerRef} type="text" defaultValue={editEntry.worker} style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            <div>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>HOURS</div>
+              <input ref={hoursRef} type="number" step="0.5" min="0" defaultValue={editEntry.hours} style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:20,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+            </div>
+            <div>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>RATE +GST</div>
+              <div style={{display:"flex",alignItems:"center",gap:4}}>
+                <span style={{fontFamily:MONO,fontSize:16,color:Y}}>$</span>
+                <input ref={rateRef} type="number" step="5" min="1" defaultValue={editEntry.rate||jobRate} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 10px",color:TXT,fontSize:16,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+              </div>
+            </div>
+          </div>
+          <div style={{marginBottom:20}}>
+            <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>NOTES (optional)</div>
+            <input ref={notesRef} type="text" defaultValue={editEntry.notes} placeholder="e.g. First stage done..." style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            <button onClick={()=>{ if(window.confirm("Delete this entry?")) delEntry(editEntry.jobId,editEntry.taskId,editEntry.id).then(()=>setEditEntry(null)); }}
+              style={{background:"rgba(255,76,76,.12)",border:"1px solid rgba(255,76,76,.3)",borderRadius:10,padding:14,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:RED}}>
+              DELETE
+            </button>
+            <button onClick={handleSave}
+              style={{background:Y,border:"none",borderRadius:10,padding:14,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG}}>
+              SAVE CHANGES
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1270,14 +1340,15 @@ export default function App() {
               <div style={{fontSize:12,color:MUTED}}>No hours logged yet</div>
             </div>
           ):ents.map(e=>(
-            <div key={e.id} style={{background:CARD,borderRadius:9,padding:"11px 13px",marginBottom:7,border:`1px solid ${BDR}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div>
+            <div key={e.id} onClick={()=>setEditEntry(e)}
+              style={{background:CARD,borderRadius:9,padding:"11px 13px",marginBottom:7,border:`1px solid ${BDR}`,display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
+              <div style={{flex:1}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:2}}><span style={{fontFamily:MONO,fontSize:17,color:Y}}>{e.hours}h</span><span style={{fontSize:12,color:MUTED}}>{e.date}</span></div>
                 <div style={{fontSize:11,color:MUTED,marginBottom:2}}>${e.rate||145}/hr · ${((e.rate||145)*e.hours*1.1).toFixed(2)} inc GST</div>
                 {e.notes&&<div style={{fontSize:12,color:MUTED,marginBottom:2}}>{e.notes}</div>}
                 <div style={{fontFamily:MONO,fontSize:10,color:BDR2}}>{e.worker}</div>
               </div>
-              <button onClick={ev=>{ev.stopPropagation();delEntry(selJob,selTask,e.id);}} style={{background:"none",border:"none",cursor:"pointer",padding:6,opacity:.6}}><Trash2 size={13} color={RED}/></button>
+              <div style={{fontFamily:FF,fontSize:11,color:MUTED,marginLeft:8}}>EDIT →</div>
             </div>
           ))}
         </div>
@@ -1433,6 +1504,7 @@ export default function App() {
       </div>
       <BottomNav/>
       {showAdd    && <AddModal/>}
+      {editEntry  && <EditEntryModal/>}
       {showCtModal  && <CustomTaskModal/>}
       {showRateModal && <RateModal/>}
       {showJob    && <JobForm/>}
