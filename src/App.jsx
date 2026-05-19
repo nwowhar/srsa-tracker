@@ -930,9 +930,7 @@ export default function App() {
                       ? <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
                           {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
                         </div>
-                      : <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
-                          <X size={9} color="white"/>
-                        </button>
+
                     }
                   </div>
                 );
@@ -1336,9 +1334,7 @@ export default function App() {
                       ? <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
                           {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
                         </div>
-                      : <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
-                          <X size={9} color="white"/>
-                        </button>
+
                     }
                   </div>
                 );
