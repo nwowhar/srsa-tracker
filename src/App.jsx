@@ -231,8 +231,11 @@ export default function App() {
   const [editJob, setEditJob]     = useState(null);
   const [jForm, setJForm]         = useState({client:"",serial:"",make:"John Deere",model:"",started:today()});
   const [hForm, setHForm]         = useState({hours:"",notes:"",date:today(),worker:""});
-  const [lightbox, setLightbox]   = useState(null);
+  const [lightbox, setLightbox]       = useState(null);
   const [lightboxList, setLightboxList] = useState([]);
+  const [selectedPhotos, setSelectedPhotos] = useState(new Set());
+  const [selectMode, setSelectMode]   = useState(false);
+  const [confirmPhoDel, setConfirmPhoDel] = useState(false);
   const [confirmDel, setConfirmDel] = useState(null);
   const fileRef = useRef(null);
   const openLightbox = (photos, photo) => { setLightboxList(photos); setLightbox(photo); };
@@ -362,6 +365,20 @@ export default function App() {
     if (ph?.storagePath) { try { await deleteObject(ref(storage, ph.storagePath)); } catch(e) {} }
     await deleteDoc(doc(db,"photos",id));
   };
+  const delSelectedPhotos = async (jid, tid) => {
+    const toDelete = getPh(jid,tid).filter(p => selectedPhotos.has(p.id));
+    await Promise.all(toDelete.map(async p => {
+      if (p.storagePath) { try { await deleteObject(ref(storage, p.storagePath)); } catch(e) {} }
+      await deleteDoc(doc(db,"photos",p.id));
+    }));
+    setSelectedPhotos(new Set());
+    setSelectMode(false);
+    setConfirmPhoDel(false);
+  };
+  const togglePhotoSelect = (id) => setSelectedPhotos(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+  const exitSelectMode = () => { setSelectMode(false); setSelectedPhotos(new Set()); };
   const tnDebounce = useRef({});
   const getTN  = (jid, tid) => techNotes[eKey(jid,tid)] || "";
   const saveTN = (jid, tid, val) => {
@@ -569,27 +586,45 @@ export default function App() {
   const Lightbox = () => {
     const idx = lightboxList.findIndex(p => p.id === lightbox?.id);
     const total = lightboxList.length;
-    const goPrev = (e) => { e.stopPropagation(); if(idx>0) setLightbox(lightboxList[idx-1]); };
-    const goNext = (e) => { e.stopPropagation(); if(idx<total-1) setLightbox(lightboxList[idx+1]); };
-    const handleKey = (e) => { if(e.key==="ArrowLeft") goPrev(e); if(e.key==="ArrowRight") goNext(e); if(e.key==="Escape") setLightbox(null); };
+    const goPrev = (e) => { e?.stopPropagation(); if(idx>0) setLightbox(lightboxList[idx-1]); };
+    const goNext = (e) => { e?.stopPropagation(); if(idx<total-1) setLightbox(lightboxList[idx+1]); };
+    const handleKey = (e) => { if(e.key==="ArrowLeft") goPrev(); if(e.key==="ArrowRight") goNext(); if(e.key==="Escape") setLightbox(null); };
+    const touchStart = useRef(null);
+    const onTouchStart = (e) => { touchStart.current = e.touches[0].clientX; };
+    const onTouchEnd = (e) => {
+      if (touchStart.current === null) return;
+      const diff = touchStart.current - e.changedTouches[0].clientX;
+      if (Math.abs(diff) > 50) { diff > 0 ? goNext() : goPrev(); }
+      touchStart.current = null;
+    };
     return (
-      <div onClick={()=>setLightbox(null)} onKeyDown={handleKey} tabIndex={0}
-        style={{position:"fixed",inset:0,background:"rgba(0,0,0,.96)",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",outline:"none"}}
-        ref={el=>el?.focus()}>
-        <button onClick={()=>setLightbox(null)} style={{position:"absolute",top:18,right:18,background:CARD,border:"none",borderRadius:10,padding:8,cursor:"pointer"}}><X size={20} color={TXT}/></button>
-        {total>1&&<div style={{position:"absolute",top:18,left:"50%",transform:"translateX(-50%)",fontFamily:MONO,fontSize:12,color:MUTED}}>{idx+1} / {total}</div>}
-        {idx>0&&(
-          <button onClick={goPrev} style={{position:"absolute",left:16,top:"50%",transform:"translateY(-50%)",background:"rgba(0,0,0,.6)",border:`1px solid ${BDR2}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",fontSize:22,color:TXT,lineHeight:1}}>‹</button>
-        )}
-        {idx<total-1&&(
-          <button onClick={goNext} style={{position:"absolute",right:16,top:"50%",transform:"translateY(-50%)",background:"rgba(0,0,0,.6)",border:`1px solid ${BDR2}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",fontSize:22,color:TXT,lineHeight:1}}>›</button>
-        )}
-        <img src={lightbox.url} alt={lightbox.name} style={{maxWidth:"85%",maxHeight:"75vh",objectFit:"contain",borderRadius:6}}/>
-        <div style={{color:MUTED,fontSize:12,marginTop:12}}>{lightbox.name}</div>
-        <div style={{fontFamily:MONO,color:BDR2,fontSize:10,marginTop:4}}>{lightbox.ts}</div>
+      <div onKeyDown={handleKey} tabIndex={0} ref={el=>el?.focus()}
+        onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}
+        style={{position:"fixed",inset:0,background:"rgba(0,0,0,.96)",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",outline:"none"}}>
+        <button onClick={()=>setLightbox(null)} style={{position:"absolute",top:18,right:18,background:CARD,border:"none",borderRadius:10,padding:8,cursor:"pointer",zIndex:1}}><X size={20} color={TXT}/></button>
+        {total>1&&<div style={{position:"absolute",top:18,left:"50%",transform:"translateX(-50%)",fontFamily:MONO,fontSize:12,color:MUTED,pointerEvents:"none"}}>{idx+1} / {total}</div>}
+        {idx>0&&<button onClick={goPrev} style={{position:"absolute",left:16,top:"50%",transform:"translateY(-50%)",background:"rgba(0,0,0,.6)",border:`1px solid ${BDR2}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",fontSize:22,color:TXT,lineHeight:1}}>‹</button>}
+        {idx<total-1&&<button onClick={goNext} style={{position:"absolute",right:16,top:"50%",transform:"translateY(-50%)",background:"rgba(0,0,0,.6)",border:`1px solid ${BDR2}`,borderRadius:12,padding:"12px 16px",cursor:"pointer",fontSize:22,color:TXT,lineHeight:1}}>›</button>}
+        <div onClick={()=>setLightbox(null)} style={{position:"absolute",inset:0}}/>
+        <img src={lightbox.url} alt={lightbox.name} style={{maxWidth:"85%",maxHeight:"75vh",objectFit:"contain",borderRadius:6,position:"relative",pointerEvents:"none"}}/>
+        <div style={{color:MUTED,fontSize:12,marginTop:12,position:"relative"}}>{lightbox.name}</div>
+        <div style={{fontFamily:MONO,color:BDR2,fontSize:10,marginTop:4,position:"relative"}}>{lightbox.ts}</div>
       </div>
     );
   };
+
+  const ConfirmPhotoDel = ({jid, tid}) => (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:150,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{background:CARD,borderRadius:16,padding:24,width:"100%",maxWidth:320,border:"1px solid rgba(255,76,76,.33)"}}>
+        <div style={{fontFamily:FF,fontSize:20,fontWeight:800,color:TXT,marginBottom:8}}>DELETE PHOTOS?</div>
+        <div style={{fontSize:13,color:MUTED,marginBottom:20}}>This will permanently delete <strong style={{color:TXT}}>{selectedPhotos.size} photo{selectedPhotos.size>1?"s":""}</strong>. This cannot be undone.</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <button onClick={()=>setConfirmPhoDel(false)} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:10,padding:13,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>CANCEL</button>
+          <button onClick={()=>delSelectedPhotos(jid,tid)} style={{background:"rgba(255,76,76,.15)",border:"1px solid rgba(255,76,76,.4)",borderRadius:10,padding:13,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:RED}}>DELETE</button>
+        </div>
+      </div>
+    </div>
+  );
 
   const ConfirmDel = () => (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:24}} onClick={e=>e.target===e.currentTarget&&setConfirmDel(null)}>
@@ -864,6 +899,18 @@ export default function App() {
           </div>
           <input ref={fileRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={onPhotos}/>
           <input ref={cameraRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
+          {ph.length>0&&(
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              {!selectMode
+                ? <button onClick={()=>setSelectMode(true)} style={{background:"none",border:`1px solid ${BDR2}`,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,color:MUTED}}>SELECT</button>
+                : <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:12,color:MUTED}}>{selectedPhotos.size} selected</span>
+                    <button onClick={exitSelectMode} style={{background:"none",border:`1px solid ${BDR2}`,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,color:MUTED}}>CANCEL</button>
+                    {selectedPhotos.size>0&&<button onClick={()=>setConfirmPhoDel(true)} style={{background:"rgba(255,76,76,.15)",border:"1px solid rgba(255,76,76,.4)",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:RED}}>DELETE ({selectedPhotos.size})</button>}
+                  </div>
+              }
+            </div>
+          )}
           {ph.length===0 ? (
             <div style={{background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:28,textAlign:"center",marginBottom:16}}>
               <Camera size={28} color={BDR2} style={{margin:"0 auto 8px",display:"block"}}/>
@@ -872,17 +919,27 @@ export default function App() {
             </div>
           ) : (
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7,marginBottom:16}}>
-              {ph.map(p => (
-                <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer"}} onClick={()=>openLightbox(ph,p)}>
-                  <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-                  <div style={{position:"absolute",inset:0,background:"linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.6))"}}/>
-                  <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
-                    <X size={9} color="white"/>
-                  </button>
-                </div>
-              ))}
+              {ph.map(p => {
+                const isSel = selectedPhotos.has(p.id);
+                return (
+                  <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer",outline:isSel?`2px solid ${Y}`:"none"}}
+                    onClick={()=>selectMode ? togglePhotoSelect(p.id) : openLightbox(ph,p)}>
+                    <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    <div style={{position:"absolute",inset:0,background:isSel?"rgba(232,176,0,.25)":"linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.6))"}}/>
+                    {selectMode
+                      ? <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                          {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
+                        </div>
+                      : <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
+                          <X size={9} color="white"/>
+                        </button>
+                    }
+                  </div>
+                );
+              })}
             </div>
           )}
+          {confirmPhoDel&&<ConfirmPhotoDel jid={selJob} tid={selTask}/>}
         </div>
 
         <div style={{padding:"0 14px 32px"}}>
@@ -1249,6 +1306,18 @@ export default function App() {
           </div>
           <input ref={fileRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={onPhotos}/>
           <input ref={adminCamRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
+          {ph.length>0&&(
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              {!selectMode
+                ? <button onClick={()=>setSelectMode(true)} style={{background:"none",border:`1px solid ${BDR2}`,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,color:MUTED}}>SELECT</button>
+                : <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:12,color:MUTED}}>{selectedPhotos.size} selected</span>
+                    <button onClick={exitSelectMode} style={{background:"none",border:`1px solid ${BDR2}`,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,color:MUTED}}>CANCEL</button>
+                    {selectedPhotos.size>0&&<button onClick={()=>setConfirmPhoDel(true)} style={{background:"rgba(255,76,76,.15)",border:"1px solid rgba(255,76,76,.4)",borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:RED}}>DELETE ({selectedPhotos.size})</button>}
+                  </div>
+              }
+            </div>
+          )}
           {ph.length===0?(
             <div style={{background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:22,textAlign:"center"}}>
               <Camera size={22} color={BDR2} style={{margin:"0 auto 6px",display:"block"}}/>
@@ -1256,16 +1325,27 @@ export default function App() {
             </div>
           ):(
             <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:7}}>
-              {ph.map(p=>(
-                <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer"}} onClick={()=>openLightbox(ph,p)}>
-                  <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
-                  <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
-                    <X size={9} color="white"/>
-                  </button>
-                </div>
-              ))}
+              {ph.map(p=>{
+                const isSel = selectedPhotos.has(p.id);
+                return (
+                  <div key={p.id} style={{position:"relative",borderRadius:8,overflow:"hidden",aspectRatio:"1",cursor:"pointer",outline:isSel?`2px solid ${Y}`:"none"}}
+                    onClick={()=>selectMode ? togglePhotoSelect(p.id) : openLightbox(ph,p)}>
+                    <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    <div style={{position:"absolute",inset:0,background:isSel?"rgba(232,176,0,.25)":"transparent"}}/>
+                    {selectMode
+                      ? <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                          {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
+                        </div>
+                      : <button onClick={ev=>{ev.stopPropagation();delPhoto(selJob,selTask,p.id);}} style={{position:"absolute",top:5,right:5,background:"rgba(0,0,0,.7)",border:"none",borderRadius:5,padding:"3px 5px",cursor:"pointer"}}>
+                          <X size={9} color="white"/>
+                        </button>
+                    }
+                  </div>
+                );
+              })}
             </div>
           )}
+          {confirmPhoDel&&<ConfirmPhotoDel jid={selJob} tid={selTask}/>}
         </div>
       </div>
     );
