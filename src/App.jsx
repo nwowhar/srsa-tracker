@@ -996,11 +996,10 @@ export default function App() {
                     onClick={()=>selectMode ? togglePhotoSelect(p.id) : openLightbox(ph,p)}>
                     <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
                     <div style={{position:"absolute",inset:0,background:isSel?"rgba(232,176,0,.25)":"linear-gradient(to bottom,transparent 50%,rgba(0,0,0,.6))"}}/>
-                    {selectMode
-                      ? <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                          {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
-                        </div>
-
+                    {selectMode&&
+                      <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
+                      </div>
                     }
                   </div>
                 );
@@ -1401,11 +1400,10 @@ export default function App() {
                     onClick={()=>selectMode ? togglePhotoSelect(p.id) : openLightbox(ph,p)}>
                     <img src={p.url} alt={p.name} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
                     <div style={{position:"absolute",inset:0,background:isSel?"rgba(232,176,0,.25)":"transparent"}}/>
-                    {selectMode
-                      ? <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                          {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
-                        </div>
-
+                    {selectMode&&
+                      <div style={{position:"absolute",top:6,right:6,width:20,height:20,borderRadius:"50%",background:isSel?Y:"rgba(0,0,0,.6)",border:`2px solid ${isSel?Y:"white"}`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                        {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
+                      </div>
                     }
                   </div>
                 );
