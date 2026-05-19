@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc } from "firebase/firestore";
@@ -121,6 +121,22 @@ const TASKS = [
 const today = () => new Date().toISOString().split("T")[0];
 const eKey = (jid, tid) => `${jid}_${tid}`;
 
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = {hasError:false,error:null}; }
+  static getDerivedStateFromError(e) { return {hasError:true,error:e}; }
+  render() {
+    if (this.state.hasError) return (
+      <div style={{minHeight:"100dvh",background:"#0C0D10",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,fontFamily:"sans-serif",color:"#F2F3F7"}}>
+        <div style={{fontSize:48,marginBottom:16}}>⚠️</div>
+        <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Something went wrong</div>
+        <div style={{fontSize:13,color:"#7A8099",marginBottom:24,textAlign:"center"}}>{this.state.error?.message||"An unexpected error occurred"}</div>
+        <button onClick={()=>window.location.reload()} style={{background:"#E8B000",border:"none",borderRadius:8,padding:"12px 24px",cursor:"pointer",fontWeight:700,color:"#0C0D10",fontSize:14}}>RELOAD APP</button>
+      </div>
+    );
+    return this.props.children;
+  }
+}
+
 export default function App() {
   const [isDesktop, setIsDesktop] = useState(window.innerWidth >= 900);
   useEffect(() => {
@@ -128,7 +144,7 @@ export default function App() {
     l.href = "https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Barlow:wght@400;500;600;700&family=DM+Mono:wght@500&display=swap";
     l.rel = "stylesheet"; document.head.appendChild(l);
     const s = document.createElement("style");
-    s.textContent = "@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}";
+    s.textContent = "@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}@keyframes spin{to{transform:rotate(360deg)}}";
     document.head.appendChild(s);
     signInAnonymously(auth).catch(e => console.warn("Auth failed:", e));
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
@@ -235,6 +251,8 @@ export default function App() {
   const [lightboxList, setLightboxList] = useState([]);
   const [selectedPhotos, setSelectedPhotos] = useState(new Set());
   const [selectMode, setSelectMode]   = useState(false);
+  const [uploading, setUploading]     = useState(false);
+  const [uploadError, setUploadError] = useState(null);
   const [confirmPhoDel, setConfirmPhoDel] = useState(false);
   const [confirmDel, setConfirmDel] = useState(null);
   const fileRef = useRef(null);
@@ -352,17 +370,26 @@ export default function App() {
   };
   const onPhotos = async e => {
     const files = Array.from(e.target.files);
-    for (const f of files) {
-      const storageRef = ref(storage, `photos/${selJob}/${selTask}/${Date.now()}_${f.name}`);
-      const snap = await uploadBytes(storageRef, f);
-      const url = await getDownloadURL(snap.ref);
-      await addDoc(collection(db,"photos"), {
-        jobId:selJob, taskId:selTask,
-        url, name:f.name, storagePath:snap.ref.fullPath,
-        ts:new Date().toLocaleString("en-AU")
-      });
+    if (!files.length) return;
+    setUploading(true); setUploadError(null);
+    try {
+      for (const f of files) {
+        const storageRef = ref(storage, `photos/${selJob}/${selTask}/${Date.now()}_${f.name}`);
+        const snap = await uploadBytes(storageRef, f);
+        const url = await getDownloadURL(snap.ref);
+        await addDoc(collection(db,"photos"), {
+          jobId:selJob, taskId:selTask,
+          url, name:f.name, storagePath:snap.ref.fullPath,
+          ts:new Date().toLocaleString("en-AU")
+        });
+      }
+    } catch(err) {
+      console.error("Upload failed:", err);
+      setUploadError("Upload failed — check your connection and try again.");
+    } finally {
+      setUploading(false);
+      e.target.value = "";
     }
-    e.target.value = "";
   };
   const delPhoto = async (jid, tid, id) => {
     const ph = getPh(jid,tid).find(p => p.id===id);
@@ -969,6 +996,8 @@ export default function App() {
           </div>
           <input ref={fileRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={onPhotos}/>
           <input ref={cameraRef} type="file" accept="image/*" multiple capture="environment" style={{display:"none"}} onChange={onPhotos}/>
+          {uploading&&<div style={{background:CARD2,borderRadius:8,padding:"10px 14px",marginBottom:10,display:"flex",alignItems:"center",gap:8}}><div style={{width:14,height:14,border:`2px solid ${Y}`,borderTopColor:"transparent",borderRadius:"50%",animation:"spin 1s linear infinite"}}/><span style={{fontSize:12,color:MUTED}}>Uploading...</span></div>}
+          {uploadError&&<div style={{background:"rgba(255,76,76,.1)",border:"1px solid rgba(255,76,76,.3)",borderRadius:8,padding:"10px 14px",marginBottom:10,fontSize:12,color:RED}}>{uploadError}</div>}
           {ph.length>0&&(
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
               {!selectMode
@@ -1478,7 +1507,7 @@ export default function App() {
   const isAdmin = mode==="admin";
 
   return (
-    <div style={{background:BG,minHeight:"100dvh",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-start"}}>
+    <ErrorBoundary><div style={{background:BG,minHeight:"100dvh",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-start"}}>
       <style>{`
         .app-shell { width:100%; max-width:480px; display:flex; flex-direction:column; min-height:100dvh; position:relative; }
         @media(min-width:900px){
@@ -1509,6 +1538,6 @@ export default function App() {
       {lightbox   && <Lightbox/>}
       {confirmDel && <ConfirmDel/>}
       </div>
-    </div>
+    </div></ErrorBoundary>
   );
 }
