@@ -146,7 +146,9 @@ export default function App() {
     const s = document.createElement("style");
     s.textContent = "@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}@keyframes spin{to{transform:rotate(360deg)}}";
     document.head.appendChild(s);
-    signInAnonymously(auth).catch(e => console.warn("Auth failed:", e));
+    signInAnonymously(auth).catch(e => {
+      // Anonymous auth not configured - app still works, writes may be restricted
+    });
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
@@ -243,6 +245,7 @@ export default function App() {
   const [ctParentId, setCtParentId]   = useState(null); // null = top-level
   const [ctForm, setCtForm]           = useState({desc:"",est:"",cost:"",opt:false});
   const [showAdd, setShowAdd]     = useState(false);
+  const [editEntry, setEditEntry]   = useState(null);
   const [showJob, setShowJob]     = useState(false);
   const [editJob, setEditJob]     = useState(null);
   const [jForm, setJForm]         = useState({client:"",serial:"",make:"John Deere",model:"",started:today()});
