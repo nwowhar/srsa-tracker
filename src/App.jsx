@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench } from "lucide-react";
+import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { getAuth, signInAnonymously } from "firebase/auth";
+import { PRICE_ITEMS } from "./priceList.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDvvwcT083aF2H5SiuSvvDyWepwpfkMQO0",
@@ -137,6 +138,364 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+
+/* ───────────────────────── HOSES FEATURE ─────────────────────────
+   Components below are defined at MODULE level (outside App) so they
+   can safely use controlled inputs — the iOS keyboard-dismiss bug only
+   affects components recreated inside App() on each render.            */
+
+const STICKER_PRICE = 20; // $ ex GST, added when an ID sticker is applied
+
+// PRICE_ITEMS row: [itemNo, desc, unit, listPriceExGST|null, category]
+const P_NO = 0, P_DESC = 1, P_UNIT = 2, P_PRICE = 3, P_CAT = 4;
+const HOSE_POOL = PRICE_ITEMS.filter(r => r[P_UNIT] === "M"); // per-metre items (hose types)
+
+const searchParts = (q, pool) => {
+  const s = q.trim().toUpperCase();
+  if (s.length < 2) return [];
+  const tokens = s.split(/\s+/);
+  const starts = [], inNo = [], inDesc = [];
+  for (const r of pool) {
+    const no = r[P_NO].toUpperCase();
+    if (no.startsWith(s)) { starts.push(r); }
+    else if (no.includes(s)) { inNo.push(r); }
+    else {
+      const hay = no + " " + r[P_DESC].toUpperCase();
+      if (tokens.every(t => hay.includes(t))) inDesc.push(r);
+    }
+    if (starts.length >= 30) break;
+  }
+  return [...starts, ...inNo, ...inDesc].slice(0, 30);
+};
+const fmt$ = v => `$${(v||0).toFixed(2)}`;
+const HChip = ({label, col, bg}) => <span style={{fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.8,background:bg,color:col,borderRadius:4,padding:"2px 7px",whiteSpace:"nowrap"}}>{label}</span>;
+
+// Search box + results dropdown. Never shows prices (worker-safe).
+// BARCODE: a Bluetooth HID scanner "types" into this input — scanning works today.
+// Camera scanning hooks in here later (set value + auto-pick on exact item-no match).
+const PartSearch = ({pool, placeholder, onPick}) => {
+  const [q, setQ] = useState("");
+  const results = useMemo(() => searchParts(q, pool), [q, pool]);
+  const exact = q.trim() && pool.find(r => r[P_NO].toUpperCase() === q.trim().toUpperCase());
+  return (
+    <div style={{position:"relative"}}>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder={placeholder}
+        autoCapitalize="characters" autoCorrect="off" spellCheck={false}
+        onKeyDown={e=>{ if(e.key==="Enter" && exact){ onPick(exact); setQ(""); } }}
+        style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none",fontFamily:MONO}}/>
+      {results.length > 0 && (
+        <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:50,background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,marginTop:4,maxHeight:260,overflowY:"auto",boxShadow:"0 8px 30px rgba(0,0,0,.6)"}}>
+          {results.map(r => (
+            <button key={r[P_NO]} onClick={()=>{ onPick(r); setQ(""); }}
+              style={{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",borderBottom:`1px solid ${BDR}`,padding:"10px 12px",cursor:"pointer"}}>
+              <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{r[P_NO]}{r[P_PRICE]===null && <span style={{color:RED,fontSize:10,marginLeft:6}}>POA</span>}</div>
+              <div style={{fontSize:12,color:TXT,marginTop:2}}>{r[P_DESC]}</div>
+              <div style={{fontSize:10,color:MUTED,marginTop:1}}>{r[P_CAT]}{r[P_UNIT]==="M"?" · per metre":""}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Full-screen hose builder (technician). No prices anywhere in this view.
+const HoseBuilderModal = ({job, onClose, onSave}) => {
+  const [fittings, setFittings] = useState([]); // [{itemNo,desc,unit,listPrice,qty}]
+  const [hose, setHose]         = useState(null);
+  const [lengthM, setLengthM]   = useState("");
+  const [partNumber, setPartNumber] = useState("");
+  const [sId, setSId]           = useState(null);
+  const [date, setDate]         = useState(today());
+  const [sticker, setSticker]   = useState(false);
+  const [stickerNo, setStickerNo] = useState("");
+  const [saving, setSaving]     = useState(false);
+
+  const addFitting = r => setFittings(prev => {
+    const i = prev.findIndex(f => f.itemNo === r[P_NO]);
+    if (i >= 0) { const n=[...prev]; n[i]={...n[i],qty:n[i].qty+1}; return n; }
+    return [...prev, {itemNo:r[P_NO], desc:r[P_DESC], unit:r[P_UNIT], listPrice:r[P_PRICE], qty:1}];
+  });
+  const bumpQty = (itemNo, d) => setFittings(prev => prev
+    .map(f => f.itemNo===itemNo ? {...f, qty:f.qty+d} : f)
+    .filter(f => f.qty > 0));
+
+  const lenOk = parseFloat(lengthM) > 0;
+  const valid = fittings.length > 0 && hose && lenOk && sId;
+  const save = async () => {
+    if (!valid || saving) return;
+    setSaving(true);
+    await onSave({
+      jobId: job.id, sId, fittings,
+      hose: {itemNo:hose[P_NO], desc:hose[P_DESC], listPrice:hose[P_PRICE]},
+      lengthM: Math.round(parseFloat(lengthM)*1000)/1000,
+      partNumber: partNumber.trim(),
+      date, sticker, stickerNo: sticker ? stickerNo.trim() : "",
+      billed: false, createdAt: Date.now(),
+    });
+    onClose();
+  };
+
+  const Label = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
+  return (
+    <div style={{position:"fixed",inset:0,background:BG,zIndex:100,display:"flex",justifyContent:"center"}}>
+      <div style={{width:"100%",maxWidth:480,display:"flex",flexDirection:"column",height:"100dvh"}}>
+        <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"14px 16px",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+          <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}><X size={18} color={TXT}/></button>
+          <div style={{flex:1}}>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:700,color:TXT}}>NEW HOSE</div>
+            <div style={{fontSize:11,color:MUTED}}>{job.client}</div>
+          </div>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"16px 14px 120px"}}>
+
+          <Label>FITTINGS — SEARCH PART NO. OR DESCRIPTION</Label>
+          <PartSearch pool={PRICE_ITEMS} placeholder="e.g. K08BF0845 or BSP elbow…" onPick={addFitting}/>
+          {fittings.length>0 && (
+            <div style={{marginTop:10}}>
+              {fittings.map(f => (
+                <div key={f.itemNo} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 12px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{f.itemNo}</div>
+                    <div style={{fontSize:12,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{f.desc}</div>
+                  </div>
+                  <button onClick={()=>bumpQty(f.itemNo,-1)} style={{background:BDR2,border:"none",borderRadius:6,width:28,height:28,color:TXT,fontSize:16,cursor:"pointer"}}>−</button>
+                  <div style={{fontFamily:MONO,fontSize:15,color:TXT,minWidth:20,textAlign:"center"}}>{f.qty}</div>
+                  <button onClick={()=>bumpQty(f.itemNo,1)} style={{background:BDR2,border:"none",borderRadius:6,width:28,height:28,color:TXT,fontSize:16,cursor:"pointer"}}>+</button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{marginTop:18}}>
+            <Label>HOSE TYPE — PER-METRE ITEMS</Label>
+            {hose ? (
+              <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:10,padding:"10px 12px",display:"flex",alignItems:"center",gap:10}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{hose[P_NO]}</div>
+                  <div style={{fontSize:12,color:TXT}}>{hose[P_DESC]}</div>
+                </div>
+                <button onClick={()=>setHose(null)} style={{background:BDR2,border:"none",borderRadius:6,padding:6,cursor:"pointer"}}><X size={14} color={MUTED}/></button>
+              </div>
+            ) : (
+              <PartSearch pool={HOSE_POOL} placeholder="e.g. 100R2-08 …" onPick={setHose}/>
+            )}
+          </div>
+
+          <div style={{marginTop:18}}>
+            <Label>LENGTH (METRES, 3 DECIMALS)</Label>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <input type="number" inputMode="decimal" step="0.001" min="0" value={lengthM} onChange={e=>setLengthM(e.target.value)} placeholder="0.750"
+                style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:18,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+              <span style={{fontFamily:MONO,fontSize:15,color:MUTED}}>m</span>
+            </div>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <Label>PART NUMBER (e.g. JOHN DEERE)</Label>
+            <input value={partNumber} onChange={e=>setPartNumber(e.target.value)} placeholder="e.g. AN213079" autoCapitalize="characters"
+              style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <Label>SECTION</Label>
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+              {SECTIONS.map(s => (
+                <button key={s.id} onClick={()=>setSId(s.id)}
+                  style={{background:sId===s.id?Y:CARD,border:`1px solid ${sId===s.id?Y:BDR2}`,borderRadius:8,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:sId===s.id?BG:TXT}}>
+                  {s.id}. {s.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <Label>DATE</Label>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)}
+              style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
+          </div>
+
+          <div style={{marginTop:18,background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <button onClick={()=>setSticker(s=>!s)}
+                style={{width:22,height:22,background:sticker?Y:CARD2,border:`1px solid ${sticker?Y:BDR2}`,borderRadius:5,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                {sticker && <span style={{color:BG,fontSize:14,fontWeight:800}}>✓</span>}
+              </button>
+              <span style={{fontSize:13,color:TXT}}>ID sticker applied</span>
+            </div>
+            {sticker && (
+              <input value={stickerNo} onChange={e=>setStickerNo(e.target.value)} placeholder="Sticker ID (optional)"
+                style={{width:"100%",marginTop:10,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"10px 12px",color:TXT,fontSize:14,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
+            )}
+          </div>
+        </div>
+        <div style={{position:"fixed",bottom:0,left:0,right:0,display:"flex",justifyContent:"center",background:"linear-gradient(transparent, #0C0D10 35%)",padding:"24px 14px 18px"}}>
+          <button onClick={save} disabled={!valid||saving}
+            style={{width:"100%",maxWidth:452,background:valid?Y:BDR2,border:"none",borderRadius:10,padding:15,cursor:valid?"pointer":"default",fontFamily:FF,fontSize:16,fontWeight:800,color:valid?BG:MUTED,letterSpacing:1}}>
+            {saving?"SAVING…":"SAVE HOSE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Price breakdown for one hose doc (admin only). All component prices ex GST.
+const hoseCalc = h => {
+  const lines = [];
+  let poa = false;
+  for (const f of (h.fittings||[])) {
+    if (f.listPrice === null || f.listPrice === undefined) poa = true;
+    lines.push({label:`${f.qty} × ${f.itemNo}`, sub:f.desc, amt:(f.listPrice||0)*f.qty, poa:f.listPrice==null});
+  }
+  if (h.hose) {
+    const hp = (h.hose.listPrice||0) * (h.lengthM||0);
+    if (h.hose.listPrice == null) poa = true;
+    lines.push({label:`${(h.lengthM||0).toFixed(3)}m × ${h.hose.itemNo}`, sub:`${h.hose.desc} @ ${fmt$(h.hose.listPrice)}/m`, amt:hp, poa:h.hose.listPrice==null});
+  }
+  if (h.sticker) lines.push({label:"ID STICKER", sub:h.stickerNo||"", amt:STICKER_PRICE, poa:false});
+  const sub = lines.reduce((s,l)=>s+l.amt,0);
+  return { lines, sub, gst: sub*0.1, total: sub*1.1, poa };
+};
+
+// Admin hoses screen: date filter, multi-select, billed toggle, calc breakdown.
+const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete}) => {
+  const [from, setFrom] = useState("");
+  const [to, setTo]     = useState("");
+  const [sel, setSel]   = useState(new Set());
+  const [open, setOpen] = useState(new Set());
+  const [confirm, setConfirm] = useState(null);
+
+  const filtered = hoses
+    .filter(h => (!from || h.date >= from) && (!to || h.date <= to))
+    .sort((a,b) => (b.date||"").localeCompare(a.date||"") || (b.createdAt||0)-(a.createdAt||0));
+  const toggle = (set, setSet, id) => setSet(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
+  const selHoses = filtered.filter(h => sel.has(h.id));
+  const selTotal = selHoses.reduce((s,h)=>s+hoseCalc(h).total,0);
+  const jobName = jid => jobs.find(j=>j.id===jid)?.client || "—";
+  const secName = sid => SECTIONS.find(s=>s.id===sid)?.name || "";
+
+  return (
+    <div style={{paddingBottom:sel.size?120:20}}>
+      <div style={{background:CARD,padding:"20px 18px 14px",borderBottom:`1px solid ${BDR}`}}>
+        <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT,marginBottom:12}}>HOSES</div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input type="date" value={from} onChange={e=>setFrom(e.target.value)}
+            style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",minWidth:0}}/>
+          <span style={{color:MUTED,fontSize:12}}>to</span>
+          <input type="date" value={to} onChange={e=>setTo(e.target.value)}
+            style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",minWidth:0}}/>
+        </div>
+        <div style={{display:"flex",gap:8,marginTop:8}}>
+          <button onClick={()=>{const t=today(); setFrom(t); setTo(t);}} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED}}>TODAY</button>
+          <button onClick={()=>{setFrom(""); setTo("");}} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:6,padding:"5px 10px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED}}>ALL DATES</button>
+          <div style={{marginLeft:"auto",fontSize:11,color:MUTED,alignSelf:"center"}}>{filtered.length} hose{filtered.length!==1?"s":""}</div>
+        </div>
+      </div>
+
+      <div style={{padding:"14px"}}>
+        {filtered.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 0"}}>No hoses in this date range.</div>}
+        {filtered.map(h => {
+          const c = hoseCalc(h);
+          const isOpen = open.has(h.id);
+          return (
+            <div key={h.id} style={{background:CARD,border:`1px solid ${sel.has(h.id)?Y:BDR}`,borderRadius:12,marginBottom:10,overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 12px 10px"}}>
+                <button onClick={()=>toggle(sel,setSel,h.id)}
+                  style={{width:22,height:22,background:sel.has(h.id)?Y:CARD2,border:`1px solid ${sel.has(h.id)?Y:BDR2}`,borderRadius:5,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                  {sel.has(h.id)&&<span style={{color:BG,fontSize:13,fontWeight:800}}>✓</span>}
+                </button>
+                <div style={{flex:1,minWidth:0}} onClick={()=>toggle(open,setOpen,h.id)}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                    <span style={{fontFamily:MONO,fontSize:12,color:MUTED}}>{h.date}</span>
+                    {h.partNumber && <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{h.partNumber}</span>}
+                    {h.sticker && <HChip label={h.stickerNo?`ID ${h.stickerNo}`:"ID STICKER"} col={BG} bg={Y}/>}
+                    {c.poa && <HChip label="POA ITEM" col={"#fff"} bg={RED}/>}
+                  </div>
+                  <div style={{fontSize:13,color:TXT,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    {h.hose ? `${(h.lengthM||0).toFixed(3)}m ${h.hose.itemNo}` : "—"} · {(h.fittings||[]).reduce((s,f)=>s+f.qty,0)} fitting{(h.fittings||[]).reduce((s,f)=>s+f.qty,0)!==1?"s":""}
+                  </div>
+                  <div style={{fontSize:11,color:MUTED,marginTop:2}}>{jobName(h.jobId)} · {h.sId}. {secName(h.sId)}</div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontFamily:MONO,fontSize:16,color:TXT}}>{fmt$(c.total)}</div>
+                  <div style={{fontSize:9,color:MUTED,letterSpacing:1}}>INC GST</div>
+                </div>
+              </div>
+              <div style={{display:"flex",borderTop:`1px solid ${BDR}`}}>
+                <button onClick={()=>onToggleBilled(h)}
+                  style={{flex:1,background:h.billed?"rgba(40,199,111,.12)":"transparent",border:"none",padding:"9px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,letterSpacing:1,color:h.billed?GRN:MUTED}}>
+                  {h.billed?"✓ BILLED":"NOT BILLED"}
+                </button>
+                <button onClick={()=>toggle(open,setOpen,h.id)}
+                  style={{flex:1,background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"9px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:MUTED}}>
+                  {isOpen?"HIDE CALC":"SHOW CALC"}
+                </button>
+                <button onClick={()=>setConfirm(h)}
+                  style={{background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"0 14px",cursor:"pointer"}}>
+                  <Trash2 size={14} color={MUTED}/>
+                </button>
+              </div>
+              {isOpen && (
+                <div style={{borderTop:`1px solid ${BDR}`,padding:"10px 14px",background:CARD2}}>
+                  {c.lines.map((l,i) => (
+                    <div key={i} style={{display:"flex",justifyContent:"space-between",gap:10,marginBottom:6}}>
+                      <div style={{minWidth:0}}>
+                        <div style={{fontFamily:MONO,fontSize:12,color:TXT}}>{l.label}</div>
+                        {l.sub && <div style={{fontSize:10,color:MUTED,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{l.sub}</div>}
+                      </div>
+                      <div style={{fontFamily:MONO,fontSize:12,color:l.poa?RED:TXT,whiteSpace:"nowrap"}}>{l.poa?"POA":fmt$(l.amt)}</div>
+                    </div>
+                  ))}
+                  <div style={{borderTop:`1px solid ${BDR2}`,marginTop:8,paddingTop:8}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:11,color:MUTED}}>SUBTOTAL EX GST</span><span style={{fontFamily:MONO,fontSize:12,color:TXT}}>{fmt$(c.sub)}</span></div>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}><span style={{fontSize:11,color:MUTED}}>GST 10%</span><span style={{fontFamily:MONO,fontSize:12,color:TXT}}>{fmt$(c.gst)}</span></div>
+                    <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}><span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y}}>TOTAL INC GST</span><span style={{fontFamily:MONO,fontSize:14,color:Y}}>{fmt$(c.total)}</span></div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {sel.size>0 && (
+        <div style={{position:"fixed",bottom:0,left:0,right:0,display:"flex",justifyContent:"center",zIndex:60}}>
+          <div style={{width:"100%",maxWidth:480,background:CARD,borderTop:`2px solid ${Y}`,padding:"12px 16px 16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <span style={{fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED}}>{sel.size} SELECTED</span>
+              <span style={{fontFamily:MONO,fontSize:18,color:Y}}>{fmt$(selTotal)} <span style={{fontSize:10,color:MUTED}}>INC GST</span></span>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{selHoses.forEach(h=>!h.billed&&onToggleBilled(h)); setSel(new Set());}}
+                style={{flex:1,background:GRN,border:"none",borderRadius:8,padding:11,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:800,color:BG}}>MARK BILLED</button>
+              <button onClick={()=>{selHoses.forEach(h=>h.billed&&onToggleBilled(h)); setSel(new Set());}}
+                style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:11,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:TXT}}>MARK UNBILLED</button>
+              <button onClick={()=>setSel(new Set())}
+                style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"0 14px",cursor:"pointer",color:MUTED}}><X size={16}/></button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirm && (
+        <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+          <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:320,width:"100%"}}>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,marginBottom:8}}>DELETE HOSE?</div>
+            <div style={{fontSize:13,color:MUTED,marginBottom:18}}>This permanently removes the hose record made {confirm.date}.</div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setConfirm(null)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>CANCEL</button>
+              <button onClick={()=>{onDelete(confirm.id); setConfirm(null);}} style={{flex:1,background:RED,border:"none",borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:"#fff"}}>DELETE</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+/* ─────────────────────── END HOSES FEATURE ─────────────────────── */
+
+
 export default function App() {
   const [isDesktop, setIsDesktop] = useState(window.innerWidth >= 900);
   useEffect(() => {
@@ -215,6 +574,9 @@ export default function App() {
       });
       setCustomTasks(ct);
     }));
+    unsubs.push(onSnapshot(collection(db,"hoses"), snap => {
+      setHoses(snap.docs.map(d => ({id:d.id, ...d.data()})));
+    }));
     unsubs.push(onSnapshot(doc(db,"settings","global"), snap => {
       if (snap.exists() && snap.data().hourlyRate) setHourlyRate(snap.data().hourlyRate);
     }));
@@ -241,6 +603,8 @@ export default function App() {
   const [rateInput, setRateInput]     = useState("145");
   const [jobTab, setJobTab]           = useState("progress"); // "progress" | "costings"
   const [customTasks, setCustomTasks] = useState({});   // jid -> [{id,sId,parentId,desc,est,cost,opt}]
+  const [hoses, setHoses]             = useState([]);    // hose records (Hoses feature)
+  const [showHoseBuilder, setShowHoseBuilder] = useState(false);
   const [showCtModal, setShowCtModal] = useState(false);
   const [ctParentId, setCtParentId]   = useState(null); // null = top-level
   const [ctForm, setCtForm]           = useState({desc:"",est:"",cost:"",opt:false});
@@ -439,6 +803,74 @@ export default function App() {
   };
   const setStatus = async (jid, tid, val) => {
     await setDoc(doc(db,"taskStatus",`${jid}_${tid}`), {jobId:jid, taskId:tid, status:val});
+  };
+
+  // ── Hoses feature handlers ──
+  const addHose          = async data => { await addDoc(collection(db,"hoses"), data); };
+  const toggleHoseBilled = async h    => { await setDoc(doc(db,"hoses",h.id), {billed:!h.billed}, {merge:true}); };
+  const delHose          = async id   => { await deleteDoc(doc(db,"hoses",id)); };
+  const goHoses          = () => { setStack([]); setView("hoses"); setSelJob(null); setSelSec(null); setSelTask(null); };
+
+  // Hoses: pick which job the hose belongs to (technician)
+  const TechHosesView = () => (
+    <div>
+      <div style={{background:CARD,padding:"24px 18px 18px",borderBottom:`1px solid ${BDR}`}}>
+        <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>HOSES</div>
+        <div style={{fontSize:12,color:MUTED,marginTop:4}}>Select a job to build hoses for</div>
+      </div>
+      <div style={{padding:"16px 14px"}}>
+        {jobs.map(j => (
+          <button key={j.id} onClick={() => go("hoseJob", {job:j.id})}
+            style={{display:"flex",alignItems:"center",gap:12,width:"100%",textAlign:"left",background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"16px 14px",marginBottom:10,cursor:"pointer"}}>
+            <Cable size={22} color={Y}/>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:700,color:TXT}}>{j.client}</div>
+              <div style={{fontSize:11,color:MUTED,marginTop:2}}>{j.make} {j.model||""} · {j.serial}</div>
+            </div>
+            <ChevronRight size={18} color={MUTED}/>
+          </button>
+        ))}
+        {jobs.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 0"}}>No jobs yet.</div>}
+      </div>
+    </div>
+  );
+
+  // Hoses for the selected job + builder entry (technician — no prices shown)
+  const TechHoseJobView = () => {
+    const job = jobs.find(j => j.id === selJob);
+    if (!job) return null;
+    const list = hoses.filter(h => h.jobId === selJob)
+      .sort((a,b) => (b.date||"").localeCompare(a.date||"") || (b.createdAt||0)-(a.createdAt||0));
+    return (
+      <div style={{paddingBottom:90}}>
+        <TopBar title="HOSES" sub={job.client}/>
+        <div style={{padding:"14px"}}>
+          <button onClick={() => setShowHoseBuilder(true)}
+            style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:Y,border:"none",borderRadius:12,padding:16,cursor:"pointer",fontFamily:FF,fontSize:16,fontWeight:800,color:BG,letterSpacing:1,marginBottom:16}}>
+            <Plus size={18}/> NEW HOSE
+          </button>
+          <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2,marginBottom:10}}>MADE FOR THIS JOB</div>
+          {list.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 0"}}>No hoses recorded yet.</div>}
+          {list.map(h => (
+            <div key={h.id} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                <span style={{fontFamily:MONO,fontSize:12,color:MUTED}}>{h.date}</span>
+                {h.partNumber && <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{h.partNumber}</span>}
+                {h.sticker && <Chip label={h.stickerNo?`ID ${h.stickerNo}`:"ID STICKER"} col={BG} bg={Y}/>}
+              </div>
+              <div style={{fontSize:13,color:TXT,marginTop:5}}>
+                {h.hose ? `${(h.lengthM||0).toFixed(3)}m — ${h.hose.itemNo}` : "—"}
+              </div>
+              {h.hose && <div style={{fontSize:11,color:MUTED,marginTop:1}}>{h.hose.desc}</div>}
+              <div style={{fontSize:11,color:MUTED,marginTop:5}}>
+                {(h.fittings||[]).map(f => `${f.qty}× ${f.itemNo}`).join("  ·  ")}
+              </div>
+              <div style={{fontSize:10,color:MUTED,marginTop:5,letterSpacing:.5}}>{h.sId}. {SECTIONS.find(s=>s.id===h.sId)?.name||""}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   };
 
   const Bar = ({v, max, h=5}) => {
@@ -858,8 +1290,8 @@ export default function App() {
 
   const BottomNav = () => {
     const navItems = mode==="admin"
-      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"SWITCH",Icon:LogOut,action:()=>setMode("select"),active:false}]
-      : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"SWITCH",Icon:Lock,action:()=>setMode("select"),active:false}];
+      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"SWITCH",Icon:LogOut,action:()=>setMode("select"),active:false}]
+      : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SWITCH",Icon:Lock,action:()=>setMode("select"),active:false}];
     const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
     if (isAdmin && isDesktop) return (
       <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"0 24px",display:"flex",alignItems:"center",gap:4,position:"sticky",top:0,zIndex:20,order:-1}}>
@@ -1521,12 +1953,15 @@ export default function App() {
       <div style={{flex:1,overflowY:"auto"}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
+          {view==="hoses"     && <AdminHosesView hoses={hoses} jobs={jobs} onToggleBilled={toggleHoseBilled} onDelete={delHose}/>}
           {view==="job"       && <AdminJobView/>}
           {view==="section"   && <AdminSectionView/>}
           {view==="task"      && <AdminTaskView/>}
           {view==="dashboard" && <DashboardView/>}
         </>) : (<>
           {view==="jobs"    && <TechJobsView/>}
+          {view==="hoses"   && <TechHosesView/>}
+          {view==="hoseJob" && <TechHoseJobView/>}
           {view==="job"     && <TechJobView/>}
           {view==="section" && <TechSectionView/>}
           {view==="task"    && <TechTaskView/>}
@@ -1538,6 +1973,8 @@ export default function App() {
       {showCtModal  && <CustomTaskModal/>}
       {showRateModal && <RateModal/>}
       {showJob    && <JobForm/>}
+      {showHoseBuilder && selJob && jobs.find(j=>j.id===selJob) &&
+        <HoseBuilderModal job={jobs.find(j=>j.id===selJob)} onClose={()=>setShowHoseBuilder(false)} onSave={addHose}/>}
       {lightbox   && <Lightbox/>}
       {confirmDel && <ConfirmDel/>}
       </div>
