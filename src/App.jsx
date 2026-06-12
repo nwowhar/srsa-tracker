@@ -179,6 +179,42 @@ const groupByMonth = list => {
 };
 const HChip = ({label, col, bg}) => <span style={{fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.8,background:bg,color:col,borderRadius:4,padding:"2px 7px",whiteSpace:"nowrap"}}>{label}</span>;
 
+// ── Sticker label printing ──
+// Stock: Heavy Duty Clear Wrap 200 x 40mm, printable area = top ~55mm of the label.
+// Layout mirrors the existing GoLabel template:
+//   SRSA logo / HOSE: / OVERALL MM: / F1: / F2: / JD# / <initials><ddmmyy> / CLIENT / SERIAL
+const initialsOf = name => (name||"").trim().split(/\s+/).map(w=>w[0]||"").join("").toUpperCase().slice(0,3);
+const ddmmyy = iso => { const [y,m,d] = (iso||"").split("-"); return (d||"")+(m||"")+(y||"").slice(2); };
+const printHoseLabel = ({hoseNo, mm, fittings, partNumber, worker, date, client, serial}) => {
+  const fLines = (fittings||[]).map((f,i)=>`<div>F${i+1}:${f.itemNo}</div>`).join("");
+  const html = `<!DOCTYPE html><html><head><title>Hose Label</title><style>
+    @page { size: 40mm 200mm; margin: 0; }
+    html,body { margin:0; padding:0; width:40mm; background:#fff; }
+    .wrap { width:40mm; box-sizing:border-box; padding:1.5mm 1mm 0; text-align:center;
+            font-family: Arial, Helvetica, sans-serif; font-weight:bold; color:#000; }
+    img.logo { width:26mm; display:block; margin:0 auto .8mm; filter: invert(1) brightness(0); }
+    .l  { font-size:8.5pt; line-height:1.22; letter-spacing:0; }
+    .sm { font-size:7pt;   line-height:1.25; }
+  </style></head><body>
+    <div class="wrap">
+      <img class="logo" src="${LOGO}"/>
+      <div class="l">
+        <div>HOSE:${hoseNo}</div>
+        <div>OVERALL MM:${mm}</div>
+        ${fLines}
+        ${partNumber?`<div>JD#${partNumber}</div>`:""}
+        <div>${initialsOf(worker)}${ddmmyy(date)}</div>
+        <div>${(client||"").toUpperCase()}</div>
+        <div class="sm">${serial||""}</div>
+      </div>
+    </div>
+    <script>window.onload=()=>{window.print();setTimeout(()=>window.close(),400);}<\/script>
+  </body></html>`;
+  const w = window.open("", "_blank", "width=320,height=640");
+  if (!w) { alert("Pop-up blocked — allow pop-ups for this site to print stickers."); return; }
+  w.document.write(html); w.document.close();
+};
+
 // Search box + results dropdown. Never shows prices (worker-safe).
 // BARCODE: a Bluetooth HID scanner "types" into this input — scanning works today.
 // Camera scanning hooks in here later (set value + auto-pick on exact item-no match).
@@ -208,43 +244,58 @@ const PartSearch = ({pool, placeholder, onPick}) => {
   );
 };
 
-// Full-screen hose builder (technician). No prices anywhere in this view.
-// Full-screen hose builder (technician). No prices anywhere in this view.
+// Full-screen hose builder (technician) — create OR edit. No prices anywhere in this view.
 // Form order mirrors the data already captured in their existing software:
 // Hose Type → Hose Length (mm) → Fitting 1 → Fitting 2 (+ extras) → JD Part No → Name & Date
-const HoseBuilderModal = ({job, onClose, onSave}) => {
-  const [hose, setHose]         = useState(null);
-  const [lengthMm, setLengthMm] = useState("");
-  const [fittings, setFittings] = useState([null, null]); // slots: Fitting 1, Fitting 2, extras…
-  const [partNumber, setPartNumber] = useState("");
-  const [worker, setWorker]     = useState("");
-  const [date, setDate]         = useState(today());
-  const [sId, setSId]           = useState(null);
-  const [sticker, setSticker]   = useState(false);
-  const [stickerNo, setStickerNo] = useState("");
+const rowToItem = r => ({itemNo:r[P_NO], desc:r[P_DESC], unit:r[P_UNIT], listPrice:r[P_PRICE], qty:1});
+const HoseBuilderModal = ({job, initial, onClose, onSave}) => {
+  const editing = !!initial;
+  const [hose, setHose]         = useState(initial?.hose || null); // {itemNo,desc,listPrice}
+  const [lengthMm, setLengthMm] = useState(initial ? String(initial.lengthMm ?? Math.round((initial.lengthM||0)*1000)) : "");
+  const [fittings, setFittings] = useState(() => {
+    const f = (initial?.fittings || []).map(x => ({...x}));
+    while (f.length < 2) f.push(null);
+    return f;
+  });
+  const [partNumber, setPartNumber] = useState(initial?.partNumber || "");
+  const [worker, setWorker]     = useState(initial?.worker || "");
+  const [date, setDate]         = useState(initial?.date || today());
+  const [sId, setSId]           = useState(initial?.sId ?? null);
+  const [sticker, setSticker]   = useState(initial?.sticker || false);
+  const [stickerNo, setStickerNo] = useState(initial?.stickerNo || "");
   const [saving, setSaving]     = useState(false);
+  const [confirmSave, setConfirmSave] = useState(false);
 
-  const setSlot   = (i, r) => setFittings(prev => prev.map((f,idx) => idx===i ? (r ? {itemNo:r[P_NO], desc:r[P_DESC], unit:r[P_UNIT], listPrice:r[P_PRICE], qty:1} : null) : f));
+  const setSlot    = (i, r) => setFittings(prev => prev.map((f,idx) => idx===i ? rowToItem(r) : f));
   const removeSlot = i => setFittings(prev => prev.length > 2 ? prev.filter((_,idx)=>idx!==i) : prev.map((f,idx)=>idx===i?null:f));
-  const addSlot   = () => setFittings(prev => [...prev, null]);
+  const addSlot    = () => setFittings(prev => [...prev, null]);
 
   const mm = parseInt(lengthMm, 10);
   const lenOk = mm > 0;
   const picked = fittings.filter(Boolean);
-  const valid = hose && lenOk && picked.length > 0 && worker.trim() && sId;
+  const printable = hose && lenOk && picked.length > 0 && worker.trim();
+  const valid = printable && sId;
+
+  const doPrint = () => printHoseLabel({
+    hoseNo: hose.itemNo, mm, fittings: picked, partNumber: partNumber.trim(),
+    worker, date, client: job.client, serial: job.serial,
+  });
+
+  const buildData = () => ({
+    jobId: job.id, sId,
+    hose: {itemNo:hose.itemNo, desc:hose.desc, listPrice:hose.listPrice ?? null},
+    lengthMm: mm, lengthM: mm/1000,
+    fittings: picked,
+    partNumber: partNumber.trim(),
+    worker: worker.trim(),
+    date, sticker, stickerNo: sticker ? stickerNo.trim() : "",
+    ...(editing ? {} : {billed:false, createdAt:Date.now()}), // edits keep billed/createdAt
+  });
   const save = async () => {
     if (!valid || saving) return;
+    if (editing && !confirmSave) { setConfirmSave(true); return; } // double-check edits first
     setSaving(true);
-    await onSave({
-      jobId: job.id, sId,
-      hose: {itemNo:hose[P_NO], desc:hose[P_DESC], listPrice:hose[P_PRICE]},
-      lengthMm: mm, lengthM: mm/1000,
-      fittings: picked,
-      partNumber: partNumber.trim(),
-      worker: worker.trim(),
-      date, sticker, stickerNo: sticker ? stickerNo.trim() : "",
-      billed: false, createdAt: Date.now(),
-    });
+    await onSave(buildData(), initial?.id);
     onClose();
   };
 
@@ -252,8 +303,8 @@ const HoseBuilderModal = ({job, onClose, onSave}) => {
   const PickedCard = ({item, onClear}) => (
     <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:10,padding:"10px 12px",display:"flex",alignItems:"center",gap:10}}>
       <div style={{flex:1,minWidth:0}}>
-        <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{item.itemNo||item[P_NO]}</div>
-        <div style={{fontSize:12,color:TXT}}>{item.desc||item[P_DESC]}</div>
+        <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{item.itemNo}</div>
+        <div style={{fontSize:12,color:TXT}}>{item.desc}</div>
       </div>
       <button onClick={onClear} style={{background:BDR2,border:"none",borderRadius:6,padding:6,cursor:"pointer"}}><X size={14} color={MUTED}/></button>
     </div>
@@ -264,15 +315,15 @@ const HoseBuilderModal = ({job, onClose, onSave}) => {
         <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"14px 16px",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
           <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}><X size={18} color={TXT}/></button>
           <div style={{flex:1}}>
-            <div style={{fontFamily:FF,fontSize:17,fontWeight:700,color:TXT}}>NEW HOSE</div>
-            <div style={{fontSize:11,color:MUTED}}>{job.client}</div>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:700,color:TXT}}>{editing?"EDIT HOSE":"NEW HOSE"}</div>
+            <div style={{fontSize:11,color:MUTED}}>{job.client}{editing?` · made ${initial.date}`:""}</div>
           </div>
         </div>
         <div style={{flex:1,overflowY:"auto",padding:"16px 14px 120px"}}>
 
           <Label>HOSE TYPE</Label>
           {hose ? <PickedCard item={hose} onClear={()=>setHose(null)}/>
-                : <PartSearch pool={HOSE_POOL} placeholder="e.g. 100R2GP-08 …" onPick={setHose}/>}
+                : <PartSearch pool={HOSE_POOL} placeholder="e.g. 100R2GP-08 …" onPick={r=>setHose({itemNo:r[P_NO], desc:r[P_DESC], listPrice:r[P_PRICE]})}/>}
 
           <div style={{marginTop:18}}>
             <Label>HOSE LENGTH (MM)</Label>
@@ -331,12 +382,18 @@ const HoseBuilderModal = ({job, onClose, onSave}) => {
           </div>
 
           <div style={{marginTop:18,background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px"}}>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <Label>ID STICKER</Label>
+            <button onClick={doPrint} disabled={!printable}
+              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:"none",border:`1px solid ${printable?Y:BDR2}`,borderRadius:8,padding:"12px 0",cursor:printable?"pointer":"default",fontFamily:FF,fontSize:13,fontWeight:800,letterSpacing:1,color:printable?Y:MUTED}}>
+              🖨 PRINT STICKER
+            </button>
+            {!printable && <div style={{fontSize:11,color:MUTED,marginTop:6}}>Fill in hose, length, a fitting and your name to print.</div>}
+            <div style={{display:"flex",alignItems:"center",gap:10,marginTop:14}}>
               <button onClick={()=>setSticker(s=>!s)}
                 style={{width:22,height:22,background:sticker?Y:CARD2,border:`1px solid ${sticker?Y:BDR2}`,borderRadius:5,cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
                 {sticker && <span style={{color:BG,fontSize:14,fontWeight:800}}>✓</span>}
               </button>
-              <span style={{fontSize:13,color:TXT}}>ID sticker applied</span>
+              <span style={{fontSize:13,color:TXT}}>Sticker applied to hose</span>
             </div>
             {sticker && (
               <input value={stickerNo} onChange={e=>setStickerNo(e.target.value)} placeholder="Sticker ID (optional)"
@@ -347,9 +404,29 @@ const HoseBuilderModal = ({job, onClose, onSave}) => {
         <div style={{position:"fixed",bottom:0,left:0,right:0,display:"flex",justifyContent:"center",background:"linear-gradient(transparent, #0C0D10 35%)",padding:"24px 14px 18px"}}>
           <button onClick={save} disabled={!valid||saving}
             style={{width:"100%",maxWidth:452,background:valid?Y:BDR2,border:"none",borderRadius:10,padding:15,cursor:valid?"pointer":"default",fontFamily:FF,fontSize:16,fontWeight:800,color:valid?BG:MUTED,letterSpacing:1}}>
-            {saving?"SAVING…":"SAVE HOSE"}
+            {saving?"SAVING…":(editing?"SAVE CHANGES":"SAVE HOSE")}
           </button>
         </div>
+
+        {confirmSave && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:120,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:340,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:Y,marginBottom:6}}>DOUBLE CHECK</div>
+              <div style={{fontSize:13,color:MUTED,marginBottom:14}}>You're changing this hose record. Make sure these details are right:</div>
+              <div style={{background:CARD2,borderRadius:10,padding:"10px 12px",marginBottom:16,fontFamily:MONO,fontSize:12,color:TXT,lineHeight:1.7}}>
+                <div>HOSE: {hose?.itemNo} — {mm}mm</div>
+                {picked.map((f,i)=><div key={i}>F{i+1}: {f.itemNo}</div>)}
+                {partNumber.trim() && <div>JD# {partNumber.trim()}</div>}
+                <div>{worker.trim()} · {date}</div>
+                <div>{sId}. {SECTIONS.find(s=>s.id===sId)?.name||""}{sticker?" · ID STICKER":""}</div>
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={()=>setConfirmSave(false)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>GO BACK</button>
+                <button onClick={save} style={{flex:1,background:Y,border:"none",borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG}}>{saving?"SAVING…":"CONFIRM"}</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -645,6 +722,7 @@ export default function App() {
   const [hoses, setHoses]             = useState([]);    // hose records (Hoses feature)
   const [showHoseBuilder, setShowHoseBuilder] = useState(false);
   const [confirmHoseDel, setConfirmHoseDel]   = useState(null); // hose pending delete (tech view)
+  const [editHose, setEditHose]               = useState(null); // hose being edited (tech view)
   const [showCtModal, setShowCtModal] = useState(false);
   const [ctParentId, setCtParentId]   = useState(null); // null = top-level
   const [ctForm, setCtForm]           = useState({desc:"",est:"",cost:"",opt:false});
@@ -847,6 +925,7 @@ export default function App() {
 
   // ── Hoses feature handlers ──
   const addHose          = async data => { await addDoc(collection(db,"hoses"), data); };
+  const updHose          = async (data, id) => { await setDoc(doc(db,"hoses",id), data, {merge:true}); };
   const toggleHoseBilled = async h    => { await setDoc(doc(db,"hoses",h.id), {billed:!h.billed}, {merge:true}); };
   const delHose          = async id   => { await deleteDoc(doc(db,"hoses",id)); };
   const goHoses          = () => { setStack([]); setView("hoses"); setSelJob(null); setSelSec(null); setSelTask(null); };
@@ -898,26 +977,36 @@ export default function App() {
             <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{monthHoses.length}</span>
           </div>
           {monthHoses.map(h => (
-            <div key={h.id} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"12px 14px",marginBottom:10}}>
-              <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
-                <div style={{flex:1,display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+            <div key={h.id} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,marginBottom:10,overflow:"hidden"}}>
+              <div style={{padding:"12px 14px",cursor:"pointer"}} onClick={()=>setEditHose(h)}>
+                <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                   <span style={{fontFamily:MONO,fontSize:12,color:MUTED}}>{h.date}</span>
                   {h.partNumber && <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{h.partNumber}</span>}
                   {h.sticker && <Chip label={h.stickerNo?`ID ${h.stickerNo}`:"ID STICKER"} col={BG} bg={Y}/>}
                 </div>
+                <div style={{fontSize:13,color:TXT,marginTop:5}}>
+                  {h.hose ? `${lenMm(h)}mm — ${h.hose.itemNo}` : "—"}
+                </div>
+                {h.hose && <div style={{fontSize:11,color:MUTED,marginTop:1}}>{h.hose.desc}</div>}
+                <div style={{fontSize:11,color:MUTED,marginTop:5}}>
+                  {(h.fittings||[]).map(f => `${f.qty||1}× ${f.itemNo}`).join("  ·  ")}
+                </div>
+                <div style={{fontSize:10,color:MUTED,marginTop:5,letterSpacing:.5}}>{h.sId}. {SECTIONS.find(s=>s.id===h.sId)?.name||""}{h.worker?` · ${h.worker}`:""}</div>
+              </div>
+              <div style={{display:"flex",borderTop:`1px solid ${BDR}`}}>
+                <button onClick={()=>setEditHose(h)}
+                  style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,background:"transparent",border:"none",padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:Y}}>
+                  <Edit2 size={12}/> EDIT
+                </button>
+                <button onClick={()=>printHoseLabel({hoseNo:h.hose?.itemNo||"", mm:lenMm(h), fittings:h.fittings||[], partNumber:h.partNumber||"", worker:h.worker||"", date:h.date, client:job.client, serial:job.serial})}
+                  style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:MUTED}}>
+                  🖨 PRINT
+                </button>
                 <button onClick={()=>setConfirmHoseDel(h)}
-                  style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"6px 8px",cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                  <Trash2 size={14} color={MUTED}/>
+                  style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:MUTED}}>
+                  <Trash2 size={13}/> DELETE
                 </button>
               </div>
-              <div style={{fontSize:13,color:TXT,marginTop:5}}>
-                {h.hose ? `${lenMm(h)}mm — ${h.hose.itemNo}` : "—"}
-              </div>
-              {h.hose && <div style={{fontSize:11,color:MUTED,marginTop:1}}>{h.hose.desc}</div>}
-              <div style={{fontSize:11,color:MUTED,marginTop:5}}>
-                {(h.fittings||[]).map(f => `${f.qty||1}× ${f.itemNo}`).join("  ·  ")}
-              </div>
-              <div style={{fontSize:10,color:MUTED,marginTop:5,letterSpacing:.5}}>{h.sId}. {SECTIONS.find(s=>s.id===h.sId)?.name||""}{h.worker?` · ${h.worker}`:""}</div>
             </div>
           ))}
           </div>))}
@@ -2028,6 +2117,9 @@ export default function App() {
       {showJob    && <JobForm/>}
       {showHoseBuilder && selJob && jobs.find(j=>j.id===selJob) &&
         <HoseBuilderModal job={jobs.find(j=>j.id===selJob)} onClose={()=>setShowHoseBuilder(false)} onSave={addHose}/>}
+      {editHose && jobs.find(j=>j.id===editHose.jobId) &&
+        <HoseBuilderModal job={jobs.find(j=>j.id===editHose.jobId)} initial={editHose}
+          onClose={()=>setEditHose(null)} onSave={updHose}/>}
       {confirmHoseDel && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
           <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:320,width:"100%"}}>
