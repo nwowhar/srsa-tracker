@@ -192,7 +192,7 @@ const printHoseLabel = ({hoseNo, mm, fittings, partNumber, worker, date, client,
     html,body { margin:0; padding:0; width:40mm; background:#fff; }
     .wrap { width:40mm; box-sizing:border-box; padding:1.5mm 1mm 0; text-align:center;
             font-family: Arial, Helvetica, sans-serif; font-weight:bold; color:#000; }
-    img.logo { width:26mm; display:block; margin:0 auto .8mm; filter: invert(1) brightness(0); }
+    img.logo { width:34mm; display:block; margin:0 auto .8mm; filter: invert(1) brightness(0); }
     .l  { font-size:8.5pt; line-height:1.22; letter-spacing:0; }
     .sm { font-size:7pt;   line-height:1.25; }
   </style></head><body>
