@@ -172,6 +172,32 @@ const lenMm = h => h.lengthMm ?? Math.round((h.lengthM||0)*1000);
 const lenM  = h => h.lengthM ?? (h.lengthMm||0)/1000;
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const monthLabel = ym => { const [y,m] = ym.split("-"); return `${(MONTHS[parseInt(m,10)-1]||"").toUpperCase()} ${y}`; };
+// Compress uploaded photos in-browser before sending to Firebase Storage.
+// iPhone 4032×3024 ~4MB → 1600px long edge, 80% JPEG → ~400KB.
+// Skips non-images (HEIC etc handled by browser converter automatically).
+const compressImage = file => new Promise(resolve => {
+  if (!file.type.startsWith("image/")) { resolve(file); return; }
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    const MAX = 1600;
+    let w = img.naturalWidth, h = img.naturalHeight;
+    if (w <= MAX && h <= MAX && file.size < 600*1024) { resolve(file); return; } // already small
+    const scale = Math.min(MAX/w, MAX/h, 1);
+    w = Math.round(w*scale); h = Math.round(h*scale);
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    c.getContext("2d").drawImage(img, 0, 0, w, h);
+    c.toBlob(blob => {
+      if (!blob || blob.size >= file.size) { resolve(file); return; } // keep original if compression made it bigger
+      const out = new File([blob], file.name.replace(/\.(heic|heif|png)$/i, ".jpg"), {type:"image/jpeg", lastModified:Date.now()});
+      resolve(out);
+    }, "image/jpeg", 0.82);
+  };
+  img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+  img.src = url;
+});
+
 const groupByMonth = list => {
   const g = {};
   for (const h of list) { const k = (h.date||"").slice(0,7) || "—"; (g[k] = g[k]||[]).push(h); }
@@ -858,7 +884,8 @@ export default function App() {
     if (!files.length) return;
     setUploading(true); setUploadError(null);
     try {
-      for (const f of files) {
+      for (const raw of files) {
+        const f = await compressImage(raw);
         const storageRef = ref(storage, `photos/${selJob}/${selTask}/${Date.now()}_${f.name}`);
         const snap = await uploadBytes(storageRef, f);
         const url = await getDownloadURL(snap.ref);
