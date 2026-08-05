@@ -478,7 +478,7 @@ const hoseCalc = h => {
 };
 
 // Admin hoses screen: date filter, multi-select, billed toggle, calc breakdown.
-const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete}) => {
+const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete, onBack}) => {
   const [from, setFrom] = useState("");
   const [to, setTo]     = useState("");
   const [fJob, setFJob] = useState("");   // "" = all jobs
@@ -500,8 +500,13 @@ const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete}) => {
 
   return (
     <div style={{paddingBottom:sel.size?120:20}}>
-      <div style={{background:CARD,padding:"20px 18px 14px",borderBottom:`1px solid ${BDR}`}}>
-        <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT,marginBottom:12}}>HOSES</div>
+      <div style={{background:CARD,padding:"14px 16px 14px",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+          <button onClick={onBack} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+            <ChevronLeft size={18} color={TXT}/>
+          </button>
+          <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>HOSES</div>
+        </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <input type="date" value={from} onChange={e=>setFrom(e.target.value)}
             style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",minWidth:0}}/>
@@ -749,6 +754,7 @@ export default function App() {
   const [showHoseBuilder, setShowHoseBuilder] = useState(false);
   const [confirmHoseDel, setConfirmHoseDel]   = useState(null); // hose pending delete (tech view)
   const [editHose, setEditHose]               = useState(null); // hose being edited (tech view)
+  const [taskSearch, setTaskSearch]           = useState(""); // search in job view (tasks across sections)
   const [showCtModal, setShowCtModal] = useState(false);
   const [ctParentId, setCtParentId]   = useState(null); // null = top-level
   const [ctForm, setCtForm]           = useState({desc:"",est:"",cost:"",opt:false});
@@ -772,6 +778,62 @@ export default function App() {
 
   const getExcl = jid => exclMap[jid] || new Set();
   const isIn    = (jid, t) => !t.opt || !getExcl(jid).has(t.id);
+
+  // Job-wide task search — matches by task ID (e.g. "1.03") or description substring.
+  // Returns [{task, sec}] across built-in tasks + custom tasks for this job, excluding opted-out.
+  const searchTasks = (jid, q) => {
+    const s = (q||"").trim().toLowerCase();
+    if (!s) return [];
+    const all = [...TASKS, ...(customTasks[jid]||[])].filter(t => isIn(jid, t));
+    const hits = all.filter(t => (t.id||"").toLowerCase().includes(s) || (t.desc||"").toLowerCase().includes(s));
+    return hits.map(t => ({task:t, sec: SECTIONS.find(x=>x.id===t.sId)})).slice(0, 50);
+  };
+
+  // Shared search bar rendered above the sections list in Tech/Admin job views.
+  const JobTaskSearch = () => {
+    const results = searchTasks(selJob, taskSearch);
+    const active = taskSearch.trim().length > 0;
+    return (<>
+      <div style={{padding:"12px 14px 4px",background:BG}}>
+        <div style={{position:"relative"}}>
+          <input value={taskSearch} onChange={e=>setTaskSearch(e.target.value)}
+            placeholder="Search tasks — e.g. 1.03, water pump…"
+            style={{width:"100%",background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:"11px 40px 11px 14px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none"}}/>
+          {active && (
+            <button onClick={()=>setTaskSearch("")} aria-label="Clear search"
+              style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:BDR2,border:"none",borderRadius:6,width:26,height:26,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
+              <X size={14} color={MUTED}/>
+            </button>
+          )}
+        </div>
+        {active && <div style={{fontSize:11,color:MUTED,marginTop:6,padding:"0 4px"}}>{results.length} match{results.length===1?"":"es"}</div>}
+      </div>
+      {active && (
+        <div style={{padding:"6px 14px 14px"}}>
+          {results.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 0"}}>No tasks match “{taskSearch}”.</div>}
+          {results.map(({task, sec}) => {
+            const st = getStatus(selJob, task.id);
+            const col = st==="completed"?GRN : st==="on_hold"?"#F5A524" : Y;
+            return (
+              <div key={task.id} onClick={()=>{ setTaskSearch(""); go("task",{sec:task.sId, task:task.id}); }}
+                style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+                <div style={{background:col,borderRadius:6,minWidth:44,height:28,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 6px",flexShrink:0}}>
+                  <span style={{fontFamily:MONO,fontSize:11,fontWeight:800,color:BG}}>{task.id}</span>
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontFamily:FF,fontSize:14,fontWeight:600,color:TXT,overflow:"hidden",textOverflow:"ellipsis"}}>{task.desc}</div>
+                  <div style={{fontSize:11,color:MUTED,marginTop:2}}>{sec?.id}. {sec?.name}{task.opt?" · optional":""}</div>
+                </div>
+                <ChevronRight size={16} color={MUTED}/>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>);
+  };
+  const searchingTasks = taskSearch.trim().length > 0;
+
   const getEnt  = (jid, tid) => entries[eKey(jid,tid)] || [];
   const getPh   = (jid, tid) => photos[eKey(jid,tid)] || [];
   const logged      = (jid, tid) => getEnt(jid,tid).reduce((s,e) => s+e.hours, 0);
@@ -845,7 +907,7 @@ export default function App() {
     setStack(s => s.slice(0,-1));
     setView(prev.view); setSelJob(prev.selJob); setSelSec(prev.selSec); setSelTask(prev.selTask);
   };
-  const goHome = () => { setStack([]); setView("jobs"); setSelJob(null); setSelSec(null); setSelTask(null); };
+  const goHome = () => { setStack([]); setView("jobs"); setSelJob(null); setSelSec(null); setSelTask(null); setTaskSearch(""); };
 
   const enterPin = digit => {
     if (digit === "back") { setPin(p => p.slice(0,-1)); return; }
@@ -960,9 +1022,16 @@ export default function App() {
   // Hoses: pick which job the hose belongs to (technician)
   const TechHosesView = () => (
     <div>
-      <div style={{background:CARD,padding:"24px 18px 18px",borderBottom:`1px solid ${BDR}`}}>
-        <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>HOSES</div>
-        <div style={{fontSize:12,color:MUTED,marginTop:4}}>Select a job to build hoses for</div>
+      <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:10}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+            <ChevronLeft size={18} color={TXT}/>
+          </button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:700,color:TXT}}>HOSES</div>
+            <div style={{fontSize:11,color:MUTED,marginTop:2}}>Select a job to build hoses for</div>
+          </div>
+        </div>
       </div>
       <div style={{padding:"16px 14px"}}>
         {jobs.map(j => (
@@ -1478,7 +1547,7 @@ export default function App() {
       </div>
     );
     return (
-      <div style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex"}}>
+      <div style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex",position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,zIndex:40,paddingBottom:"env(safe-area-inset-bottom)"}}>
         {navItems.map(({label,Icon,action,active}) => (
           <button key={label} onClick={action} style={BtnStyle(active)}>
             <Icon size={20} color={active?Y:MUTED}/>
@@ -1520,7 +1589,8 @@ export default function App() {
     return (
       <div>
         <TopBar title={`${j?.make||""} — ${j?.serial||""}`} sub={j?.client}/>
-        <div style={{padding:"12px 14px"}}>
+        <JobTaskSearch/>
+        {!searchingTasks && <div style={{padding:"12px 14px"}}>
           {SECTIONS.map(sec => {
             const st = sStats(selJob, sec.id);
             return (
@@ -1538,7 +1608,7 @@ export default function App() {
               </div>
             );
           })}
-        </div>
+        </div>}
       </div>
     );
   };
@@ -1739,8 +1809,9 @@ export default function App() {
             ))}
           </div>
         </div>
+        <JobTaskSearch/>
 
-        {tab==="progress" && (
+        {!searchingTasks && tab==="progress" && (
           <div>
             <div style={{background:CARD,padding:"12px 16px 14px",borderBottom:`1px solid ${BDR}`}}>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:MUTED,marginBottom:6}}>
@@ -1785,7 +1856,7 @@ export default function App() {
           </div>
         )}
 
-        {tab==="costings" && (
+        {!searchingTasks && tab==="costings" && (
           <div>
             <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
@@ -2119,10 +2190,10 @@ export default function App() {
         }
       `}</style>
       <div style={{width:"100%",maxWidth: isAdmin&&isDesktop?"1100px":"480px",display:"flex",flexDirection:"column",minHeight:"100dvh",boxShadow: isDesktop?"0 0 60px rgba(0,0,0,.5)":"none",borderLeft: isDesktop?`1px solid ${BDR}`:"none",borderRight: isDesktop?`1px solid ${BDR}`:"none"}}>
-      <div style={{flex:1,overflowY:"auto"}}>
+      <div style={{flex:1,overflowY:"auto",paddingBottom: (isAdmin && isDesktop) ? 0 : 72}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
-          {view==="hoses"     && <AdminHosesView hoses={hoses} jobs={jobs} onToggleBilled={toggleHoseBilled} onDelete={delHose}/>}
+          {view==="hoses"     && <AdminHosesView hoses={hoses} jobs={jobs} onToggleBilled={toggleHoseBilled} onDelete={delHose} onBack={goHome}/>}
           {view==="job"       && <AdminJobView/>}
           {view==="section"   && <AdminSectionView/>}
           {view==="task"      && <AdminTaskView/>}
