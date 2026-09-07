@@ -1,9 +1,9 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable } from "lucide-react";
+import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable, Users, LogIn } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
-import { getAuth, signInAnonymously } from "firebase/auth";
+import { getAuth, signInAnonymously, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail } from "firebase/auth";
 import { PRICE_ITEMS } from "./priceList.js";
 
 const firebaseConfig = {
@@ -116,7 +116,7 @@ const TASKS = [
   {id:"11.11",sId:11,desc:"Broken or worn door latches",est:5,opt:true,cost:725},
   {id:"11.12",sId:11,desc:"Detail inside of cab",est:3,opt:true,cost:435},
   {id:"11.13",sId:11,desc:"Polish bonnet and roof",est:3,opt:true,cost:435},
-  {id:"11.14",sId:11,desc:"Paint bonnet grill!",est:2,opt:true,cost:290},
+  {id:"11.14",sId:11,desc:"Paint bonnet grill",est:2,opt:true,cost:290},
 ];
 
 const today = () => new Date().toISOString().split("T")[0];
@@ -274,7 +274,7 @@ const PartSearch = ({pool, placeholder, onPick}) => {
 // Form order mirrors the data already captured in their existing software:
 // Hose Type → Hose Length (mm) → Fitting 1 → Fitting 2 (+ extras) → JD Part No → Name & Date
 const rowToItem = r => ({itemNo:r[P_NO], desc:r[P_DESC], unit:r[P_UNIT], listPrice:r[P_PRICE], qty:1});
-const HoseBuilderModal = ({job, initial, onClose, onSave}) => {
+const HoseBuilderModal = ({job, initial, onClose, onSave, defaultWorker}) => {
   const editing = !!initial;
   const [hose, setHose]         = useState(initial?.hose || null); // {itemNo,desc,listPrice}
   const [lengthMm, setLengthMm] = useState(initial ? String(initial.lengthMm ?? Math.round((initial.lengthM||0)*1000)) : "");
@@ -284,7 +284,7 @@ const HoseBuilderModal = ({job, initial, onClose, onSave}) => {
     return f;
   });
   const [partNumber, setPartNumber] = useState(initial?.partNumber || "");
-  const [worker, setWorker]     = useState(initial?.worker || "");
+  const [worker, setWorker]     = useState(initial?.worker || defaultWorker || "");
   const [date, setDate]         = useState(initial?.date || today());
   const [sId, setSId]           = useState(initial?.sId ?? null);
   const [sticker, setSticker]   = useState(initial?.sticker || false);
@@ -652,13 +652,25 @@ export default function App() {
     const s = document.createElement("style");
     s.textContent = "@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}@keyframes spin{to{transform:rotate(360deg)}}";
     document.head.appendChild(s);
-    signInAnonymously(auth).catch(e => {
-      // Anonymous auth not configured - app still works, writes may be restricted
+    // Watch auth state. A signed-in email user is a technician; anonymous is the
+    // fallback session that keeps reads/writes working for admin (PIN) access.
+    const unsubAuth = onAuthStateChanged(auth, u => {
+      setAuthUser(u && !u.isAnonymous ? u : null);
+      setAuthReady(true);
+      if (!u) signInAnonymously(auth).catch(() => {}); // keep a session for rules
     });
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    return () => { window.removeEventListener("resize", onResize); unsubAuth(); };
   }, []);
+
+  // Live profile for the signed-in tech (approval status can flip while they wait).
+  useEffect(() => {
+    if (!authUser) { setMe(null); return; }
+    return onSnapshot(doc(db,"users",authUser.uid), snap => {
+      setMe(snap.exists() ? {id:snap.id, ...snap.data()} : null);
+    }, () => setMe(null));
+  }, [authUser]);
 
   useEffect(() => {
     const unsubs = [];
@@ -721,6 +733,9 @@ export default function App() {
       });
       setCustomTasks(ct);
     }));
+    unsubs.push(onSnapshot(collection(db,"users"), snap => {
+      setUsers(snap.docs.map(d => ({id:d.id, ...d.data()})));
+    }, () => {}));
     unsubs.push(onSnapshot(collection(db,"hoses"), snap => {
       setHoses(snap.docs.map(d => ({id:d.id, ...d.data()})));
     }));
@@ -755,6 +770,14 @@ export default function App() {
   const [confirmHoseDel, setConfirmHoseDel]   = useState(null); // hose pending delete (tech view)
   const [editHose, setEditHose]               = useState(null); // hose being edited (tech view)
   const [taskSearch, setTaskSearch]           = useState(""); // search in job view (tasks across sections)
+  // ── Tech authentication ──
+  const [authUser, setAuthUser]   = useState(null);  // firebase user (null until resolved)
+  const [authReady, setAuthReady] = useState(false); // has onAuthStateChanged fired at least once
+  const [me, setMe]               = useState(null);  // this user's /users doc: {name,email,status}
+  const [users, setUsers]         = useState([]);    // all user docs (admin Users screen)
+  const [authScreen, setAuthScreen] = useState("signin"); // signin | signup
+  const [authErr, setAuthErr]     = useState("");
+  const [authBusy, setAuthBusy]   = useState(false);
   const [showCtModal, setShowCtModal] = useState(false);
   const [ctParentId, setCtParentId]   = useState(null); // null = top-level
   const [ctForm, setCtForm]           = useState({desc:"",est:"",cost:"",opt:false});
@@ -1019,6 +1042,52 @@ export default function App() {
   const delHose          = async id   => { await deleteDoc(doc(db,"hoses",id)); };
   const goHoses          = () => { setStack([]); setView("hoses"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
+  // ── Auth handlers ──
+  const doSignUp = async (name, email, pw) => {
+    setAuthErr(""); setAuthBusy(true);
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email.trim(), pw);
+      // New accounts land as "pending" until an admin approves them.
+      await setDoc(doc(db,"users",cred.user.uid), {
+        name: name.trim(), email: email.trim().toLowerCase(),
+        status: "pending", createdAt: Date.now(),
+      });
+    } catch (e) {
+      setAuthErr(
+        e.code==="auth/email-already-in-use" ? "That email already has an account — try signing in." :
+        e.code==="auth/weak-password"        ? "Password needs to be at least 6 characters." :
+        e.code==="auth/invalid-email"        ? "That doesn't look like a valid email address." :
+        "Couldn't create the account. Check your connection and try again."
+      );
+    }
+    setAuthBusy(false);
+  };
+  const doSignIn = async (email, pw) => {
+    setAuthErr(""); setAuthBusy(true);
+    try { await signInWithEmailAndPassword(auth, email.trim(), pw); }
+    catch (e) {
+      setAuthErr(
+        e.code==="auth/invalid-credential" || e.code==="auth/wrong-password" || e.code==="auth/user-not-found"
+          ? "Email or password isn't right."
+          : "Couldn't sign in. Check your connection and try again."
+      );
+    }
+    setAuthBusy(false);
+  };
+  const doSignOut = async () => { await signOut(auth); setMode("select"); goHome(); };
+  const doReset   = async email => {
+    if (!email.trim()) { setAuthErr("Enter your email first, then tap reset."); return; }
+    try { await sendPasswordResetEmail(auth, email.trim()); setAuthErr("Password reset email sent — check your inbox."); }
+    catch { setAuthErr("Couldn't send the reset email. Check the address."); }
+  };
+  const setUserStatus = async (uid, status) => { await setDoc(doc(db,"users",uid), {status, approvedAt:Date.now()}, {merge:true}); };
+  const delUser       = async uid => { await deleteDoc(doc(db,"users",uid)); };
+  const goUsers       = () => { setStack([]); setView("users"); setSelJob(null); setSelSec(null); setSelTask(null); };
+
+  // Display name of the signed-in tech, used to pre-fill worker fields.
+  const myName = me?.name || "";
+  const pendingCount = users.filter(u => u.status === "pending").length;
+
   // Hoses: pick which job the hose belongs to (technician)
   const TechHosesView = () => (
     <div>
@@ -1137,6 +1206,158 @@ export default function App() {
   );
   const Chip = ({label, col, bg}) => <span style={{fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.8,background:bg,color:col,borderRadius:4,padding:"2px 7px",whiteSpace:"nowrap"}}>{label}</span>;
 
+  // ── Sign in / sign up (technicians) ──
+  const AuthScreen = () => {
+    const nameRef = useRef(); const emailRef = useRef(); const pwRef = useRef();
+    const signup = authScreen === "signup";
+    const submit = () => {
+      const email = emailRef.current?.value || "";
+      const pw    = pwRef.current?.value || "";
+      if (signup) {
+        const name = nameRef.current?.value || "";
+        if (!name.trim()) { setAuthErr("Enter the name you want shown on your work."); return; }
+        if (!email.trim() || pw.length < 6) { setAuthErr("Enter an email and a password of 6+ characters."); return; }
+        doSignUp(name, email, pw);
+      } else {
+        if (!email.trim() || !pw) { setAuthErr("Enter your email and password."); return; }
+        doSignIn(email, pw);
+      }
+    };
+    const field = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:10,padding:"13px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none",marginBottom:10};
+    return (
+      <div style={{minHeight:"100dvh",background:BG,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
+        <button onClick={() => { setMode("select"); setAuthErr(""); }} style={{position:"absolute",top:20,left:20,background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+          <ChevronLeft size={18} color={MUTED}/><span style={{color:MUTED,fontSize:13}}>Back</span>
+        </button>
+        <div style={{maxWidth:250,width:"100%",marginBottom:28}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
+        <div style={{fontFamily:FF,fontSize:20,fontWeight:800,color:TXT,marginBottom:6}}>{signup?"CREATE ACCOUNT":"TECHNICIAN SIGN IN"}</div>
+        <div style={{fontSize:12,color:MUTED,marginBottom:24,textAlign:"center",maxWidth:300}}>
+          {signup ? "Your account needs to be approved by the supervisor before you can start." : "You'll stay signed in on this phone."}
+        </div>
+        <div style={{width:"100%",maxWidth:320}}>
+          {signup && <input ref={nameRef} placeholder="Your name (e.g. Cal)" autoCapitalize="words" style={field}/>}
+          <input ref={emailRef} type="email" placeholder="Email" autoCapitalize="none" autoCorrect="off" style={field}/>
+          <input ref={pwRef} type="password" placeholder="Password" style={field}
+            onKeyDown={e => { if (e.key === "Enter") submit(); }}/>
+          {authErr && <div style={{fontSize:12,color:authErr.includes("sent")?GRN:RED,marginBottom:10,lineHeight:1.4}}>{authErr}</div>}
+          <button onClick={submit} disabled={authBusy}
+            style={{width:"100%",background:Y,border:"none",borderRadius:10,padding:14,cursor:"pointer",fontFamily:FF,fontSize:15,fontWeight:800,color:BG,letterSpacing:1}}>
+            {authBusy ? "PLEASE WAIT…" : (signup ? "CREATE ACCOUNT" : "SIGN IN")}
+          </button>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:14}}>
+            <button onClick={() => { setAuthScreen(signup?"signin":"signup"); setAuthErr(""); }}
+              style={{background:"none",border:"none",cursor:"pointer",color:Y,fontSize:13,padding:0}}>
+              {signup ? "I already have an account" : "Create an account"}
+            </button>
+            {!signup && (
+              <button onClick={() => doReset(emailRef.current?.value || "")}
+                style={{background:"none",border:"none",cursor:"pointer",color:MUTED,fontSize:13,padding:0}}>
+                Forgot password
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Shown to a signed-in tech whose account hasn't been approved yet.
+  const PendingScreen = () => (
+    <div style={{minHeight:"100dvh",background:BG,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24,textAlign:"center"}}>
+      <div style={{maxWidth:220,width:"100%",marginBottom:28}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
+      <div style={{width:54,height:54,borderRadius:"50%",background:CARD,border:`1px solid ${Y}`,display:"flex",alignItems:"center",justifyContent:"center",marginBottom:18}}>
+        <Clock size={24} color={Y}/>
+      </div>
+      <div style={{fontFamily:FF,fontSize:20,fontWeight:800,color:TXT,marginBottom:8}}>
+        {me?.status === "revoked" ? "ACCESS REMOVED" : "WAITING FOR APPROVAL"}
+      </div>
+      <div style={{fontSize:13,color:MUTED,maxWidth:320,lineHeight:1.6,marginBottom:26}}>
+        {me?.status === "revoked"
+          ? "Your access to the job tracker has been turned off. Speak to the supervisor if you think that's a mistake."
+          : <>Hi {me?.name || "there"} — your account is set up. The supervisor just needs to approve it before you can log work. This screen will update on its own once that's done.</>}
+      </div>
+      <button onClick={doSignOut}
+        style={{background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:"12px 24px",cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:TXT,letterSpacing:1}}>
+        SIGN OUT
+      </button>
+    </div>
+  );
+
+  // ── Admin: approve / revoke technician accounts ──
+  const AdminUsersView = () => {
+    const [confirmDel, setConfirmDel] = useState(null);
+    const order = {pending:0, approved:1, revoked:2};
+    const list = [...users].sort((a,b) =>
+      (order[a.status]??3)-(order[b.status]??3) || (a.name||"").localeCompare(b.name||""));
+    const badge = s => s==="approved" ? {t:"APPROVED",c:BG,b:GRN}
+                     : s==="revoked"  ? {t:"REMOVED", c:"#fff",b:RED}
+                     :                  {t:"PENDING", c:BG,b:Y};
+    return (
+      <div>
+        <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+              <ChevronLeft size={18} color={TXT}/>
+            </button>
+            <div>
+              <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>TECHNICIANS</div>
+              <div style={{fontSize:11,color:MUTED}}>{users.length} account{users.length===1?"":"s"}{pendingCount?` · ${pendingCount} waiting`:""}</div>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:"14px"}}>
+          {list.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 20px",lineHeight:1.6}}>No technician accounts yet.<br/>They'll appear here as the boys sign up.</div>}
+          {list.map(u => {
+            const b = badge(u.status);
+            return (
+              <div key={u.id} style={{background:CARD,border:`1px solid ${u.status==="pending"?Y:BDR}`,borderRadius:12,marginBottom:10,overflow:"hidden"}}>
+                <div style={{padding:"12px 14px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                    <span style={{fontFamily:FF,fontSize:16,fontWeight:700,color:TXT}}>{u.name||"(no name)"}</span>
+                    <HChip label={b.t} col={b.c} bg={b.b}/>
+                  </div>
+                  <div style={{fontSize:12,color:MUTED,marginTop:3,wordBreak:"break-all"}}>{u.email}</div>
+                </div>
+                <div style={{display:"flex",borderTop:`1px solid ${BDR}`}}>
+                  {u.status !== "approved" && (
+                    <button onClick={()=>setUserStatus(u.id,"approved")}
+                      style={{flex:1,background:"transparent",border:"none",padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,letterSpacing:1,color:GRN}}>
+                      ✓ APPROVE
+                    </button>
+                  )}
+                  {u.status === "approved" && (
+                    <button onClick={()=>setUserStatus(u.id,"revoked")}
+                      style={{flex:1,background:"transparent",border:"none",padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:MUTED}}>
+                      REMOVE ACCESS
+                    </button>
+                  )}
+                  <button onClick={()=>setConfirmDel(u)}
+                    style={{background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"0 16px",cursor:"pointer"}}>
+                    <Trash2 size={14} color={MUTED}/>
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {confirmDel && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:330,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,marginBottom:8}}>DELETE {(confirmDel.name||"USER").toUpperCase()}?</div>
+              <div style={{fontSize:13,color:MUTED,marginBottom:18,lineHeight:1.5}}>
+                Removes their profile from the app. Hours and photos they've already logged stay on the job.
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={()=>setConfirmDel(null)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>CANCEL</button>
+                <button onClick={()=>{delUser(confirmDel.id); setConfirmDel(null);}} style={{flex:1,background:RED,border:"none",borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:"#fff"}}>DELETE</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const ModeSelect = () => (
     <div style={{minHeight:"100dvh",background:BG,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}>
       <div style={{borderRadius:16,padding:"20px 28px",marginBottom:36,maxWidth:240,width:"100%"}}>
@@ -1144,10 +1365,10 @@ export default function App() {
       </div>
       <div style={{fontFamily:FF,fontSize:13,color:MUTED,letterSpacing:2,marginBottom:28}}>SELECT ACCESS LEVEL</div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,width:"100%",maxWidth:300}}>
-        <button onClick={() => { setMode("tech"); goHome(); }}
+        <button onClick={() => { setAuthErr(""); setAuthScreen("signin"); setMode("auth"); }}
           style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"20px 12px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
           <Wrench size={28} color={TXT}/><span style={{fontFamily:FF,fontSize:16,fontWeight:700,color:TXT}}>TECHNICIAN</span>
-          <span style={{fontSize:11,color:MUTED}}>Photos only</span>
+          <span style={{fontSize:11,color:MUTED}}>Sign in</span>
         </button>
         <button onClick={() => { setPin(""); setMode("pin"); }}
           style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"20px 12px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:8}}>
@@ -1528,8 +1749,8 @@ export default function App() {
 
   const BottomNav = () => {
     const navItems = mode==="admin"
-      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"SWITCH",Icon:LogOut,action:()=>setMode("select"),active:false}]
-      : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SWITCH",Icon:Lock,action:()=>setMode("select"),active:false}];
+      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:"SWITCH",Icon:LogOut,action:()=>setMode("select"),active:false}]
+      : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SIGN OUT",Icon:LogOut,action:doSignOut,active:false}];
     const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
     if (isAdmin && isDesktop) return (
       <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"0 24px",display:"flex",alignItems:"center",gap:4,position:"sticky",top:0,zIndex:20,order:-1}}>
@@ -1537,21 +1758,23 @@ export default function App() {
           <img src={LOGO} alt="SRSA" style={{height:38,width:"auto"}}/>
           <div style={{fontFamily:FF,fontSize:11,color:Y,letterSpacing:2}}>ADMINISTRATOR</div>
         </div>
-        {navItems.map(({label,Icon,action,active}) => (
+        {navItems.map(({label,Icon,action,active,badge}) => (
           <button key={label} onClick={action}
-            style={{display:"flex",alignItems:"center",gap:6,background:active?CARD2:"transparent",border:`1px solid ${active?BDR2:"transparent"}`,borderRadius:8,padding:"8px 16px",cursor:"pointer"}}>
+            style={{display:"flex",alignItems:"center",gap:6,background:active?CARD2:"transparent",border:`1px solid ${active?BDR2:"transparent"}`,borderRadius:8,padding:"8px 16px",cursor:"pointer",position:"relative"}}>
             <Icon size={15} color={active?Y:MUTED}/>
             <span style={{fontFamily:FF,fontSize:12,fontWeight:700,letterSpacing:.5,color:active?Y:MUTED}}>{label}</span>
+            {badge>0 && <span style={{background:Y,color:BG,borderRadius:9,minWidth:18,height:18,fontSize:10,fontWeight:800,fontFamily:FF,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 5px"}}>{badge}</span>}
           </button>
         ))}
       </div>
     );
     return (
       <div style={{background:CARD,borderTop:`1px solid ${BDR}`,display:"flex",position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,zIndex:40,paddingBottom:"env(safe-area-inset-bottom)"}}>
-        {navItems.map(({label,Icon,action,active}) => (
-          <button key={label} onClick={action} style={BtnStyle(active)}>
+        {navItems.map(({label,Icon,action,active,badge}) => (
+          <button key={label} onClick={action} style={{...BtnStyle(active),position:"relative"}}>
             <Icon size={20} color={active?Y:MUTED}/>
             <span style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:1,color:active?Y:MUTED}}>{label}</span>
+            {badge>0 && <span style={{position:"absolute",top:4,right:"50%",marginRight:-22,background:Y,color:BG,borderRadius:9,minWidth:17,height:17,fontSize:10,fontWeight:800,fontFamily:FF,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 4px"}}>{badge}</span>}
           </button>
         ))}
       </div>
@@ -1563,7 +1786,9 @@ export default function App() {
     <div>
       <div style={{background:CARD,padding:"24px 18px 18px",borderBottom:`1px solid ${BDR}`}}>
         <div style={{borderRadius:10,padding:"10px 14px",maxWidth:200,marginBottom:16}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
-        <div style={{fontFamily:FF,fontSize:11,color:MUTED,letterSpacing:2}}>TECHNICIAN VIEW</div>
+        {myName
+          ? <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>Welcome, {myName}</div>
+          : <div style={{fontFamily:FF,fontSize:11,color:MUTED,letterSpacing:2}}>TECHNICIAN VIEW</div>}
       </div>
       <div style={{padding:"16px 14px"}}>
         <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2,marginBottom:12}}>ACTIVE JOBS</div>
@@ -2176,8 +2401,21 @@ export default function App() {
     </div>
   );
 
+  // Auth routing (technicians). Admin still uses the PIN and is never gated by this.
+  if (!authReady) return <LoadingView/>;
+  if (mode !== "admin" && mode !== "pin") {
+    // A signed-in tech skips the mode picker entirely and lands straight in the app.
+    if (authUser) {
+      if (!me)                    return <LoadingView/>;          // profile still loading
+      if (me.status !== "approved") return <PendingScreen/>;      // pending or revoked
+    } else {
+      if (mode === "auth")   return <AuthScreen/>;
+      if (mode !== "select") return <ModeSelect/>;
+      return <ModeSelect/>;
+    }
+  }
   if (loading && mode!=="select" && mode!=="pin") return <LoadingView/>;
-  if (mode==="select") return <ModeSelect/>;
+  if (mode==="select" && !authUser) return <ModeSelect/>;
   if (mode==="pin")    return <PinScreen/>;
   const isAdmin = mode==="admin";
 
@@ -2198,6 +2436,7 @@ export default function App() {
           {view==="section"   && <AdminSectionView/>}
           {view==="task"      && <AdminTaskView/>}
           {view==="dashboard" && <DashboardView/>}
+          {view==="users"     && <AdminUsersView/>}
         </>) : (<>
           {view==="jobs"    && <TechJobsView/>}
           {view==="hoses"   && <TechHosesView/>}
@@ -2214,10 +2453,10 @@ export default function App() {
       {showRateModal && <RateModal/>}
       {showJob    && <JobForm/>}
       {showHoseBuilder && selJob && jobs.find(j=>j.id===selJob) &&
-        <HoseBuilderModal job={jobs.find(j=>j.id===selJob)} onClose={()=>setShowHoseBuilder(false)} onSave={addHose}/>}
+        <HoseBuilderModal job={jobs.find(j=>j.id===selJob)} onClose={()=>setShowHoseBuilder(false)} onSave={addHose} defaultWorker={myName}/>}
       {editHose && jobs.find(j=>j.id===editHose.jobId) &&
         <HoseBuilderModal job={jobs.find(j=>j.id===editHose.jobId)} initial={editHose}
-          onClose={()=>setEditHose(null)} onSave={updHose}/>}
+          onClose={()=>setEditHose(null)} onSave={updHose} defaultWorker={myName}/>}
       {confirmHoseDel && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
           <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:320,width:"100%"}}>
