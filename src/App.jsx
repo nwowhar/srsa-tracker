@@ -1045,20 +1045,32 @@ export default function App() {
   // ── Auth handlers ──
   const doSignUp = async (name, email, pw) => {
     setAuthErr(""); setAuthBusy(true);
+    let cred = null;
     try {
-      const cred = await createUserWithEmailAndPassword(auth, email.trim(), pw);
-      // New accounts land as "pending" until an admin approves them.
+      cred = await createUserWithEmailAndPassword(auth, email.trim(), pw);
+    } catch (e) {
+      setAuthErr(
+        e.code==="auth/email-already-in-use"  ? "That email already has an account — try signing in." :
+        e.code==="auth/weak-password"         ? "Password needs to be at least 6 characters." :
+        e.code==="auth/invalid-email"         ? "That doesn't look like a valid email address." :
+        e.code==="auth/operation-not-allowed" ? "Email sign-in isn't switched on for this app yet — tell the supervisor." :
+        e.code==="auth/network-request-failed"? "No connection — check your signal and try again." :
+        `Couldn't create the account (${e.code||"unknown error"}).`
+      );
+      setAuthBusy(false);
+      return;
+    }
+    // Auth account exists; now write the profile that holds name + approval status.
+    try {
       await setDoc(doc(db,"users",cred.user.uid), {
         name: name.trim(), email: email.trim().toLowerCase(),
         status: "pending", createdAt: Date.now(),
       });
     } catch (e) {
-      setAuthErr(
-        e.code==="auth/email-already-in-use" ? "That email already has an account — try signing in." :
-        e.code==="auth/weak-password"        ? "Password needs to be at least 6 characters." :
-        e.code==="auth/invalid-email"        ? "That doesn't look like a valid email address." :
-        "Couldn't create the account. Check your connection and try again."
-      );
+      // Signed in but profile write failed — sign back out so they retry cleanly
+      // rather than getting stuck on a "waiting for approval" screen forever.
+      await signOut(auth).catch(()=>{});
+      setAuthErr(`Account made but the profile couldn't save (${e.code||"unknown"}). Tell the supervisor and try again.`);
     }
     setAuthBusy(false);
   };
@@ -1068,8 +1080,11 @@ export default function App() {
     catch (e) {
       setAuthErr(
         e.code==="auth/invalid-credential" || e.code==="auth/wrong-password" || e.code==="auth/user-not-found"
-          ? "Email or password isn't right."
-          : "Couldn't sign in. Check your connection and try again."
+          ? "Email or password isn't right." :
+        e.code==="auth/operation-not-allowed" ? "Email sign-in isn't switched on for this app yet — tell the supervisor." :
+        e.code==="auth/network-request-failed" ? "No connection — check your signal and try again." :
+        e.code==="auth/too-many-requests" ? "Too many attempts. Wait a minute and try again." :
+        `Couldn't sign in (${e.code||"unknown error"}).`
       );
     }
     setAuthBusy(false);
@@ -1080,8 +1095,17 @@ export default function App() {
     try { await sendPasswordResetEmail(auth, email.trim()); setAuthErr("Password reset email sent — check your inbox."); }
     catch { setAuthErr("Couldn't send the reset email. Check the address."); }
   };
-  const setUserStatus = async (uid, status) => { await setDoc(doc(db,"users",uid), {status, approvedAt:Date.now()}, {merge:true}); };
-  const delUser       = async uid => { await deleteDoc(doc(db,"users",uid)); };
+  const [userErr, setUserErr] = useState("");
+  const setUserStatus = async (uid, status) => {
+    setUserErr("");
+    try { await setDoc(doc(db,"users",uid), {status, approvedAt:Date.now()}, {merge:true}); }
+    catch (e) { setUserErr(`Couldn't save that change (${e.code||"unknown"}). Check the Firestore rules.`); }
+  };
+  const delUser = async uid => {
+    setUserErr("");
+    try { await deleteDoc(doc(db,"users",uid)); }
+    catch (e) { setUserErr(`Couldn't delete that account (${e.code||"unknown"}).`); }
+  };
   const goUsers       = () => { setStack([]); setView("users"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   // Display name of the signed-in tech, used to pre-fill worker fields.
@@ -1306,6 +1330,11 @@ export default function App() {
           </div>
         </div>
         <div style={{padding:"14px"}}>
+          {userErr && (
+            <div style={{background:"rgba(255,76,76,.1)",border:`1px solid ${RED}`,borderRadius:10,padding:"11px 13px",marginBottom:12,fontSize:12,color:RED,lineHeight:1.5}}>
+              {userErr}
+            </div>
+          )}
           {list.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 20px",lineHeight:1.6}}>No technician accounts yet.<br/>They'll appear here as the boys sign up.</div>}
           {list.map(u => {
             const b = badge(u.status);
@@ -2345,54 +2374,209 @@ export default function App() {
     );
   };
 
-  const DashboardView = () => (
-    <div>
-      <TopBar title="Administrator Dashboard" sub="Hours vs estimate by section"/>
-      {jobs.map(j => {
-        const o = jStats(j.id);
-        const pct = o.est>0?(o.actual/o.est*100).toFixed(0):0;
-        return (
-          <div key={j.id} style={{padding:"14px 14px 4px"}}>
-            <div style={{fontFamily:FF,fontSize:13,fontWeight:800,color:Y,letterSpacing:1,marginBottom:10}}>{j.serial} — {j.client}</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-              <div style={{background:CARD2,borderRadius:8,padding:"10px 12px"}}><div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:2}}>TOTAL EST</div><div style={{fontFamily:MONO,fontSize:22,color:Y}}>{o.est.toFixed(0)}h</div></div>
-              <div style={{background:CARD2,borderRadius:8,padding:"10px 12px"}}><div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:2}}>TOTAL LOGGED</div><div style={{fontFamily:MONO,fontSize:22,color:o.actual>o.est?RED:TXT}}>{o.actual.toFixed(1)}h</div></div>
+  const DashboardView = () => {
+    const [range, setRange] = useState("all"); // all | 30 | 7
+    const cutoff = range==="all" ? null
+      : new Date(Date.now() - (range==="30"?30:7)*864e5).toISOString().split("T")[0];
+    const inRange = d => !cutoff || (d||"") >= cutoff;
+
+    // ── Flatten every time entry once, then derive everything from it ──
+    const allEntries = [];
+    Object.values(entries).forEach(arr => arr.forEach(e => allEntries.push(e)));
+    const rangeEntries = allEntries.filter(e => inRange(e.date));
+
+    // Labour by worker (free-text name, trimmed; blanks grouped as Unassigned)
+    const byWorker = {};
+    rangeEntries.forEach(e => {
+      const w = (e.worker||"").trim() || "Unassigned";
+      if (!byWorker[w]) byWorker[w] = {hours:0, entries:0, jobs:new Set()};
+      byWorker[w].hours += Number(e.hours)||0;
+      byWorker[w].entries += 1;
+      byWorker[w].jobs.add(e.jobId);
+    });
+    const workers = Object.entries(byWorker).sort((a,b)=>b[1].hours-a[1].hours);
+    const rangeHours = rangeEntries.reduce((s,e)=>s+(Number(e.hours)||0), 0);
+
+    // ── Hoses: value made vs still unbilled ──
+    const rangeHoses = hoses.filter(h => inRange(h.date));
+    const hoseTotal   = rangeHoses.reduce((s,h)=>s+hoseCalc(h).total, 0);
+    const hoseUnbilled= rangeHoses.filter(h=>!h.billed).reduce((s,h)=>s+hoseCalc(h).total, 0);
+
+    // ── Portfolio totals across all jobs ──
+    const totals = jobs.reduce((a,j) => {
+      const o = jStats(j.id);
+      a.est += o.est; a.actual += o.actual;
+      a.estCost += o.estCost; a.actualCost += o.actualCost;
+      return a;
+    }, {est:0, actual:0, estCost:0, actualCost:0});
+
+    // ── Task completion across all jobs ──
+    const taskCounts = jobs.reduce((a,j) => {
+      const ts = [...TASKS.filter(t=>isIn(j.id,t)), ...(customTasks[j.id]||[])];
+      ts.forEach(t => { a[getStatus(j.id,t.id)] = (a[getStatus(j.id,t.id)]||0)+1; a.total++; });
+      return a;
+    }, {total:0});
+
+    // ── Recent activity: newest 12 events across entries, hoses and photos ──
+    const activity = [
+      ...allEntries.map(e => ({kind:"hours", date:e.date, ts:e.date,
+        text:`${(Number(e.hours)||0).toFixed(1)}h on ${e.taskId}`, who:e.worker, jobId:e.jobId})),
+      ...hoses.map(h => ({kind:"hose", date:h.date, ts:h.date,
+        text:`Hose ${h.hose?.itemNo||""} · ${lenMm(h)}mm`, who:h.worker, jobId:h.jobId})),
+    ].filter(a=>a.date).sort((a,b)=>(b.ts||"").localeCompare(a.ts||"")).slice(0,12);
+
+    const money = n => `$${Math.round(n).toLocaleString()}`;
+    const Stat = ({label, value, sub, col}) => (
+      <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px"}}>
+        <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>{label}</div>
+        <div style={{fontFamily:MONO,fontSize:21,color:col||TXT,marginTop:4,lineHeight:1.1}}>{value}</div>
+        {sub && <div style={{fontSize:10,color:MUTED,marginTop:3}}>{sub}</div>}
+      </div>
+    );
+    const Section = ({title, right, children}) => (
+      <div style={{marginBottom:22}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+          <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>{title}</span>
+          <div style={{flex:1,height:1,background:BDR}}/>
+          {right && <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{right}</span>}
+        </div>
+        {children}
+      </div>
+    );
+
+    return (
+      <div>
+        <TopBar title="Dashboard" sub="Everything at a glance"/>
+
+        {/* date range */}
+        <div style={{display:"flex",gap:8,padding:"12px 14px 4px"}}>
+          {[["7","7 DAYS"],["30","30 DAYS"],["all","ALL TIME"]].map(([v,l])=>(
+            <button key={v} onClick={()=>setRange(v)}
+              style={{flex:1,background:range===v?Y:CARD,border:`1px solid ${range===v?Y:BDR2}`,borderRadius:8,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,letterSpacing:1,color:range===v?BG:MUTED}}>
+              {l}
+            </button>
+          ))}
+        </div>
+
+        <div style={{padding: isDesktop?"14px 24px":"14px"}}>
+
+          <Section title="LABOUR" right={`${rangeHours.toFixed(1)}h in range`}>
+            <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(4,1fr)":"1fr 1fr",gap:8}}>
+              <Stat label="EST HOURS"   value={`${totals.est.toFixed(0)}h`} sub="all jobs"/>
+              <Stat label="LOGGED"      value={`${totals.actual.toFixed(1)}h`}
+                    col={totals.actual>totals.est?RED:TXT}
+                    sub={totals.est>0?`${(totals.actual/totals.est*100).toFixed(0)}% of estimate`:""}/>
+              <Stat label="LABOUR VALUE" value={money(totals.actualCost)} col={Y} sub="inc GST"/>
+              <Stat label="VARIANCE"     value={`${totals.actual-totals.est>0?"+":""}${(totals.actual-totals.est).toFixed(1)}h`}
+                    col={totals.actual>totals.est?RED:GRN}
+                    sub={totals.actual>totals.est?"over estimate":"under estimate"}/>
             </div>
-            <Bar v={o.actual} max={o.est} h={6}/>
-            <div style={{fontSize:11,color:MUTED,marginTop:6,marginBottom:12}}>{pct}% · Est ${Math.round(o.estCost).toLocaleString()} / Act ${Math.round(o.actualCost).toLocaleString()} +GST</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 44px 44px 44px",gap:6,padding:"0 8px 8px",borderBottom:`1px solid ${BDR}`}}>
-              {["SECTION","EST h","ACT h","VAR"].map(h=><div key={h} style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1,textAlign:h!=="SECTION"?"right":"left"}}>{h}</div>)}
+          </Section>
+
+          <Section title="HOSES" right={`${rangeHoses.length} made`}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <Stat label="HOSE VALUE" value={money(hoseTotal)} col={Y} sub="inc GST, in range"/>
+              <Stat label="NOT YET BILLED" value={money(hoseUnbilled)}
+                    col={hoseUnbilled>0?RED:GRN}
+                    sub={hoseUnbilled>0?`${rangeHoses.filter(h=>!h.billed).length} hose${rangeHoses.filter(h=>!h.billed).length===1?"":"s"} outstanding`:"all billed"}/>
             </div>
-            {SECTIONS.map(sec => {
-              const st = sStats(j.id, sec.id);
-              const over = st.actual>st.est&&st.est>0;
-              const v = st.actual-st.est;
+            {hoseUnbilled>0 && (
+              <button onClick={goHoses}
+                style={{width:"100%",marginTop:8,background:CARD,border:`1px solid ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:Y}}>
+                REVIEW UNBILLED HOSES →
+              </button>
+            )}
+          </Section>
+
+          <Section title="HOURS BY TECH" right={workers.length?`${workers.length} logged`:""}>
+            {workers.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"20px 0"}}>No hours logged in this range.</div>}
+            {workers.map(([name, w]) => {
+              const pct = rangeHours>0 ? (w.hours/rangeHours*100) : 0;
               return (
-                <div key={sec.id} style={{display:"grid",gridTemplateColumns:"1fr 44px 44px 44px",gap:6,padding:"9px 8px",borderBottom:`1px solid ${BDR}`,background:over?"rgba(255,76,76,.04)":"transparent",cursor:"pointer"}} onClick={()=>go("section",{sec:sec.id})}>
-                  <div>
-                    <div style={{display:"flex",alignItems:"center",gap:5}}>
-                      <span style={{fontFamily:FF,fontSize:13,fontWeight:700,color:TXT}}>{sec.name}</span>
-                      {over&&<AlertTriangle size={9} color={RED}/>}
-                    </div>
-                    <div style={{marginTop:4}}><Bar v={st.actual} max={st.est} h={3}/></div>
+                <div key={name} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 12px",marginBottom:6}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
+                    <span style={{fontFamily:FF,fontSize:14,fontWeight:700,color:name==="Unassigned"?MUTED:TXT}}>{name}</span>
+                    <span style={{fontFamily:MONO,fontSize:14,color:Y}}>{w.hours.toFixed(1)}h</span>
                   </div>
-                  <div style={{fontFamily:MONO,fontSize:12,color:Y,textAlign:"right",paddingTop:2}}>{st.est}</div>
-                  <div style={{fontFamily:MONO,fontSize:12,color:st.actual>0?(over?RED:TXT):MUTED,textAlign:"right",paddingTop:2}}>{st.actual>0?st.actual.toFixed(1):"—"}</div>
-                  <div style={{fontFamily:MONO,fontSize:12,color:over?RED:v<0&&st.actual>0?GRN:MUTED,textAlign:"right",paddingTop:2}}>{st.actual>0?(v>0?`+${v.toFixed(1)}`:v.toFixed(1)):"—"}</div>
+                  <div style={{height:4,background:CARD2,borderRadius:2,overflow:"hidden"}}>
+                    <div style={{width:`${pct}%`,height:"100%",background:Y}}/>
+                  </div>
+                  <div style={{fontSize:10,color:MUTED,marginTop:5}}>
+                    {pct.toFixed(0)}% of hours · {w.entries} entr{w.entries===1?"y":"ies"} · {w.jobs.size} job{w.jobs.size===1?"":"s"}
+                  </div>
                 </div>
               );
             })}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 44px 44px 44px",gap:6,padding:"9px 8px",background:CARD2,borderRadius:"0 0 8px 8px",marginBottom:24}}>
-              <div style={{fontFamily:FF,fontSize:12,fontWeight:800,color:TXT}}>TOTAL</div>
-              <div style={{fontFamily:MONO,fontSize:12,color:Y,textAlign:"right"}}>{o.est.toFixed(0)}</div>
-              <div style={{fontFamily:MONO,fontSize:12,color:o.actual>o.est?RED:TXT,textAlign:"right"}}>{o.actual.toFixed(1)}</div>
-              <div style={{fontFamily:MONO,fontSize:12,color:(o.actual-o.est)>0?RED:GRN,textAlign:"right"}}>{o.actual>0?((o.actual-o.est)>0?`+${(o.actual-o.est).toFixed(1)}`:(o.actual-o.est).toFixed(1)):"—"}</div>
+          </Section>
+
+          <Section title="TASK PROGRESS" right={`${taskCounts.total} tasks`}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+              <Stat label="COMPLETED" value={taskCounts.completed||0} col={GRN}
+                    sub={taskCounts.total?`${((taskCounts.completed||0)/taskCounts.total*100).toFixed(0)}%`:""}/>
+              <Stat label="ONGOING"   value={taskCounts.ongoing||0}/>
+              <Stat label="ON HOLD"   value={taskCounts.on_hold||0} col={(taskCounts.on_hold||0)>0?"#F5A524":MUTED}/>
             </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+          </Section>
+
+          <Section title="RECENT ACTIVITY">
+            {activity.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"20px 0"}}>Nothing logged yet.</div>}
+            {activity.map((a,i) => (
+              <div key={i} style={{display:"flex",alignItems:"center",gap:10,background:CARD,border:`1px solid ${BDR}`,borderRadius:8,padding:"9px 12px",marginBottom:6}}>
+                <div style={{width:26,height:26,borderRadius:6,background:CARD2,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                  {a.kind==="hose" ? <Cable size={13} color={Y}/> : <Clock size={13} color={Y}/>}
+                </div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:13,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.text}</div>
+                  <div style={{fontSize:10,color:MUTED,marginTop:1}}>
+                    {a.date}{a.who?` · ${a.who}`:""}{jobs.find(j=>j.id===a.jobId)?` · ${jobs.find(j=>j.id===a.jobId).client}`:""}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </Section>
+
+          {/* Per-job section breakdown (the original table, kept) */}
+          {jobs.map(j => {
+            const o = jStats(j.id);
+            const pct = o.est>0?(o.actual/o.est*100).toFixed(0):0;
+            return (
+              <Section key={j.id} title={`${j.client} — ${j.serial}`} right={`${pct}%`}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 44px 44px 44px",gap:6,padding:"0 8px 8px",borderBottom:`1px solid ${BDR}`}}>
+                  {["SECTION","EST h","ACT h","VAR"].map(h=><div key={h} style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1,textAlign:h!=="SECTION"?"right":"left"}}>{h}</div>)}
+                </div>
+                {SECTIONS.map(sec => {
+                  const st = sStats(j.id, sec.id);
+                  const over = st.actual>st.est&&st.est>0;
+                  const v = st.actual-st.est;
+                  return (
+                    <div key={sec.id} onClick={()=>{setSelJob(j.id); go("section",{job:j.id, sec:sec.id});}}
+                      style={{display:"grid",gridTemplateColumns:"1fr 44px 44px 44px",gap:6,padding:"9px 8px",borderBottom:`1px solid ${BDR}`,background:over?"rgba(255,76,76,.04)":"transparent",cursor:"pointer"}}>
+                      <div>
+                        <div style={{display:"flex",alignItems:"center",gap:5}}>
+                          <span style={{fontFamily:FF,fontSize:13,fontWeight:700,color:TXT}}>{sec.name}</span>
+                          {over&&<AlertTriangle size={9} color={RED}/>}
+                        </div>
+                        <div style={{marginTop:4}}><Bar v={st.actual} max={st.est} h={3}/></div>
+                      </div>
+                      <div style={{fontFamily:MONO,fontSize:12,color:Y,textAlign:"right",paddingTop:2}}>{st.est}</div>
+                      <div style={{fontFamily:MONO,fontSize:12,color:st.actual>0?(over?RED:TXT):MUTED,textAlign:"right",paddingTop:2}}>{st.actual>0?st.actual.toFixed(1):"—"}</div>
+                      <div style={{fontFamily:MONO,fontSize:12,color:over?RED:v<0&&st.actual>0?GRN:MUTED,textAlign:"right",paddingTop:2}}>{st.actual>0?(v>0?`+${v.toFixed(1)}`:v.toFixed(1)):"—"}</div>
+                    </div>
+                  );
+                })}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 44px 44px 44px",gap:6,padding:"9px 8px",background:CARD2,borderRadius:"0 0 8px 8px"}}>
+                  <div style={{fontFamily:FF,fontSize:12,fontWeight:800,color:TXT}}>TOTAL</div>
+                  <div style={{fontFamily:MONO,fontSize:12,color:Y,textAlign:"right"}}>{o.est.toFixed(0)}</div>
+                  <div style={{fontFamily:MONO,fontSize:12,color:o.actual>o.est?RED:TXT,textAlign:"right"}}>{o.actual.toFixed(1)}</div>
+                  <div style={{fontFamily:MONO,fontSize:12,color:(o.actual-o.est)>0?RED:GRN,textAlign:"right"}}>{o.actual>0?((o.actual-o.est)>0?`+${(o.actual-o.est).toFixed(1)}`:(o.actual-o.est).toFixed(1)):"—"}</div>
+                </div>
+              </Section>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
 
   const LoadingView = () => (
     <div style={{minHeight:"100dvh",background:BG,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
