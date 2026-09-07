@@ -116,7 +116,7 @@ const TASKS = [
   {id:"11.11",sId:11,desc:"Broken or worn door latches",est:5,opt:true,cost:725},
   {id:"11.12",sId:11,desc:"Detail inside of cab",est:3,opt:true,cost:435},
   {id:"11.13",sId:11,desc:"Polish bonnet and roof",est:3,opt:true,cost:435},
-  {id:"11.14",sId:11,desc:"Paint bonnet grill",est:2,opt:true,cost:290},
+  {id:"11.14",sId:11,desc:"Paint bonnet grill!",est:2,opt:true,cost:290},
 ];
 
 const today = () => new Date().toISOString().split("T")[0];
