@@ -664,14 +664,6 @@ export default function App() {
     return () => { window.removeEventListener("resize", onResize); unsubAuth(); };
   }, []);
 
-  // Live profile for the signed-in tech (approval status can flip while they wait).
-  useEffect(() => {
-    if (!authUser) { setMe(null); return; }
-    return onSnapshot(doc(db,"users",authUser.uid), snap => {
-      setMe(snap.exists() ? {id:snap.id, ...snap.data()} : null);
-    }, () => setMe(null));
-  }, [authUser]);
-
   useEffect(() => {
     const unsubs = [];
     unsubs.push(onSnapshot(collection(db,"jobs"), snap => {
@@ -778,6 +770,14 @@ export default function App() {
   const [authScreen, setAuthScreen] = useState("signin"); // signin | signup
   const [authErr, setAuthErr]     = useState("");
   const [authBusy, setAuthBusy]   = useState(false);
+
+  // Live profile for the signed-in tech (approval status can flip while they wait).
+  useEffect(() => {
+    if (!authUser) { setMe(null); return; }
+    return onSnapshot(doc(db,"users",authUser.uid), snap => {
+      setMe(snap.exists() ? {id:snap.id, ...snap.data()} : null);
+    }, () => setMe(null));
+  }, [authUser]);
   const [showCtModal, setShowCtModal] = useState(false);
   const [ctParentId, setCtParentId]   = useState(null); // null = top-level
   const [ctForm, setCtForm]           = useState({desc:"",est:"",cost:"",opt:false});
