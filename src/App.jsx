@@ -2405,6 +2405,21 @@ export default function App() {
     const workers = Object.entries(byWorker).sort((a,b)=>b[1].hours-a[1].hours);
     const rangeHours = rangeEntries.reduce((s,e)=>s+(Number(e.hours)||0), 0);
 
+    // Hours per calendar day — feeds the heatmap (always all-time so the grid is stable).
+    const hoursByDate = {};
+    allEntries.forEach(e => {
+      if (!e.date) return;
+      hoursByDate[e.date] = (hoursByDate[e.date]||0) + (Number(e.hours)||0);
+    });
+    // Cumulative hours over time — feeds the burn-up chart.
+    const burnPoints = Object.keys(hoursByDate).sort().reduce((acc, d) => {
+      const prev = acc.length ? acc[acc.length-1].cum : 0;
+      acc.push({date:d, cum: prev + hoursByDate[d]});
+      return acc;
+    }, []);
+    const daysWorked = Object.keys(hoursByDate).length;
+    const avgPerDay  = daysWorked ? (burnPoints[burnPoints.length-1].cum / daysWorked) : 0;
+
     // ── Hoses: value made vs still unbilled ──
     const rangeHoses = hoses.filter(h => inRange(h.date));
     const hoseTotal   = rangeHoses.reduce((s,h)=>s+hoseCalc(h).total, 0);
@@ -2441,6 +2456,148 @@ export default function App() {
         {sub && <div style={{fontSize:10,color:MUTED,marginTop:3}}>{sub}</div>}
       </div>
     );
+    // ── Calendar heatmap: one square per day, shade by hours logged ──
+    const CalendarHeatmap = ({byDate, weeks=18}) => {
+      const today = new Date();
+      // Walk back to the Monday that starts the earliest visible week.
+      const end = new Date(today); end.setHours(0,0,0,0);
+      const endDow = (end.getDay()+6)%7;              // 0 = Monday
+      const lastMon = new Date(end); lastMon.setDate(end.getDate()-endDow);
+      const start = new Date(lastMon); start.setDate(lastMon.getDate()-(weeks-1)*7);
+
+      const CELL=13, GAP=3, LBL=24, TOP=16;
+      const vals = Object.values(byDate);
+      const max  = vals.length ? Math.max(...vals) : 0;
+      const shade = h => {
+        if (!h) return CARD2;
+        const t = max>0 ? h/max : 0;
+        if (t <= .25) return "rgba(232,176,0,.28)";
+        if (t <= .50) return "rgba(232,176,0,.50)";
+        if (t <= .75) return "rgba(232,176,0,.74)";
+        return Y;
+      };
+      const cols = [];
+      const monthTicks = [];
+      let lastMonth = -1;
+      for (let w=0; w<weeks; w++) {
+        const days = [];
+        for (let d=0; d<7; d++) {
+          const dt = new Date(start); dt.setDate(start.getDate()+w*7+d);
+          if (dt > end) { days.push(null); continue; }
+          const iso = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+          days.push({iso, h: byDate[iso]||0});
+          if (d===0 && dt.getMonth()!==lastMonth) { lastMonth = dt.getMonth(); monthTicks.push({w, m:MONTHS[dt.getMonth()].slice(0,3)}); }
+        }
+        cols.push(days);
+      }
+      const W = LBL + weeks*(CELL+GAP), H = TOP + 7*(CELL+GAP) + 4;
+      return (
+        <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 12px 10px",overflowX:"auto"}}>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",minWidth:W*0.8,height:"auto",display:"block"}}>
+            {monthTicks.map(({w,m}) => (
+              <text key={m+w} x={LBL+w*(CELL+GAP)} y={10} fill={MUTED} fontSize="8" fontFamily="'Barlow',sans-serif">{m}</text>
+            ))}
+            {["M","","W","","F","",""].map((d,i) => d ? (
+              <text key={i} x={0} y={TOP+i*(CELL+GAP)+CELL-3} fill={MUTED} fontSize="8" fontFamily="'Barlow',sans-serif">{d}</text>
+            ) : null)}
+            {cols.map((days,w) => days.map((day,d) => day && (
+              <rect key={`${w}-${d}`} x={LBL+w*(CELL+GAP)} y={TOP+d*(CELL+GAP)}
+                width={CELL} height={CELL} rx="2.5" fill={shade(day.h)}>
+                <title>{day.iso} — {day.h ? `${day.h.toFixed(1)}h` : "no hours"}</title>
+              </rect>
+            )))}
+          </svg>
+          <div style={{display:"flex",alignItems:"center",gap:5,marginTop:8,justifyContent:"flex-end"}}>
+            <span style={{fontSize:9,color:MUTED}}>Less</span>
+            {[CARD2,"rgba(232,176,0,.28)","rgba(232,176,0,.50)","rgba(232,176,0,.74)",Y].map((c,i)=>(
+              <div key={i} style={{width:10,height:10,borderRadius:2,background:c}}/>
+            ))}
+            <span style={{fontSize:9,color:MUTED}}>More{max>0?` (${max.toFixed(1)}h)`:""}</span>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Burn-up: cumulative hours logged against the estimate ──
+    const BurnUp = ({points, estimate}) => {
+      if (points.length < 2) return (
+        <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"24px 14px",textAlign:"center",color:MUTED,fontSize:12}}>
+          Not enough history yet — this fills in as hours get logged.
+        </div>
+      );
+      const W=320, H=120, PL=34, PR=8, PT=10, PB=18;
+      const maxY = Math.max(estimate||0, points[points.length-1].cum) * 1.05 || 1;
+      const x = i => PL + (i/(points.length-1))*(W-PL-PR);
+      const y = v => H-PB - (v/maxY)*(H-PT-PB);
+      const path = points.map((p,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join(" ");
+      const area = `${path} L${x(points.length-1).toFixed(1)},${H-PB} L${x(0).toFixed(1)},${H-PB} Z`;
+      const estY = estimate>0 ? y(estimate) : null;
+      return (
+        <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 12px 8px"}}>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"auto",display:"block"}}>
+            {[0,.5,1].map(f=>(
+              <g key={f}>
+                <line x1={PL} x2={W-PR} y1={y(maxY*f)} y2={y(maxY*f)} stroke={BDR} strokeWidth="1"/>
+                <text x={PL-5} y={y(maxY*f)+3} fill={MUTED} fontSize="8" textAnchor="end" fontFamily="'DM Mono',monospace">{Math.round(maxY*f)}h</text>
+              </g>
+            ))}
+            {estY!==null && <>
+              <line x1={PL} x2={W-PR} y1={estY} y2={estY} stroke={RED} strokeWidth="1" strokeDasharray="3 3" opacity=".8"/>
+              <text x={W-PR} y={estY-4} fill={RED} fontSize="8" textAnchor="end" fontFamily="'Barlow',sans-serif">ESTIMATE</text>
+            </>}
+            <path d={area} fill={Y} opacity=".12"/>
+            <path d={path} fill="none" stroke={Y} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
+            <circle cx={x(points.length-1)} cy={y(points[points.length-1].cum)} r="3.5" fill={Y}/>
+            <text x={PL} y={H-5} fill={MUTED} fontSize="8" fontFamily="'Barlow',sans-serif">{points[0].date}</text>
+            <text x={W-PR} y={H-5} fill={MUTED} fontSize="8" textAnchor="end" fontFamily="'Barlow',sans-serif">{points[points.length-1].date}</text>
+          </svg>
+        </div>
+      );
+    };
+
+    // ── Donut for task status ──
+    const StatusDonut = ({counts}) => {
+      const segs = [
+        {k:"completed", label:"Completed", v:counts.completed||0, c:GRN},
+        {k:"ongoing",   label:"Ongoing",   v:counts.ongoing||0,   c:Y},
+        {k:"on_hold",   label:"On hold",   v:counts.on_hold||0,   c:"#F5A524"},
+      ];
+      const total = segs.reduce((s,x)=>s+x.v,0);
+      if (!total) return null;
+      const R=42, C=2*Math.PI*R;
+      let offset = 0;
+      const pct = total ? Math.round((counts.completed||0)/total*100) : 0;
+      return (
+        <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"14px",display:"flex",alignItems:"center",gap:18}}>
+          <svg viewBox="0 0 110 110" style={{width:104,height:104,flexShrink:0}}>
+            <circle cx="55" cy="55" r={R} fill="none" stroke={CARD2} strokeWidth="14"/>
+            {segs.map(s => {
+              if (!s.v) return null;
+              const len = (s.v/total)*C;
+              const el = (
+                <circle key={s.k} cx="55" cy="55" r={R} fill="none" stroke={s.c} strokeWidth="14"
+                  strokeDasharray={`${len} ${C-len}`} strokeDashoffset={-offset}
+                  transform="rotate(-90 55 55)"/>
+              );
+              offset += len; return el;
+            })}
+            <text x="55" y="52" textAnchor="middle" fill={TXT} fontSize="20" fontFamily="'DM Mono',monospace">{pct}%</text>
+            <text x="55" y="66" textAnchor="middle" fill={MUTED} fontSize="8" fontFamily="'Barlow',sans-serif">COMPLETE</text>
+          </svg>
+          <div style={{flex:1,minWidth:0}}>
+            {segs.map(s => (
+              <div key={s.k} style={{display:"flex",alignItems:"center",gap:8,marginBottom:7}}>
+                <div style={{width:9,height:9,borderRadius:2,background:s.c,flexShrink:0}}/>
+                <span style={{fontSize:12,color:TXT,flex:1}}>{s.label}</span>
+                <span style={{fontFamily:MONO,fontSize:13,color:s.c}}>{s.v}</span>
+              </div>
+            ))}
+            <div style={{fontSize:10,color:MUTED,marginTop:4,paddingTop:7,borderTop:`1px solid ${BDR}`}}>{total} tasks across {jobs.length} job{jobs.length===1?"":"s"}</div>
+          </div>
+        </div>
+      );
+    };
+
     const Section = ({title, right, children}) => (
       <div style={{marginBottom:22}}>
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
@@ -2481,6 +2638,14 @@ export default function App() {
             </div>
           </Section>
 
+          <Section title="WORK CALENDAR" right={daysWorked?`${daysWorked} days worked`:""}>
+            <CalendarHeatmap byDate={hoursByDate}/>
+          </Section>
+
+          <Section title="HOURS OVER TIME" right={avgPerDay?`${avgPerDay.toFixed(1)}h avg/day`:""}>
+            <BurnUp points={burnPoints} estimate={totals.est}/>
+          </Section>
+
           <Section title="HOSES" right={`${rangeHoses.length} made`}>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
               <Stat label="HOSE VALUE" value={money(hoseTotal)} col={Y} sub="inc GST, in range"/>
@@ -2518,12 +2683,7 @@ export default function App() {
           </Section>
 
           <Section title="TASK PROGRESS" right={`${taskCounts.total} tasks`}>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
-              <Stat label="COMPLETED" value={taskCounts.completed||0} col={GRN}
-                    sub={taskCounts.total?`${((taskCounts.completed||0)/taskCounts.total*100).toFixed(0)}%`:""}/>
-              <Stat label="ONGOING"   value={taskCounts.ongoing||0}/>
-              <Stat label="ON HOLD"   value={taskCounts.on_hold||0} col={(taskCounts.on_hold||0)>0?"#F5A524":MUTED}/>
-            </div>
+            <StatusDonut counts={taskCounts}/>
           </Section>
 
           <Section title="RECENT ACTIVITY">
