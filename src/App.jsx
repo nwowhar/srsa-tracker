@@ -657,7 +657,10 @@ export default function App() {
     const unsubAuth = onAuthStateChanged(auth, u => {
       setAuthUser(u && !u.isAnonymous ? u : null);
       setAuthReady(true);
-      if (!u) signInAnonymously(auth).catch(() => {}); // keep a session for rules
+      // Keep a session alive so Firestore rules (which require auth) permit writes.
+      if (!u) signInAnonymously(auth).catch(err => {
+        console.error("Anonymous sign-in failed — writes will be blocked:", err.code);
+      });
     });
     const onResize = () => setIsDesktop(window.innerWidth >= 900);
     window.addEventListener("resize", onResize);
@@ -1099,7 +1102,12 @@ export default function App() {
   const setUserStatus = async (uid, status) => {
     setUserErr("");
     try { await setDoc(doc(db,"users",uid), {status, approvedAt:Date.now()}, {merge:true}); }
-    catch (e) { setUserErr(`Couldn't save that change (${e.code||"unknown"}). Check the Firestore rules.`); }
+    catch (e) {
+      const who = auth.currentUser
+        ? (auth.currentUser.isAnonymous ? "anonymous session" : `signed in as ${auth.currentUser.email}`)
+        : "NOT SIGNED IN — enable Anonymous auth in Firebase Console";
+      setUserErr(`Couldn't save that change (${e.code||"unknown"}) · ${who}`);
+    }
   };
   const delUser = async uid => {
     setUserErr("");
