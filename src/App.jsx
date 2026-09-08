@@ -2491,13 +2491,17 @@ export default function App() {
 
   const DashboardView = () => {
     const [range, setRange] = useState("all"); // all | 30 | 7
+    const [dashJob, setDashJob] = useState("all"); // "all" | jobId
     const cutoff = range==="all" ? null
       : new Date(Date.now() - (range==="30"?30:7)*864e5).toISOString().split("T")[0];
     const inRange = d => !cutoff || (d||"") >= cutoff;
+    const inJob   = jid => dashJob==="all" || jid===dashJob;
+    // Jobs in scope — one when a job is selected, all of them otherwise.
+    const scopeJobs = dashJob==="all" ? jobs : jobs.filter(j => j.id===dashJob);
 
     // ── Flatten every time entry once, then derive everything from it ──
     const allEntries = [];
-    Object.values(entries).forEach(arr => arr.forEach(e => allEntries.push(e)));
+    Object.values(entries).forEach(arr => arr.forEach(e => { if (inJob(e.jobId)) allEntries.push(e); }));
     const rangeEntries = allEntries.filter(e => inRange(e.date));
 
     // Labour by worker (free-text name, trimmed; blanks grouped as Unassigned)
@@ -2528,12 +2532,12 @@ export default function App() {
     const avgPerDay  = daysWorked ? (burnPoints[burnPoints.length-1].cum / daysWorked) : 0;
 
     // ── Hoses: value made vs still unbilled ──
-    const rangeHoses = hoses.filter(h => inRange(h.date));
+    const rangeHoses = hoses.filter(h => inRange(h.date) && inJob(h.jobId));
     const hoseTotal   = rangeHoses.reduce((s,h)=>s+hoseCalc(h).total, 0);
     const hoseUnbilled= rangeHoses.filter(h=>!h.billed).reduce((s,h)=>s+hoseCalc(h).total, 0);
 
     // ── Portfolio totals across all jobs ──
-    const totals = jobs.reduce((a,j) => {
+    const totals = scopeJobs.reduce((a,j) => {
       const o = jStats(j.id);
       a.est += o.est; a.actual += o.actual;
       a.estCost += o.estCost; a.actualCost += o.actualCost;
@@ -2541,7 +2545,7 @@ export default function App() {
     }, {est:0, actual:0, estCost:0, actualCost:0});
 
     // ── Task completion across all jobs ──
-    const taskCounts = jobs.reduce((a,j) => {
+    const taskCounts = scopeJobs.reduce((a,j) => {
       const ts = [...tasksOf(j.id).filter(t=>isIn(j.id,t)), ...(customTasks[j.id]||[])];
       ts.forEach(t => { a[getStatus(j.id,t.id)] = (a[getStatus(j.id,t.id)]||0)+1; a.total++; });
       return a;
@@ -2551,7 +2555,7 @@ export default function App() {
     const activity = [
       ...allEntries.map(e => ({kind:"hours", date:e.date, ts:e.date,
         text:`${(Number(e.hours)||0).toFixed(1)}h on ${e.taskId}`, who:e.worker, jobId:e.jobId})),
-      ...hoses.map(h => ({kind:"hose", date:h.date, ts:h.date,
+      ...hoses.filter(h=>inJob(h.jobId)).map(h => ({kind:"hose", date:h.date, ts:h.date,
         text:`Hose ${h.hose?.itemNo||""} · ${lenMm(h)}mm`, who:h.worker, jobId:h.jobId})),
     ].filter(a=>a.date).sort((a,b)=>(b.ts||"").localeCompare(a.ts||"")).slice(0,12);
 
@@ -2699,7 +2703,97 @@ export default function App() {
                 <span style={{fontFamily:MONO,fontSize:13,color:s.c}}>{s.v}</span>
               </div>
             ))}
-            <div style={{fontSize:10,color:MUTED,marginTop:4,paddingTop:7,borderTop:`1px solid ${BDR}`}}>{total} tasks across {jobs.length} job{jobs.length===1?"":"s"}</div>
+            <div style={{fontSize:10,color:MUTED,marginTop:4,paddingTop:7,borderTop:`1px solid ${BDR}`}}>{total} tasks across {scopeJobs.length} job{scopeJobs.length===1?"":"s"}</div>
+          </div>
+        </div>
+      );
+    };
+
+    // ── Build schedule (Gantt) ──
+    // Bars are positioned by the template's working-day offsets. Colour comes
+    // from live task status, so plan and actual sit on the same chart.
+    const GanttChart = ({job}) => {
+      const tmpl = tmplOf(job.id);
+      const sched = tmpl.schedule.filter(s => s.start !== null && s.dur);
+      if (!sched.length) return null;
+      const tasks = tmpl.tasks;
+      const span = Math.max(...sched.map(s => s.end || 0));
+
+      // Working days elapsed since the job started (Mon–Fri), for the today marker.
+      const workingDaysSince = iso => {
+        if (!iso) return null;
+        const from = new Date(iso), to = new Date();
+        if (isNaN(from) || to < from) return null;
+        let n = 0;
+        for (let d = new Date(from); d <= to; d.setDate(d.getDate()+1)) {
+          const dow = d.getDay();
+          if (dow !== 0 && dow !== 6) n++;
+        }
+        return n;
+      };
+      const elapsed = workingDaysSince(job.started);
+
+      const ROW=17, LBL=104, PAD=8, TOP=22;
+      const W = 340, H = TOP + sched.length*ROW + 14;
+      const x = d => LBL + (d/span)*(W-LBL-PAD);
+      const statusOf = tid => getStatus(job.id, tid);
+      const colFor = tid => {
+        const s = statusOf(tid);
+        return s==="completed" ? GRN : s==="on_hold" ? "#F5A524" : Y;
+      };
+      const opacityFor = tid => statusOf(tid)==="ongoing" ? .45 : .95;
+
+      // Week gridlines every 5 working days
+      const ticks = [];
+      for (let d=0; d<=span; d+=5) ticks.push(d);
+
+      const done = sched.filter(s => statusOf(s.taskId)==="completed").length;
+
+      return (
+        <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 8px 6px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",padding:"0 6px 8px"}}>
+            <span style={{fontSize:11,color:MUTED}}>{done}/{sched.length} scheduled tasks complete</span>
+            <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{span.toFixed(0)} working days</span>
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",minWidth:320,height:"auto",display:"block"}}>
+              {ticks.map(d => (
+                <g key={d}>
+                  <line x1={x(d)} x2={x(d)} y1={TOP-6} y2={H-10} stroke={BDR} strokeWidth=".7"/>
+                  <text x={x(d)} y={TOP-10} fill={MUTED} fontSize="7" textAnchor="middle" fontFamily="'DM Mono',monospace">d{d}</text>
+                </g>
+              ))}
+              {elapsed !== null && elapsed <= span && (
+                <>
+                  <line x1={x(elapsed)} x2={x(elapsed)} y1={TOP-6} y2={H-10} stroke={RED} strokeWidth="1.2"/>
+                  <text x={x(elapsed)} y={H-2} fill={RED} fontSize="7" textAnchor="middle" fontFamily="'Barlow',sans-serif">TODAY</text>
+                </>
+              )}
+              {sched.map((s,i) => {
+                const t = tasks.find(t => t.id===s.taskId);
+                const y = TOP + i*ROW;
+                const bw = Math.max(x(s.end)-x(s.start), 2);
+                return (
+                  <g key={s.taskId+i}>
+                    <text x={2} y={y+9} fill={MUTED} fontSize="7" fontFamily="'DM Mono',monospace">{s.taskId}</text>
+                    <text x={26} y={y+9} fill={TXT} fontSize="7" fontFamily="'Barlow',sans-serif">
+                      {(t?.desc||"").slice(0,26)}
+                    </text>
+                    <rect x={x(s.start)} y={y+2} width={bw} height={ROW-6} rx="2"
+                      fill={colFor(s.taskId)} opacity={opacityFor(s.taskId)}>
+                      <title>{s.taskId} — {t?.desc||""}\nDays {s.start}–{s.end} ({s.dur}d, {t?.est||0}h)\nStatus: {statusOf(s.taskId)}{s.pred?`\nAfter: ${s.pred}`:""}</title>
+                    </rect>
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+          <div style={{display:"flex",gap:12,justifyContent:"center",padding:"8px 0 2px",flexWrap:"wrap"}}>
+            {[["Complete",GRN],["In progress",Y],["On hold","#F5A524"]].map(([l,c])=>(
+              <span key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:MUTED}}>
+                <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
+              </span>
+            ))}
           </div>
         </div>
       );
@@ -2719,6 +2813,17 @@ export default function App() {
     return (
       <div>
         <TopBar title="Dashboard" sub="Everything at a glance"/>
+
+        {/* job selector */}
+        {jobs.length>0 && (
+          <div style={{padding:"12px 14px 0"}}>
+            <select value={dashJob} onChange={e=>setDashJob(e.target.value)}
+              style={{width:"100%",background:CARD,border:`1px solid ${dashJob==="all"?BDR2:Y}`,borderRadius:8,padding:"11px 13px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none",appearance:"none"}}>
+              <option value="all">All jobs ({jobs.length})</option>
+              {jobs.map(j => <option key={j.id} value={j.id}>{j.client} — {j.serial}</option>)}
+            </select>
+          </div>
+        )}
 
         {/* date range */}
         <div style={{display:"flex",gap:8,padding:"12px 14px 4px"}}>
@@ -2793,6 +2898,13 @@ export default function App() {
             <StatusDonut counts={taskCounts}/>
           </Section>
 
+          {scopeJobs.filter(j => tmplOf(j.id).schedule.length > 0).map(j => (
+            <Section key={j.id} title={scopeJobs.length>1 ? `SCHEDULE — ${j.client}` : "BUILD SCHEDULE"}
+                     right={j.started?`started ${j.started}`:""}>
+              <GanttChart job={j}/>
+            </Section>
+          ))}
+
           <Section title="RECENT ACTIVITY">
             {activity.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"20px 0"}}>Nothing logged yet.</div>}
             {activity.map((a,i) => (
@@ -2811,7 +2923,7 @@ export default function App() {
           </Section>
 
           {/* Per-job section breakdown (the original table, kept) */}
-          {jobs.map(j => {
+          {scopeJobs.map(j => {
             const o = jStats(j.id);
             const pct = o.est>0?(o.actual/o.est*100).toFixed(0):0;
             return (
