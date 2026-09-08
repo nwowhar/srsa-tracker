@@ -5,6 +5,7 @@ import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc, w
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { getAuth, signInAnonymously, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail } from "firebase/auth";
 import { PRICE_ITEMS } from "./priceList.js";
+import { MACHINES, MACHINE_LIST, DEFAULT_TEMPLATE, getTemplate } from "./templates.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDvvwcT083aF2H5SiuSvvDyWepwpfkMQO0",
@@ -26,98 +27,11 @@ const CARD2 = "#1E2028"; const BDR = "#272A35"; const BDR2 = "#333748";
 const TXT = "#F2F3F7"; const MUTED = "#7A8099"; const GRN = "#28C76F"; const RED = "#FF4C4C";
 const FF = "'Barlow Condensed', sans-serif"; const MONO = "'DM Mono', monospace";
 
-const SECTIONS = [
-  {id:1,name:"Engine"},{id:2,name:"Aux Drives"},{id:3,name:"Cabin"},
-  {id:4,name:"Hydrostatic Drive"},{id:5,name:"Hydraulics"},{id:6,name:"Drivetrain"},
-  {id:7,name:"Suspension"},{id:8,name:"Solution System"},{id:9,name:"Electrics"},
-  {id:10,name:"Boom"},{id:11,name:"Miscellaneous"},
-];
-
-const TASKS = [
-  {id:"1.01",sId:1,desc:"Water pump",est:4,opt:false,cost:580},
-  {id:"1.02",sId:1,desc:"Exhaust manifold gaskets, bolts and deck manifold",est:8,opt:false,cost:1160},
-  {id:"1.03",sId:1,desc:"Front balancer",est:6,opt:true,cost:870},
-  {id:"1.04",sId:1,desc:"Crank seal (only if leaking)",est:2,opt:true,cost:290},
-  {id:"1.05",sId:1,desc:"Rocker cover gasket",est:1,opt:false,cost:145},
-  {id:"1.06",sId:1,desc:"Injectors",est:4,opt:false,cost:580},
-  {id:"1.07",sId:1,desc:"Valve set",est:2,opt:false,cost:290},
-  {id:"1.08",sId:1,desc:"Injector harness",est:1,opt:false,cost:145},
-  {id:"1.09",sId:1,desc:"Full filter kit inc engine air",est:4,opt:false,cost:580},
-  {id:"1.10",sId:1,desc:"Intercooler flexible hoses",est:1,opt:true,cost:145},
-  {id:"1.11",sId:1,desc:"All sensors",est:2,opt:true,cost:290},
-  {id:"1.12",sId:1,desc:"Sump gasket (only if leaking)",est:8,opt:false,cost:1160},
-  {id:"1.13",sId:1,desc:"Coolant hoses",est:1,opt:false,cost:145},
-  {id:"1.14",sId:1,desc:"Fan bearings",est:5,opt:false,cost:725},
-  {id:"1.15",sId:1,desc:"Engine oil cooler o'rings",est:2,opt:true,cost:290},
-  {id:"1.16",sId:1,desc:"Thermostats",est:2,opt:true,cost:290},
-  {id:"1.17",sId:1,desc:"Turbo overhaul",est:3,opt:false,cost:435},
-  {id:"2.01",sId:2,desc:"Alternator",est:1,opt:false,cost:145},
-  {id:"2.02",sId:2,desc:"A/C compressor",est:3,opt:false,cost:435},
-  {id:"2.03",sId:2,desc:"Tx valve",est:2,opt:false,cost:290},
-  {id:"2.04",sId:2,desc:"Drier",est:1,opt:false,cost:145},
-  {id:"2.05",sId:2,desc:"Condenser",est:3,opt:false,cost:435},
-  {id:"2.06",sId:2,desc:"Air compressor (replace)",est:4,opt:false,cost:580},
-  {id:"2.07",sId:2,desc:"Aux drive belt",est:0.5,opt:false,cost:72.5},
-  {id:"2.08",sId:2,desc:"Drive shaft uni joints",est:6,opt:false,cost:870},
-  {id:"3.01",sId:3,desc:"Remove cab from chassis",est:8,opt:false,cost:1160},
-  {id:"3.02",sId:3,desc:"Steering column (if worn)",est:0,opt:false,cost:0},
-  {id:"3.03",sId:3,desc:"Armrest harness (parts in Electrics section)",est:4,opt:false,cost:580},
-  {id:"3.04",sId:3,desc:"Hydrostat cable",est:2,opt:false,cost:290},
-  {id:"3.05",sId:3,desc:"Clean out roof",est:4,opt:false,cost:580},
-  {id:"3.06",sId:3,desc:"Inspect + clean plugs for corrosion",est:6,opt:false,cost:870},
-  {id:"3.07",sId:3,desc:"Cabin filter(s)",est:0.5,opt:false,cost:72.5},
-  {id:"4.01",sId:4,desc:"Remove hydrostatic and overhaul",est:40,opt:false,cost:5800},
-  {id:"4.02",sId:4,desc:"Remove all x4 wheel motors",est:20,opt:false,cost:2900},
-  {id:"4.03",sId:4,desc:"Replace all sensors and solenoids",est:2,opt:true,cost:290},
-  {id:"5.01",sId:5,desc:"Drain and replace oil",est:1,opt:false,cost:145},
-  {id:"5.02",sId:5,desc:"Replace all filters inc strainers in tank",est:6,opt:false,cost:870},
-  {id:"5.03",sId:5,desc:"Complete re-hose",est:80,opt:false,cost:11600},
-  {id:"5.04",sId:5,desc:"Remove all hydraulic driven parts",est:8,opt:false,cost:1160},
-  {id:"5.05",sId:5,desc:"Auxiliary hydraulic pumps off hydrostat",est:1,opt:false,cost:145},
-  {id:"5.06",sId:5,desc:"Steering cylinder",est:9,opt:false,cost:1305},
-  {id:"5.07",sId:5,desc:"Boom roll cylinder",est:6,opt:false,cost:870},
-  {id:"5.08",sId:5,desc:"Boom lift cylinders",est:6,opt:false,cost:870},
-  {id:"5.09",sId:5,desc:"Centre section main cylinder",est:6,opt:false,cost:870},
-  {id:"5.10",sId:5,desc:"Boom tilt cylinders",est:5,opt:false,cost:725},
-  {id:"5.11",sId:5,desc:"Boom fold cylinder",est:6,opt:false,cost:870},
-  {id:"5.12",sId:5,desc:"Ladder cylinder",est:2,opt:false,cost:290},
-  {id:"5.13",sId:5,desc:"Various pressure sensors and solenoids",est:12,opt:true,cost:1740},
-  {id:"6.01",sId:6,desc:"Adjust tread adjust shims",est:6,opt:false,cost:870},
-  {id:"6.02",sId:6,desc:"Wheel hubs (possibly rebuild, otherwise replace)",est:20,opt:false,cost:2900},
-  {id:"7.01",sId:7,desc:"Replace all airbags",est:6,opt:false,cost:870},
-  {id:"8.01",sId:8,desc:"Replace fluid pump (parts in Hyd section)",est:3,opt:false,cost:435},
-  {id:"8.02",sId:8,desc:"Rehose all flexible chem hose",est:16,opt:false,cost:2320},
-  {id:"8.03",sId:8,desc:"Re-seal exact apply modules",est:30,opt:false,cost:4350},
-  {id:"8.04",sId:8,desc:"New flow meters",est:1,opt:false,cost:145},
-  {id:"8.05",sId:8,desc:"Pressure sensors for solution",est:0.5,opt:false,cost:72.5},
-  {id:"9.01",sId:9,desc:"X4 wheel tread adjust harness",est:4,opt:false,cost:580},
-  {id:"9.02",sId:9,desc:"Boom harness",est:16,opt:false,cost:2320},
-  {id:"9.03",sId:9,desc:"Chassis to boom harness",est:6,opt:false,cost:870},
-  {id:"9.04",sId:9,desc:"Chassis harness",est:24,opt:true,cost:3480},
-  {id:"9.05",sId:9,desc:"ECU harness",est:8,opt:true,cost:1160},
-  {id:"9.06",sId:9,desc:"Injector harness",est:2,opt:false,cost:290},
-  {id:"9.07",sId:9,desc:"Armrest harness (definitely)",est:4,opt:false,cost:580},
-  {id:"9.08",sId:9,desc:"Replace all battery and large power cables",est:8,opt:false,cost:1160},
-  {id:"9.09",sId:9,desc:"Cabin harness",est:10,opt:true,cost:1450},
-  {id:"10.01",sId:10,desc:"Line bore and fit bushes to pivot pins",est:18,opt:false,cost:2610},
-  {id:"10.02",sId:10,desc:"Replace stainless spherical bearings to chrome",est:2,opt:false,cost:290},
-  {id:"10.03",sId:10,desc:"Prepare and reassemble for blast and paint",est:20,opt:false,cost:2900},
-  {id:"10.04",sId:10,desc:"LHO fold – replace, repair or fabricate new",est:10,opt:false,cost:1450},
-  {id:"11.01",sId:11,desc:"Pre-delivery and commissioning",est:40,opt:false,cost:5800},
-  {id:"11.02",sId:11,desc:"Preparing quote, onsite visit / set-up files",est:65,opt:false,cost:9425},
-  {id:"11.03",sId:11,desc:"Sand and paint rims (new tyres)",est:8,opt:true,cost:1160},
-  {id:"11.04",sId:11,desc:"Mudguards",est:4,opt:true,cost:580},
-  {id:"11.05",sId:11,desc:"Blast and paint under belly guards",est:4,opt:true,cost:580},
-  {id:"11.06",sId:11,desc:"Gas struts on doors or bonnet",est:2,opt:true,cost:290},
-  {id:"11.07",sId:11,desc:"Replace damaged or broken ladder steps",est:2,opt:true,cost:290},
-  {id:"11.08",sId:11,desc:"New batteries",est:1,opt:true,cost:145},
-  {id:"11.09",sId:11,desc:"Anti-slip tape on walkway areas",est:1,opt:true,cost:145},
-  {id:"11.10",sId:11,desc:"New sight gauge tube for tank",est:1,opt:true,cost:145},
-  {id:"11.11",sId:11,desc:"Broken or worn door latches",est:5,opt:true,cost:725},
-  {id:"11.12",sId:11,desc:"Detail inside of cab",est:3,opt:true,cost:435},
-  {id:"11.13",sId:11,desc:"Polish bonnet and roof",est:3,opt:true,cost:435},
-  {id:"11.14",sId:11,desc:"Paint bonnet grill",est:2,opt:true,cost:290},
-];
+// Machine templates now live in templates.js — see MACHINES there.
+// SECTIONS/TASKS below are the DEFAULT (sprayer) used only where no job
+// context exists; everything job-aware goes through secsOf()/tasksOf().
+const SECTIONS = MACHINES[DEFAULT_TEMPLATE].sections;
+const TASKS    = MACHINES[DEFAULT_TEMPLATE].tasks;
 
 const today = () => new Date().toISOString().split("T")[0];
 const eKey = (jid, tid) => `${jid}_${tid}`;
@@ -398,7 +312,7 @@ const HoseBuilderModal = ({job, initial, onClose, onSave, defaultWorker}) => {
           <div style={{marginTop:18}}>
             <Label>SECTION</Label>
             <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-              {SECTIONS.map(s => (
+              {(sections||[]).map(s => (
                 <button key={s.id} onClick={()=>setSId(s.id)}
                   style={{background:sId===s.id?Y:CARD,border:`1px solid ${sId===s.id?Y:BDR2}`,borderRadius:8,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:sId===s.id?BG:TXT}}>
                   {s.id}. {s.name}
@@ -444,7 +358,7 @@ const HoseBuilderModal = ({job, initial, onClose, onSave, defaultWorker}) => {
                 {picked.map((f,i)=><div key={i}>F{i+1}: {f.itemNo}</div>)}
                 {partNumber.trim() && <div>JD# {partNumber.trim()}</div>}
                 <div>{worker.trim()} · {date}</div>
-                <div>{sId}. {SECTIONS.find(s=>s.id===sId)?.name||""}{sticker?" · ID STICKER":""}</div>
+                <div>{sId}. {(sections||[]).find(s=>s.id===sId)?.name||""}{sticker?" · ID STICKER":""}</div>
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setConfirmSave(false)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>GO BACK</button>
@@ -478,7 +392,7 @@ const hoseCalc = h => {
 };
 
 // Admin hoses screen: date filter, multi-select, billed toggle, calc breakdown.
-const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete, onBack}) => {
+const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete, onBack, secsForJob}) => {
   const [from, setFrom] = useState("");
   const [to, setTo]     = useState("");
   const [fJob, setFJob] = useState("");   // "" = all jobs
@@ -496,7 +410,7 @@ const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete, onBack}) => {
   const selHoses = filtered.filter(h => sel.has(h.id));
   const selTotal = selHoses.reduce((s,h)=>s+hoseCalc(h).total,0);
   const jobName = jid => jobs.find(j=>j.id===jid)?.client || "—";
-  const secName = sid => SECTIONS.find(s=>s.id===sid)?.name || "";
+  const secName = (sid, jid) => (secsForJob ? secsForJob(jid) : SECTIONS).find(s=>s.id===sid)?.name || "";
 
   return (
     <div style={{paddingBottom:sel.size?120:20}}>
@@ -528,7 +442,15 @@ const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete, onBack}) => {
           <select value={fSec} onChange={e=>setFSec(e.target.value)}
             style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 8px",color:fSec?TXT:MUTED,fontSize:13,outline:"none",minWidth:0}}>
             <option value="">All sections</option>
-            {SECTIONS.map(s => <option key={s.id} value={String(s.id)}>{s.id}. {s.name}</option>)}
+            {(() => {
+              // Jobs may use different machine templates, so offer the union of
+              // section numbers present, labelled by the first matching name.
+              const seen = new Map();
+              jobs.forEach(jb => (secsForJob ? secsForJob(jb.id) : SECTIONS)
+                .forEach(s => { if (!seen.has(s.id)) seen.set(s.id, s.name); }));
+              return [...seen.entries()].sort((a,b)=>a[0]-b[0])
+                .map(([id,name]) => <option key={id} value={String(id)}>{id}. {name}</option>);
+            })()}
           </select>
         </div>
       </div>
@@ -561,7 +483,7 @@ const AdminHosesView = ({hoses, jobs, onToggleBilled, onDelete, onBack}) => {
                   <div style={{fontSize:13,color:TXT,marginTop:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
                     {h.hose ? `${lenMm(h)}mm ${h.hose.itemNo}` : "—"} · {(h.fittings||[]).reduce((s,f)=>s+(f.qty||1),0)} fitting{(h.fittings||[]).reduce((s,f)=>s+(f.qty||1),0)!==1?"s":""}
                   </div>
-                  <div style={{fontSize:11,color:MUTED,marginTop:2}}>{jobName(h.jobId)} · {h.sId}. {secName(h.sId)}{h.worker?` · ${h.worker}`:""}</div>
+                  <div style={{fontSize:11,color:MUTED,marginTop:2}}>{jobName(h.jobId)} · {h.sId}. {secName(h.sId, h.jobId)}{h.worker?` · ${h.worker}`:""}</div>
                 </div>
                 <div style={{textAlign:"right"}}>
                   <div style={{fontFamily:MONO,fontSize:16,color:TXT}}>{fmt$(c.total)}</div>
@@ -800,9 +722,19 @@ export default function App() {
   const [confirmDel, setConfirmDel] = useState(null);
   const fileRef = useRef(null);
   const openLightbox = (photos, photo) => { setLightboxList(photos); setLightbox(photo); };
-  const taskMap = useMemo(() => Object.fromEntries(TASKS.map(t => [t.id, t])), []);
+  // Task lookup spanning every machine template. Job-scoped code should prefer
+  // tasksOf(jobId); this is for contexts where only a task id is available.
+  const taskMap = useMemo(() => Object.fromEntries(
+    MACHINE_LIST.flatMap(m => m.tasks).map(t => [t.id, t])), []);
 
   const getExcl = jid => exclMap[jid] || new Set();
+  // ── Machine template resolution ──
+  // Every job carries a templateId (older jobs default to the sprayer).
+  const tmplOf  = jid => getTemplate(jobs.find(j => j.id === jid)?.templateId);
+  const secsOf  = jid => tmplOf(jid).sections;
+  const tasksOf = jid => tmplOf(jid).tasks;
+  const partsOf = (jid, taskId) => tmplOf(jid).parts.filter(p => p.taskId === taskId);
+
   const isIn    = (jid, t) => !t.opt || !getExcl(jid).has(t.id);
 
   // Job-wide task search — matches by task ID (e.g. "1.03") or description substring.
@@ -810,9 +742,9 @@ export default function App() {
   const searchTasks = (jid, q) => {
     const s = (q||"").trim().toLowerCase();
     if (!s) return [];
-    const all = [...TASKS, ...(customTasks[jid]||[])].filter(t => isIn(jid, t));
+    const all = [...tasksOf(jid), ...(customTasks[jid]||[])].filter(t => isIn(jid, t));
     const hits = all.filter(t => (t.id||"").toLowerCase().includes(s) || (t.desc||"").toLowerCase().includes(s));
-    return hits.map(t => ({task:t, sec: SECTIONS.find(x=>x.id===t.sId)})).slice(0, 50);
+    return hits.map(t => ({task:t, sec: secsOf(jid).find(x=>x.id===t.sId)})).slice(0, 50);
   };
 
   // Shared search bar rendered above the sections list in Tech/Admin job views.
@@ -873,7 +805,7 @@ export default function App() {
   const addCT = async () => {
     if (!ctForm.desc) return;
     // Generate next sequential ID for this section e.g. 8.06
-    const builtInIds = TASKS.filter(t => t.sId===selSec).map(t => parseFloat(t.id.split('.')[1])||0);
+    const builtInIds = tasksOf(selJob).filter(t => t.sId===selSec).map(t => parseFloat(t.id.split('.')[1])||0);
     const customIds  = (customTasks[selJob]||[]).filter(t => t.sId===selSec && t.id && t.id.includes('.')).map(t => parseFloat(t.id.split('.')[1])||0);
     const maxNum = Math.max(0, ...builtInIds, ...customIds);
     const nextId = `${selSec}.${String(Math.ceil(maxNum)+1).padStart(2,'0')}`;
@@ -891,7 +823,7 @@ export default function App() {
   };
   const sStats = (jid, sid) => {
     const lr      = getLR(jid);
-    const builtin = TASKS.filter(t => t.sId === sid && isIn(jid,t));
+    const builtin = tasksOf(jid).filter(t => t.sId === sid && isIn(jid,t));
     const custom  = (customTasks[jid]||[]).filter(t => t.sId === sid);
     const ts = [...builtin, ...custom];
     const act = ts.reduce((s,t)=>s+logged(jid,t.id),0);
@@ -907,7 +839,7 @@ export default function App() {
   };
   const jStats = jid => {
     const lr = getLR(jid);
-    const builtin = TASKS.filter(t => isIn(jid,t));
+    const builtin = tasksOf(jid).filter(t => isIn(jid,t));
     const custom  = customTasks[jid]||[];
     const ts = [...builtin, ...custom];
     const act = ts.reduce((s,t)=>s+logged(jid,t.id),0);
@@ -1194,6 +1126,7 @@ export default function App() {
             <div style={{flex:1,minWidth:0}}>
               <div style={{fontFamily:FF,fontSize:17,fontWeight:700,color:TXT}}>{j.client}</div>
               <div style={{fontSize:11,color:MUTED,marginTop:2}}>{j.make} {j.model||""} · {j.serial}</div>
+              <div style={{fontSize:10,color:Y,marginTop:2,letterSpacing:.5}}>{getTemplate(j.templateId).name}</div>
             </div>
             <ChevronRight size={18} color={MUTED}/>
           </button>
@@ -1240,7 +1173,7 @@ export default function App() {
                 <div style={{fontSize:11,color:MUTED,marginTop:5}}>
                   {(h.fittings||[]).map(f => `${f.qty||1}× ${f.itemNo}`).join("  ·  ")}
                 </div>
-                <div style={{fontSize:10,color:MUTED,marginTop:5,letterSpacing:.5}}>{h.sId}. {SECTIONS.find(s=>s.id===h.sId)?.name||""}{h.worker?` · ${h.worker}`:""}</div>
+                <div style={{fontSize:10,color:MUTED,marginTop:5,letterSpacing:.5}}>{h.sId}. {secsOf(h.jobId).find(s=>s.id===h.sId)?.name||""}{h.worker?` · ${h.worker}`:""}</div>
               </div>
               <div style={{display:"flex",borderTop:`1px solid ${BDR}`}}>
                 <button onClick={()=>setEditHose(h)}
@@ -1574,12 +1507,17 @@ export default function App() {
   const JobForm = () => {
     const clientRef = useRef(); const serialRef = useRef();
     const makeRef = useRef(); const modelRef = useRef(); const startedRef = useRef(); const rateRef = useRef();
+    // Machine template — locked once the job exists so its task list can never
+    // change underneath work that's already been logged against it.
+    const [tmplId, setTmplId] = useState(editJob?.templateId || DEFAULT_TEMPLATE);
+    const tmpl = getTemplate(tmplId);
     const handleSave = async () => {
       const client = clientRef.current?.value||"";
       const serial = serialRef.current?.value||"";
       if (!client || !serial) return;
       const lr = parseFloat(rateRef.current?.value)||hourlyRate;
-      const data = { client, serial, make:makeRef.current?.value||"John Deere", model:modelRef.current?.value||"", started:startedRef.current?.value||today(), lockedRate:lr };
+      const data = { client, serial, make:makeRef.current?.value||"John Deere", model:modelRef.current?.value||"", started:startedRef.current?.value||today(), lockedRate:lr,
+                     ...(editJob ? {} : {templateId: tmplId}) };
       if (editJob) {
         await setDoc(doc(db,"jobs",editJob.id), data, {merge:true});
       } else {
@@ -1595,7 +1533,36 @@ export default function App() {
             <div style={{fontFamily:FF,fontSize:20,fontWeight:800,color:TXT}}>{editJob?"EDIT JOB":"NEW JOB"}</div>
             <button onClick={()=>{setShowJob(false);setEditJob(null);}} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer"}}><X size={16} color={MUTED}/></button>
           </div>
-          {[{label:"CLIENT NAME",r:clientRef,placeholder:"e.g. KLK Farms Pty Ltd",dv:jForm.client},{label:"SERIAL NUMBER",r:serialRef,placeholder:"e.g. 1N04060RPJ0197016",dv:jForm.serial},{label:"MAKE",r:makeRef,placeholder:"John Deere",dv:jForm.make},{label:"MODEL (optional)",r:modelRef,placeholder:"e.g. STS16",dv:jForm.model},{label:"START DATE",r:startedRef,type:"date",dv:jForm.started}].map(({label,r,placeholder,type,dv}) => (
+          {!editJob && (
+            <div style={{marginBottom:14}}>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>MACHINE TYPE</div>
+              <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                {MACHINE_LIST.map(m => (
+                  <button key={m.id} onClick={()=>setTmplId(m.id)}
+                    style={{display:"flex",alignItems:"center",gap:10,background:tmplId===m.id?CARD2:"transparent",border:`1px solid ${tmplId===m.id?Y:BDR2}`,borderRadius:9,padding:"11px 13px",cursor:"pointer",textAlign:"left"}}>
+                    <div style={{width:16,height:16,borderRadius:"50%",border:`2px solid ${tmplId===m.id?Y:BDR2}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                      {tmplId===m.id && <div style={{width:7,height:7,borderRadius:"50%",background:Y}}/>}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>{m.name}</div>
+                      <div style={{fontSize:10,color:MUTED,marginTop:1}}>
+                        {m.sections.length} sections · {m.tasks.length} tasks · {m.tasks.reduce((s,t)=>s+t.est,0)}h est
+                        {m.parts.length?` · ${m.parts.length} parts`:""}{m.schedule.length?" · has schedule":""}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {editJob && (
+            <div style={{marginBottom:14,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 13px"}}>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:3}}>MACHINE TYPE</div>
+              <div style={{fontSize:13,color:TXT}}>{tmpl.name}</div>
+              <div style={{fontSize:10,color:MUTED,marginTop:3}}>Locked — work is already logged against this task list.</div>
+            </div>
+          )}
+          {[{label:"CLIENT NAME",r:clientRef,placeholder:"e.g. KLK Farms Pty Ltd",dv:jForm.client},{label:"SERIAL NUMBER",r:serialRef,placeholder:"e.g. 1N04060RPJ0197016",dv:jForm.serial},{label:"MAKE",r:makeRef,placeholder:tmpl.make,dv:jForm.make||(editJob?"":tmpl.make)},{label:"MODEL (optional)",r:modelRef,placeholder:"e.g. STS16",dv:jForm.model},{label:"START DATE",r:startedRef,type:"date",dv:jForm.started}].map(({label,r,placeholder,type,dv}) => (
             <div key={label} style={{marginBottom:14}}>
               <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{label}</div>
               <input ref={r} type={type||"text"} placeholder={placeholder} defaultValue={dv}
@@ -1606,7 +1573,7 @@ export default function App() {
             <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>HOURLY RATE +GST</div>
             <div style={{display:"flex",alignItems:"center",gap:8}}>
               <span style={{fontFamily:MONO,fontSize:18,color:Y}}>$</span>
-              <input ref={rateRef} type="number" step="5" min="1" defaultValue={jForm.lockedRate||hourlyRate}
+              <input ref={rateRef} key={tmplId} type="number" step="5" min="1" defaultValue={jForm.lockedRate || (editJob ? hourlyRate : tmpl.defaultRate)}
                 style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:18,fontFamily:MONO,boxSizing:"border-box",outline:"none"}}/>
               <span style={{fontFamily:MONO,fontSize:14,color:MUTED}}>/hr</span>
             </div>
@@ -1867,7 +1834,7 @@ export default function App() {
   const CustomTaskModal = () => {
     const parentTask = ctParentId ? (taskMap[ctParentId] || getCTById(selJob, ctParentId)) : null;
     const sectionTasks = [
-      ...TASKS.filter(t => t.sId===selSec && isIn(selJob,t)),
+      ...tasksOf(selJob).filter(t => t.sId===selSec && isIn(selJob,t)),
       ...(customTasks[selJob]||[]).filter(t => t.sId===selSec && !t.parentId),
     ];
     return (
@@ -1993,7 +1960,7 @@ export default function App() {
         <TopBar title={`${j?.make||""} — ${j?.serial||""}`} sub={j?.client}/>
         <JobTaskSearch/>
         {!searchingTasks && <div style={{padding:"12px 14px"}}>
-          {SECTIONS.map(sec => {
+          {secsOf(selJob).map(sec => {
             const st = sStats(selJob, sec.id);
             return (
               <div key={sec.id} onClick={()=>go("section",{sec:sec.id})} style={{background:CARD,borderRadius:10,padding:14,marginBottom:8,border:`1px solid ${BDR}`,cursor:"pointer"}}>
@@ -2016,8 +1983,8 @@ export default function App() {
   };
 
   const TechSectionView = () => {
-    const sec = SECTIONS.find(s => s.id===selSec);
-    const builtIn = TASKS.filter(t => t.sId===selSec && isIn(selJob,t));
+    const sec = secsOf(selJob).find(s => s.id===selSec);
+    const builtIn = tasksOf(selJob).filter(t => t.sId===selSec && isIn(selJob,t));
     const custom  = (customTasks[selJob]||[]).filter(t => t.sId===selSec);
     const tasks   = [...builtIn, ...custom];
     return (
@@ -2051,7 +2018,7 @@ export default function App() {
     const cameraRef = useRef();
     const task = taskMap[selTask] || getCTById(selJob, selTask);
     if (!task) return null;
-    const sec  = SECTIONS.find(s => s.id===task.sId);
+    const sec  = secsOf(selJob).find(s => s.id===task.sId);
     const ph   = getPh(selJob, selTask);
     const note = getTN(selJob, selTask);
     return (
@@ -2223,7 +2190,7 @@ export default function App() {
             </div>
             <div style={{padding: isDesktop?"12px 24px":"12px 14px"}}>
               <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(3,1fr)":"1fr",gap:10}}>
-              {SECTIONS.map(sec => {
+              {secsOf(selJob).map(sec => {
                 const st = sStats(selJob, sec.id);
                 const over = st.actual>st.est&&st.est>0;
                 const pct = st.est>0?(st.actual/st.est*100).toFixed(0):0;
@@ -2289,7 +2256,7 @@ export default function App() {
               <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 60px",gap:6,padding:"0 6px 8px",borderBottom:`1px solid ${BDR}`}}>
                 {["SECTION","EST","ACT","VAR"].map(h=><div key={h} style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1,textAlign:h!=="SECTION"?"right":"left"}}>{h}</div>)}
               </div>
-              {SECTIONS.map(sec=>{
+              {secsOf(j.id).map(sec=>{
                 const st = sStats(selJob, sec.id);
                 const vari = st.actualCost-st.estCost;
                 const over = st.actual>0&&vari>0;
@@ -2326,9 +2293,9 @@ export default function App() {
   };
 
   const AdminSectionView = () => {
-    const sec = SECTIONS.find(s => s.id===selSec);
+    const sec = secsOf(selJob).find(s => s.id===selSec);
     const st = sStats(selJob, selSec);
-    const builtIn = TASKS.filter(t => t.sId===selSec);
+    const builtIn = tasksOf(selJob).filter(t => t.sId===selSec);
     const ctTop   = (customTasks[selJob]||[]).filter(t => t.sId===selSec && !t.parentId);
 
     const TaskCard = ({t, indent=false}) => {
@@ -2405,7 +2372,7 @@ export default function App() {
     const task = taskMap[selTask] || getCTById(selJob, selTask);
     if (!task) return null;
     const isCT = isCustom(selJob, selTask);
-    const sec = SECTIONS.find(s => s.id===task.sId);
+    const sec = secsOf(selJob).find(s => s.id===task.sId);
     const ents = getEnt(selJob, selTask);
     const l = logged(selJob, selTask);
     const ph = getPh(selJob, selTask);
@@ -2575,7 +2542,7 @@ export default function App() {
 
     // ── Task completion across all jobs ──
     const taskCounts = jobs.reduce((a,j) => {
-      const ts = [...TASKS.filter(t=>isIn(j.id,t)), ...(customTasks[j.id]||[])];
+      const ts = [...tasksOf(j.id).filter(t=>isIn(j.id,t)), ...(customTasks[j.id]||[])];
       ts.forEach(t => { a[getStatus(j.id,t.id)] = (a[getStatus(j.id,t.id)]||0)+1; a.total++; });
       return a;
     }, {total:0});
@@ -2852,7 +2819,7 @@ export default function App() {
                 <div style={{display:"grid",gridTemplateColumns:"1fr 44px 44px 44px",gap:6,padding:"0 8px 8px",borderBottom:`1px solid ${BDR}`}}>
                   {["SECTION","EST h","ACT h","VAR"].map(h=><div key={h} style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1,textAlign:h!=="SECTION"?"right":"left"}}>{h}</div>)}
                 </div>
-                {SECTIONS.map(sec => {
+                {secsOf(selJob).map(sec => {
                   const st = sStats(j.id, sec.id);
                   const over = st.actual>st.est&&st.est>0;
                   const v = st.actual-st.est;
@@ -2923,7 +2890,7 @@ export default function App() {
       <div style={{flex:1,overflowY:"auto",paddingBottom: (isAdmin && isDesktop) ? 0 : 72}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
-          {view==="hoses"     && <AdminHosesView hoses={hoses} jobs={jobs} onToggleBilled={toggleHoseBilled} onDelete={delHose} onBack={goHome}/>}
+          {view==="hoses"     && <AdminHosesView hoses={hoses} jobs={jobs} onToggleBilled={toggleHoseBilled} onDelete={delHose} secsForJob={secsOf} onBack={goHome}/>}
           {view==="job"       && <AdminJobView/>}
           {view==="section"   && <AdminSectionView/>}
           {view==="task"      && <AdminTaskView/>}
@@ -2945,10 +2912,10 @@ export default function App() {
       {showRateModal && <RateModal/>}
       {showJob    && <JobForm/>}
       {showHoseBuilder && selJob && jobs.find(j=>j.id===selJob) &&
-        <HoseBuilderModal job={jobs.find(j=>j.id===selJob)} onClose={()=>setShowHoseBuilder(false)} onSave={addHose} defaultWorker={myName}/>}
+        <HoseBuilderModal job={jobs.find(j=>j.id===selJob)} onClose={()=>setShowHoseBuilder(false)} onSave={addHose} defaultWorker={myName} sections={secsOf(selJob)}/>}
       {editHose && jobs.find(j=>j.id===editHose.jobId) &&
         <HoseBuilderModal job={jobs.find(j=>j.id===editHose.jobId)} initial={editHose}
-          onClose={()=>setEditHose(null)} onSave={updHose} defaultWorker={myName}/>}
+          onClose={()=>setEditHose(null)} onSave={updHose} defaultWorker={myName} sections={secsOf(editHose.jobId)}/>}
       {confirmHoseDel && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
           <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:320,width:"100%"}}>
