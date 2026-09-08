@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
 import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable, Users, LogIn } from "lucide-react";
 import { initializeApp } from "firebase/app";
-import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc } from "firebase/firestore";
+import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc, writeBatch } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 import { getAuth, signInAnonymously, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail } from "firebase/auth";
 import { PRICE_ITEMS } from "./priceList.js";
@@ -1114,10 +1114,62 @@ export default function App() {
     try { await deleteDoc(doc(db,"users",uid)); }
     catch (e) { setUserErr(`Couldn't delete that account (${e.code||"unknown"}).`); }
   };
+  // Every distinct worker name appearing in work records, with usage counts.
+  // Names that don't exactly match an approved tech are the ones needing cleanup.
+  const workerNameUsage = () => {
+    const usage = {};
+    const bump = (name, kind) => {
+      const n = (name||"").trim();
+      if (!n) return;
+      if (!usage[n]) usage[n] = {name:n, entries:0, hoses:0};
+      usage[n][kind] += 1;
+    };
+    Object.values(entries).forEach(arr => arr.forEach(e => bump(e.worker, "entries")));
+    hoses.forEach(h => bump(h.worker, "hoses"));
+    return Object.values(usage).sort((a,b) => (b.entries+b.hoses)-(a.entries+a.hoses));
+  };
+
+  // Rewrite every entry/hose using `fromName` so it points at the chosen tech.
+  // Batched in chunks of 400 (Firestore caps a batch at 500 writes).
+  const mergeWorker = async (fromName, tech) => {
+    const targets = [];
+    Object.values(entries).forEach(arr => arr.forEach(e => {
+      if ((e.worker||"").trim() === fromName) targets.push({col:"entries", id:e.id});
+    }));
+    hoses.forEach(h => {
+      if ((h.worker||"").trim() === fromName) targets.push({col:"hoses", id:h.id});
+    });
+    for (let i=0; i<targets.length; i+=400) {
+      const batch = writeBatch(db);
+      targets.slice(i, i+400).forEach(t =>
+        batch.set(doc(db, t.col, t.id), {worker: tech.name, workerId: tech.id}, {merge:true}));
+      await batch.commit();
+    }
+    return targets.length;
+  };
+
   const goUsers       = () => { setStack([]); setView("users"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   // Display name of the signed-in tech, used to pre-fill worker fields.
   const myName = me?.name || "";
+  // Approved technicians, alphabetical — the canonical list for worker pickers.
+  const approvedTechs = users.filter(u => u.status === "approved")
+                             .sort((a,b) => (a.name||"").localeCompare(b.name||""));
+
+  // Worker <select> backed by approved accounts. Falls back to a text input when
+  // no accounts exist yet, and keeps any legacy free-text name as a valid option
+  // so editing an old entry never silently rewrites who did the work.
+  const WorkerPicker = ({value, onChange}) => {
+    const known = approvedTechs.some(t => t.name === value);
+    return (
+      <select value={value||""} onChange={e=>onChange(e.target.value)}
+        style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:value?TXT:MUTED,fontSize:15,boxSizing:"border-box",outline:"none",appearance:"none"}}>
+        <option value="">— select worker —</option>
+        {approvedTechs.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+        {value && !known && <option value={value}>{value} (not linked)</option>}
+      </select>
+    );
+  };
   const pendingCount = users.filter(u => u.status === "pending").length;
 
   // Hoses: pick which job the hose belongs to (technician)
@@ -1318,6 +1370,12 @@ export default function App() {
   // ── Admin: approve / revoke technician accounts ──
   const AdminUsersView = () => {
     const [confirmDel, setConfirmDel] = useState(null);
+    const [merging, setMerging]       = useState(null);  // {name, entries, hoses}
+    const [mergeBusy, setMergeBusy]   = useState(false);
+    const [mergeMsg, setMergeMsg]     = useState("");
+    const usage = workerNameUsage();
+    // A name needs cleaning up if it isn't an exact match for an approved tech.
+    const unlinked = usage.filter(u => !approvedTechs.some(t => t.name === u.name));
     const order = {pending:0, approved:1, revoked:2};
     const list = [...users].sort((a,b) =>
       (order[a.status]??3)-(order[b.status]??3) || (a.name||"").localeCompare(b.name||""));
@@ -1377,6 +1435,82 @@ export default function App() {
             );
           })}
         </div>
+        {/* ── Name cleanup: merge stray spellings into a real account ── */}
+        <div style={{padding:"0 14px 20px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 2px 10px"}}>
+            <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>NAMES IN WORK RECORDS</span>
+            <div style={{flex:1,height:1,background:BDR}}/>
+          </div>
+          {mergeMsg && (
+            <div style={{background:"rgba(40,199,111,.1)",border:`1px solid ${GRN}`,borderRadius:10,padding:"11px 13px",marginBottom:10,fontSize:12,color:GRN,lineHeight:1.5}}>{mergeMsg}</div>
+          )}
+          {usage.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"20px 0"}}>No hours or hoses logged yet.</div>}
+          {unlinked.length>0 && (
+            <div style={{fontSize:11,color:MUTED,marginBottom:10,lineHeight:1.5}}>
+              {unlinked.length} name{unlinked.length===1?" isn't":"s aren't"} linked to an account — reassign {unlinked.length===1?"it":"them"} so reporting counts the hours against the right person.
+            </div>
+          )}
+          {usage.map(u => {
+            const linked = approvedTechs.some(t => t.name === u.name);
+            return (
+              <div key={u.name} style={{background:CARD,border:`1px solid ${linked?BDR:"#F5A524"}`,borderRadius:10,padding:"11px 13px",marginBottom:8,display:"flex",alignItems:"center",gap:10}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
+                    <span style={{fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>{u.name}</span>
+                    {linked
+                      ? <HChip label="LINKED" col={BG} bg={GRN}/>
+                      : <HChip label="NOT LINKED" col={BG} bg="#F5A524"/>}
+                  </div>
+                  <div style={{fontSize:11,color:MUTED,marginTop:3}}>
+                    {u.entries} hour entr{u.entries===1?"y":"ies"} · {u.hoses} hose{u.hoses===1?"":"s"}
+                  </div>
+                </div>
+                {!linked && approvedTechs.length>0 && (
+                  <button onClick={()=>{setMergeMsg(""); setMerging(u);}}
+                    style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:.5,color:Y,flexShrink:0}}>
+                    REASSIGN
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* reassign dialog */}
+        {merging && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:340,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,marginBottom:8}}>REASSIGN “{merging.name}”</div>
+              <div style={{fontSize:13,color:MUTED,marginBottom:16,lineHeight:1.5}}>
+                {merging.entries} hour entr{merging.entries===1?"y":"ies"} and {merging.hoses} hose{merging.hoses===1?"":"s"} will be moved to the technician you pick. The hours and dates don't change — only who they're credited to.
+              </div>
+              <div style={{maxHeight:220,overflowY:"auto",marginBottom:16}}>
+                {approvedTechs.map(t => (
+                  <button key={t.id} disabled={mergeBusy}
+                    onClick={async () => {
+                      setMergeBusy(true);
+                      try {
+                        const n = await mergeWorker(merging.name, t);
+                        setMergeMsg(`Moved ${n} record${n===1?"":"s"} from “${merging.name}” to ${t.name}.`);
+                      } catch (e) {
+                        setMergeMsg(`Couldn't reassign (${e.code||"unknown"}).`);
+                      }
+                      setMergeBusy(false); setMerging(null);
+                    }}
+                    style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"12px 14px",marginBottom:7,cursor:mergeBusy?"default":"pointer",textAlign:"left"}}>
+                    <span style={{fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>{t.name}</span>
+                    <ChevronRight size={15} color={MUTED}/>
+                  </button>
+                ))}
+              </div>
+              <button onClick={()=>setMerging(null)} disabled={mergeBusy}
+                style={{width:"100%",background:"none",border:`1px solid ${BDR2}`,borderRadius:8,padding:11,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:mergeBusy?MUTED:TXT}}>
+                {mergeBusy?"MOVING…":"CANCEL"}
+              </button>
+            </div>
+          </div>
+        )}
+
         {confirmDel && (
           <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
             <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:330,width:"100%"}}>
@@ -1490,11 +1624,13 @@ export default function App() {
   const EditEntryModal = () => {
     if (!editEntry) return null;
     const dateRef = useRef(); const hoursRef = useRef();
-    const workerRef = useRef(); const notesRef = useRef(); const rateRef = useRef();
+    const notesRef = useRef(); const rateRef = useRef();
+    const [entryWorker, setEntryWorker] = useState(editEntry.worker || "");
     const jobRate = jobs.find(j=>j.id===selJob)?.lockedRate || 145;
     const handleSave = async () => {
       const h = parseFloat(hoursRef.current?.value);
       if (!h || h <= 0) return;
+      const tech = approvedTechs.find(t => t.name === entryWorker);
       await updateEntry(editEntry.id, {
         jobId: editEntry.jobId,
         taskId: editEntry.taskId,
@@ -1502,7 +1638,8 @@ export default function App() {
         rate: parseFloat(rateRef.current?.value) || jobRate,
         notes: notesRef.current?.value || "",
         date: dateRef.current?.value || today(),
-        worker: workerRef.current?.value || "Alan"
+        worker: entryWorker,
+        workerId: tech?.id || null,
       });
     };
     return (
@@ -1519,7 +1656,7 @@ export default function App() {
           </div>
           <div style={{marginBottom:14}}>
             <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WORKER</div>
-            <input ref={workerRef} type="text" defaultValue={editEntry.worker} style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
+            <WorkerPicker value={entryWorker} onChange={setEntryWorker}/>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <div>
@@ -1555,17 +1692,20 @@ export default function App() {
 
   const AddModal = () => {
     const dateRef = useRef(); const hoursRef = useRef();
-    const workerRef = useRef(); const notesRef = useRef(); const entryRateRef = useRef();
+    const notesRef = useRef(); const entryRateRef = useRef();
+    const [entryWorker, setEntryWorker] = useState(myName || approvedTechs[0]?.name || "");
     const jobRate = jobs.find(j=>j.id===selJob)?.lockedRate || 145;
     const handleSave = async () => {
       const h = parseFloat(hoursRef.current?.value);
       if (!h || h <= 0) return;
       const rate = parseFloat(entryRateRef.current?.value) || jobRate;
+      const tech = approvedTechs.find(t => t.name === entryWorker);
       await addDoc(collection(db,"entries"), {
         jobId:selJob, taskId:selTask, hours:h, rate,
         notes:notesRef.current?.value||"",
         date:dateRef.current?.value||today(),
-        worker:workerRef.current?.value||"Alan"
+        worker: entryWorker,
+        workerId: tech?.id || null,   // links the entry to a real account when possible
       });
       setShowAdd(false);
     };
@@ -1583,7 +1723,7 @@ export default function App() {
           </div>
           <div style={{marginBottom:14}}>
             <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WORKER</div>
-            <input ref={workerRef} type="text" defaultValue="Alan" style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"}}/>
+            <WorkerPicker value={entryWorker} onChange={setEntryWorker}/>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
             <div>
