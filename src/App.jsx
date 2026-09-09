@@ -149,20 +149,25 @@ const DEP_TYPES = [
   {v:"blocked", label:"Can't start until",   hint:"hard gate — that job must finish"},
 ];
 
-// Job-wide task search. MODULE LEVEL on purpose: defining this inside App()
-// meant every keystroke recreated the component and iOS dropped the keyboard
-// after one character. Keep it out here.
-const JobTaskSearch = ({value, onChange, results, onPick, statusOf}) => {
-  const active = (value||"").trim().length > 0;
+// Job-wide task search. Owns its own query state on purpose: if the text lived
+// in App, every keystroke would re-render App, which recreates the parent job
+// views (they're defined inside App) and tears the focused input out of the DOM
+// — iOS then drops the keyboard after one character. Keeping the query local
+// means typing re-renders only this component. It renders `children` (the
+// normal sections list) when the box is empty, and results when it isn't.
+const JobTaskSearch = ({search, statusOf, onPick, children}) => {
+  const [q, setQ] = useState("");
+  const active = q.trim().length > 0;
+  const results = active ? search(q) : [];
   return (<>
     <div style={{padding:"12px 14px 4px",background:BG}}>
       <div style={{position:"relative"}}>
-        <input value={value} onChange={e=>onChange(e.target.value)}
+        <input value={q} onChange={e=>setQ(e.target.value)}
           placeholder="Search tasks — e.g. 1.03, water pump…"
           autoCorrect="off" autoCapitalize="none" spellCheck={false}
           style={{width:"100%",background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:"11px 40px 11px 14px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none"}}/>
         {active && (
-          <button onClick={()=>onChange("")} aria-label="Clear search"
+          <button onMouseDown={e=>e.preventDefault()} onClick={()=>setQ("")} aria-label="Clear search"
             style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:BDR2,border:"none",borderRadius:6,width:26,height:26,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
             <X size={14} color={MUTED}/>
           </button>
@@ -170,14 +175,14 @@ const JobTaskSearch = ({value, onChange, results, onPick, statusOf}) => {
       </div>
       {active && <div style={{fontSize:11,color:MUTED,marginTop:6,padding:"0 4px"}}>{results.length} match{results.length===1?"":"es"}</div>}
     </div>
-    {active && (
+    {active ? (
       <div style={{padding:"6px 14px 14px"}}>
-        {results.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 0"}}>No tasks match “{value}”.</div>}
+        {results.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 0"}}>No tasks match “{q}”.</div>}
         {results.map(({task, sec}) => {
           const st = statusOf(task.id);
           const col = st==="completed"?GRN : st==="on_hold"?"#F5A524" : Y;
           return (
-            <div key={task.id} onClick={()=>onPick(task)}
+            <div key={task.id} onClick={()=>{ setQ(""); onPick(task); }}
               style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
               <div style={{background:col,borderRadius:6,minWidth:44,height:28,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 6px",flexShrink:0}}>
                 <span style={{fontFamily:MONO,fontSize:11,fontWeight:800,color:BG}}>{task.id}</span>
@@ -191,122 +196,8 @@ const JobTaskSearch = ({value, onChange, results, onPick, statusOf}) => {
           );
         })}
       </div>
-    )}
+    ) : children}
   </>);
-};
-
-// ── Edit one bar on the Gantt: duration, fixed start, and dependencies ──
-const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
-    const [dur, setDur]     = useState(String(row.dur ?? ""));
-  const [fixed, setFixed] = useState(row.fixedStart ?? "");
-  const [deps, setDeps]   = useState(row.deps || []);
-  const [picking, setPicking] = useState(false);
-  const [busy, setBusy]   = useState(false);
-  const task = tmpl.tasks.find(t => t.id===row.taskId);
-  const descOf = id => tmpl.tasks.find(t=>t.id===id)?.desc || "";
-  // Candidates exclude self and anything already listed.
-  const candidates = tmpl.schedule.map(s=>s.taskId)
-    .filter(id => id!==row.taskId && !deps.some(d=>d.id===id));
-
-  const save = async () => {
-    setBusy(true);
-    await onSave({
-      dur: parseFloat(dur) || 0,
-      fixedStart: fixed==="" ? null : parseFloat(fixed),
-      deps,
-    });
-    setBusy(false); onClose();
-  };
-  const reset = async () => { setBusy(true); await onReset(); setBusy(false); onClose(); };
-  const Label = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
-  const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 13px",color:TXT,fontSize:15,fontFamily:MONO,boxSizing:"border-box",outline:"none"};
-
-  return (
-    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:120,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div style={{background:CARD,borderRadius:"18px 18px 0 0",padding:"20px 18px 26px",width:"100%",maxWidth:480,border:`1px solid ${BDR}`,boxSizing:"border-box",maxHeight:"88dvh",overflowY:"auto"}}>
-        <div style={{width:36,height:4,background:BDR2,borderRadius:2,margin:"0 auto 18px"}}/>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:18}}>
-          <div style={{minWidth:0}}>
-            <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{row.taskId}</div>
-            <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.2}}>{task?.desc||"Task"}</div>
-            {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h estimated</div>}
-          </div>
-          <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer",flexShrink:0}}><X size={16} color={MUTED}/></button>
-        </div>
-
-        <div style={{marginBottom:16}}>
-          <Label>DURATION (WORKING DAYS)</Label>
-          <input type="number" step="0.1" min="0" value={dur} onChange={e=>setDur(e.target.value)} style={fld}/>
-        </div>
-
-        <div style={{marginBottom:16}}>
-          <Label>EARLIEST START (DAYS FROM PROJECT START)</Label>
-          <input type="number" step="0.5" min="0" value={fixed} onChange={e=>setFixed(e.target.value)}
-            placeholder="auto — follows the rules below" style={{...fld,fontSize:14}}/>
-          <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.4}}>
-            Leave blank to let the dependencies decide. Set a number to hold it back until at least that day.
-          </div>
-        </div>
-
-        <div style={{marginBottom:8}}>
-          <Label>RULES</Label>
-          {deps.length===0 && <div style={{fontSize:12,color:MUTED,padding:"8px 0 4px"}}>No rules — this can start at day {fixed||0}.</div>}
-          {deps.map((d,i) => (
-            <div key={d.id+i} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{d.id}</span>
-                <span style={{flex:1,fontSize:11,color:MUTED,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(d.id)}</span>
-                <button onClick={()=>setDeps(deps.filter((_,j)=>j!==i))}
-                  style={{background:"none",border:"none",cursor:"pointer",padding:2}}><X size={14} color={MUTED}/></button>
-              </div>
-              <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                {DEP_TYPES.map(dt => (
-                  <button key={dt.v} onClick={()=>setDeps(deps.map((x,j)=>j===i?{...x,type:dt.v}:x))}
-                    style={{display:"flex",alignItems:"center",gap:8,background:d.type===dt.v?"rgba(232,176,0,.12)":"transparent",border:`1px solid ${d.type===dt.v?Y:BDR}`,borderRadius:7,padding:"7px 10px",cursor:"pointer",textAlign:"left"}}>
-                    <div style={{width:13,height:13,borderRadius:"50%",border:`2px solid ${d.type===dt.v?Y:BDR2}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                      {d.type===dt.v && <div style={{width:5,height:5,borderRadius:"50%",background:Y}}/>}
-                    </div>
-                    <span style={{fontSize:12,color:d.type===dt.v?TXT:MUTED}}>{dt.label}</span>
-                    <span style={{fontSize:10,color:MUTED,marginLeft:"auto"}}>{dt.hint}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
-          {!picking && (
-            <button onClick={()=>setPicking(true)}
-              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1,marginTop:4}}>
-              <Plus size={13}/> ADD RULE
-            </button>
-          )}
-          {picking && (
-            <div style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px",marginTop:6,maxHeight:200,overflowY:"auto"}}>
-              <div style={{fontSize:11,color:MUTED,marginBottom:7}}>Which job does this depend on?</div>
-              {candidates.map(id => (
-                <button key={id} onClick={()=>{setDeps([...deps,{id,type:"after"}]); setPicking(false);}}
-                  style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"8px 4px",cursor:"pointer",textAlign:"left"}}>
-                  <span style={{fontFamily:MONO,fontSize:11,color:Y,flexShrink:0}}>{id}</span>
-                  <span style={{fontSize:11,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(id)}</span>
-                </button>
-              ))}
-              <button onClick={()=>setPicking(false)} style={{width:"100%",background:"none",border:"none",padding:"9px 0 2px",cursor:"pointer",fontSize:12,color:MUTED}}>Cancel</button>
-            </div>
-          )}
-        </div>
-
-        <div style={{display:"flex",gap:9,marginTop:18}}>
-          <button onClick={reset} disabled={busy}
-            style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"13px 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
-            RESET
-          </button>
-          <button onClick={save} disabled={busy}
-            style={{flex:1,background:Y,border:"none",borderRadius:9,padding:13,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG,letterSpacing:1}}>
-            {busy?"SAVING…":"SAVE"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 };
 
 const groupByMonth = list => {
@@ -847,6 +738,9 @@ export default function App() {
       });
       setCustomTasks(ct);
     }));
+    unsubs.push(onSnapshot(collection(db,"invites"), snap => {
+      setInvites(snap.docs.map(d => ({id:d.id, ...d.data()})));
+    }, () => {}));
     unsubs.push(onSnapshot(collection(db,"users"), snap => {
       setUsers(snap.docs.map(d => ({id:d.id, ...d.data()})));
     }, () => {}));
@@ -886,11 +780,11 @@ export default function App() {
   const [customTasks, setCustomTasks] = useState({});   // jid -> [{id,sId,parentId,desc,est,cost,opt}]
   const [hoses, setHoses]             = useState([]);    // hose records (Hoses feature)
   const [schedOv, setSchedOv]         = useState({});    // `${jobId}_${taskId}` -> schedule override
+  const [invites, setInvites]         = useState([]);    // pre-approved signups: {email, role, jobIds}
   const [editSched, setEditSched]     = useState(null);  // {job,row} being edited on the Gantt
   const [showHoseBuilder, setShowHoseBuilder] = useState(false);
   const [confirmHoseDel, setConfirmHoseDel]   = useState(null); // hose pending delete (tech view)
   const [editHose, setEditHose]               = useState(null); // hose being edited (tech view)
-  const [taskSearch, setTaskSearch]           = useState(""); // search in job view (tasks across sections)
   // ── Tech authentication ──
   const [authUser, setAuthUser]   = useState(null);  // firebase user (null until resolved)
   const [authReady, setAuthReady] = useState(false); // has onAuthStateChanged fired at least once
@@ -985,7 +879,6 @@ export default function App() {
   };
 
   // Shared search bar rendered above the sections list in Tech/Admin job views.
-  const searchingTasks = taskSearch.trim().length > 0;
 
   const getEnt  = (jid, tid) => entries[eKey(jid,tid)] || [];
   const getPh   = (jid, tid) => photos[eKey(jid,tid)] || [];
@@ -1060,7 +953,7 @@ export default function App() {
     setStack(s => s.slice(0,-1));
     setView(prev.view); setSelJob(prev.selJob); setSelSec(prev.selSec); setSelTask(prev.selTask);
   };
-  const goHome = () => { setStack([]); setView("jobs"); setSelJob(null); setSelSec(null); setSelTask(null); setTaskSearch(""); };
+  const goHome = () => { setStack([]); setView("jobs"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   const enterPin = digit => {
     if (digit === "back") { setPin(p => p.slice(0,-1)); return; }
@@ -1204,11 +1097,19 @@ export default function App() {
       return;
     }
     // Auth account exists; now write the profile that holds name + approval status.
+    // If the supervisor pre-invited this email, apply the role/jobs it carries and
+    // skip the approval queue — the invite IS the approval.
     try {
+      const em = email.trim().toLowerCase();
+      const inv = invites.find(i => (i.email||"").toLowerCase() === em);
       await setDoc(doc(db,"users",cred.user.uid), {
-        name: name.trim(), email: email.trim().toLowerCase(),
-        status: "pending", createdAt: Date.now(),
+        name: name.trim(), email: em,
+        role: inv?.role || "tech",
+        jobIds: inv?.jobIds || [],
+        status: inv ? "approved" : "pending",
+        createdAt: Date.now(),
       });
+      if (inv) await deleteDoc(doc(db,"invites",inv.id)).catch(()=>{});
     } catch (e) {
       // Signed in but profile write failed — sign back out so they retry cleanly
       // rather than getting stuck on a "waiting for approval" screen forever.
@@ -1239,6 +1140,24 @@ export default function App() {
     catch { setAuthErr("Couldn't send the reset email. Check the address."); }
   };
   const [userErr, setUserErr] = useState("");
+  const setUserRole = async (uid, role) => {
+    setUserErr("");
+    try { await setDoc(doc(db,"users",uid), {role}, {merge:true}); }
+    catch (e) { setUserErr(`Couldn't change that role (${e.code||"unknown"}).`); }
+  };
+  const setUserJobs = async (uid, jobIds) => {
+    setUserErr("");
+    try { await setDoc(doc(db,"users",uid), {jobIds}, {merge:true}); }
+    catch (e) { setUserErr(`Couldn't update job access (${e.code||"unknown"}).`); }
+  };
+  const addInvite = async (email, role, jobIds) => {
+    setUserErr("");
+    try { await addDoc(collection(db,"invites"), {
+      email: email.trim().toLowerCase(), role, jobIds, createdAt: Date.now() }); }
+    catch (e) { setUserErr(`Couldn't create the invite (${e.code||"unknown"}).`); }
+  };
+  const delInvite = async id => { try { await deleteDoc(doc(db,"invites",id)); } catch {} };
+
   const setUserStatus = async (uid, status) => {
     setUserErr("");
     try { await setDoc(doc(db,"users",uid), {status, approvedAt:Date.now()}, {merge:true}); }
@@ -1291,7 +1210,12 @@ export default function App() {
   const goUsers       = () => { setStack([]); setView("users"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   // Display name of the signed-in tech, used to pre-fill worker fields.
-  const myName = me?.name || "";
+  const myName  = me?.name || "";
+  const myRole  = me?.role || "tech";              // tech | admin | client
+  const isAdminUser  = myRole === "admin";
+  const isClientUser = myRole === "client";
+  // Jobs a client account is allowed to see (techs and admins see everything).
+  const myJobs = isClientUser ? jobs.filter(j => (me?.jobIds||[]).includes(j.id)) : jobs;
   // Approved technicians, alphabetical — the canonical list for worker pickers.
   const approvedTechs = users.filter(u => u.status === "approved")
                              .sort((a,b) => (a.name||"").localeCompare(b.name||""));
@@ -1514,6 +1438,11 @@ export default function App() {
     const [merging, setMerging]       = useState(null);  // {name, entries, hoses}
     const [mergeBusy, setMergeBusy]   = useState(false);
     const [mergeMsg, setMergeMsg]     = useState("");
+    const [inviteOpen, setInviteOpen] = useState(false);
+    const [invEmail, setInvEmail]     = useState("");
+    const [invRole, setInvRole]       = useState("tech");
+    const [invJobs, setInvJobs]       = useState([]);
+    const [assigning, setAssigning]   = useState(null); // user whose job access is being edited
     const usage = workerNameUsage();
     // A name needs cleaning up if it isn't an exact match for an approved tech.
     const unlinked = usage.filter(u => !approvedTechs.some(t => t.name === u.name));
@@ -1553,6 +1482,20 @@ export default function App() {
                     <HChip label={b.t} col={b.c} bg={b.b}/>
                   </div>
                   <div style={{fontSize:12,color:MUTED,marginTop:3,wordBreak:"break-all"}}>{u.email}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:8,flexWrap:"wrap"}}>
+                    {[["tech","TECH"],["admin","ADMIN"],["client","CLIENT"]].map(([r,l]) => (
+                      <button key={r} onClick={()=>setUserRole(u.id,r)}
+                        style={{background:(u.role||"tech")===r?Y:CARD2,border:`1px solid ${(u.role||"tech")===r?Y:BDR2}`,borderRadius:6,padding:"4px 9px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:.8,color:(u.role||"tech")===r?BG:MUTED}}>
+                        {l}
+                      </button>
+                    ))}
+                    {u.role==="client" && (
+                      <button onClick={()=>setAssigning(u)}
+                        style={{background:CARD2,border:`1px solid ${(u.jobIds||[]).length?GRN:"#F5A524"}`,borderRadius:6,padding:"4px 9px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.5,color:(u.jobIds||[]).length?GRN:"#F5A524"}}>
+                        {(u.jobIds||[]).length ? `${(u.jobIds||[]).length} MACHINE${(u.jobIds||[]).length===1?"":"S"}` : "ASSIGN MACHINES"}
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div style={{display:"flex",borderTop:`1px solid ${BDR}`}}>
                   {u.status !== "approved" && (
@@ -1576,6 +1519,123 @@ export default function App() {
             );
           })}
         </div>
+        {/* ── Invites: pre-approve an email with a role and machine access ── */}
+        <div style={{padding:"0 14px 6px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 2px 10px"}}>
+            <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>INVITES</span>
+            <div style={{flex:1,height:1,background:BDR}}/>
+          </div>
+          {invites.map(inv => (
+            <div key={inv.id} style={{background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:"10px 13px",marginBottom:7,display:"flex",alignItems:"center",gap:10}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,color:TXT,wordBreak:"break-all"}}>{inv.email}</div>
+                <div style={{fontSize:10,color:MUTED,marginTop:2}}>
+                  {(inv.role||"tech").toUpperCase()}
+                  {inv.role==="client" && ` · ${(inv.jobIds||[]).length} machine${(inv.jobIds||[]).length===1?"":"s"}`}
+                  {" · waiting for them to sign up"}
+                </div>
+              </div>
+              <button onClick={()=>delInvite(inv.id)} style={{background:"none",border:"none",cursor:"pointer",padding:4}}><X size={15} color={MUTED}/></button>
+            </div>
+          ))}
+          {!inviteOpen ? (
+            <button onClick={()=>setInviteOpen(true)}
+              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:9,padding:"11px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
+              <Plus size={14}/> INVITE SOMEONE
+            </button>
+          ) : (
+            <div style={{background:CARD,border:`1px solid ${BDR2}`,borderRadius:11,padding:"13px"}}>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>EMAIL ADDRESS</div>
+              <input value={invEmail} onChange={e=>setInvEmail(e.target.value)} placeholder="name@example.com"
+                autoCapitalize="none" autoCorrect="off" type="email"
+                style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 13px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none",marginBottom:12}}/>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>ROLE</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+                {[["tech","Technician","logs work, photos and hours"],
+                  ["admin","Administrator","full access including costs"],
+                  ["client","Customer","read-only progress and charges"]].map(([r,l,h])=>(
+                  <button key={r} onClick={()=>setInvRole(r)}
+                    style={{display:"flex",alignItems:"center",gap:9,background:invRole===r?"rgba(232,176,0,.1)":"transparent",border:`1px solid ${invRole===r?Y:BDR}`,borderRadius:8,padding:"9px 11px",cursor:"pointer",textAlign:"left"}}>
+                    <div style={{width:14,height:14,borderRadius:"50%",border:`2px solid ${invRole===r?Y:BDR2}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {invRole===r && <div style={{width:6,height:6,borderRadius:"50%",background:Y}}/>}
+                    </div>
+                    <div style={{minWidth:0}}>
+                      <div style={{fontSize:13,color:TXT}}>{l}</div>
+                      <div style={{fontSize:10,color:MUTED,marginTop:1}}>{h}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              {invRole==="client" && (
+                <>
+                  <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WHICH MACHINES CAN THEY SEE?</div>
+                  <div style={{marginBottom:12}}>
+                    {jobs.map(j => {
+                      const on = invJobs.includes(j.id);
+                      return (
+                        <button key={j.id} onClick={()=>setInvJobs(on?invJobs.filter(x=>x!==j.id):[...invJobs,j.id])}
+                          style={{display:"flex",alignItems:"center",gap:9,width:"100%",background:"transparent",border:`1px solid ${on?Y:BDR}`,borderRadius:8,padding:"9px 11px",marginBottom:6,cursor:"pointer",textAlign:"left"}}>
+                          <div style={{width:15,height:15,borderRadius:4,background:on?Y:CARD2,border:`1px solid ${on?Y:BDR2}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                            {on && <span style={{color:BG,fontSize:11,fontWeight:800}}>✓</span>}
+                          </div>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:13,color:TXT}}>{getTemplate(j.templateId).name}</div>
+                            <div style={{fontSize:10,color:MUTED}}>{j.client} · {j.serial}</div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>{setInviteOpen(false); setInvEmail(""); setInvJobs([]);}}
+                  style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED}}>CANCEL</button>
+                <button disabled={!invEmail.trim()}
+                  onClick={async()=>{ await addInvite(invEmail, invRole, invJobs); setInviteOpen(false); setInvEmail(""); setInvJobs([]); }}
+                  style={{flex:1,background:invEmail.trim()?Y:BDR2,border:"none",borderRadius:8,padding:11,cursor:invEmail.trim()?"pointer":"default",fontFamily:FF,fontSize:13,fontWeight:800,color:invEmail.trim()?BG:MUTED,letterSpacing:1}}>
+                  CREATE INVITE
+                </button>
+              </div>
+              <div style={{fontSize:10,color:MUTED,marginTop:9,lineHeight:1.5}}>
+                They sign up at the normal login screen with this email and get straight in — no approval needed.
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* assign machines to an existing client */}
+        {assigning && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:20,maxWidth:340,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:16,fontWeight:800,color:TXT,marginBottom:4}}>MACHINE ACCESS</div>
+              <div style={{fontSize:12,color:MUTED,marginBottom:14}}>{assigning.name} · {assigning.email}</div>
+              {jobs.map(j => {
+                const on = (assigning.jobIds||[]).includes(j.id);
+                return (
+                  <button key={j.id}
+                    onClick={()=>{
+                      const next = on ? (assigning.jobIds||[]).filter(x=>x!==j.id) : [...(assigning.jobIds||[]), j.id];
+                      setAssigning({...assigning, jobIds:next});
+                      setUserJobs(assigning.id, next);
+                    }}
+                    style={{display:"flex",alignItems:"center",gap:9,width:"100%",background:"transparent",border:`1px solid ${on?Y:BDR}`,borderRadius:8,padding:"10px 11px",marginBottom:7,cursor:"pointer",textAlign:"left"}}>
+                    <div style={{width:15,height:15,borderRadius:4,background:on?Y:CARD2,border:`1px solid ${on?Y:BDR2}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {on && <span style={{color:BG,fontSize:11,fontWeight:800}}>✓</span>}
+                    </div>
+                    <div style={{minWidth:0}}>
+                      <div style={{fontSize:13,color:TXT}}>{getTemplate(j.templateId).name}</div>
+                      <div style={{fontSize:10,color:MUTED}}>{j.client} · {j.serial}</div>
+                    </div>
+                  </button>
+                );
+              })}
+              <button onClick={()=>setAssigning(null)}
+                style={{width:"100%",marginTop:8,background:Y,border:"none",borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:800,color:BG,letterSpacing:1}}>DONE</button>
+            </div>
+          </div>
+        )}
+
         {/* ── Name cleanup: merge stray spellings into a real account ── */}
         <div style={{padding:"0 14px 20px"}}>
           <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 2px 10px"}}>
@@ -2101,7 +2161,7 @@ export default function App() {
 
   const BottomNav = () => {
     const navItems = mode==="admin"
-      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:"SWITCH",Icon:LogOut,action:()=>setMode("select"),active:false}]
+      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:isAdminUser?"SIGN OUT":"SWITCH",Icon:LogOut,action:()=>isAdminUser?doSignOut():setMode("select"),active:false}]
       : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SIGN OUT",Icon:LogOut,action:doSignOut,active:false}];
     const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
     if (isAdmin && isDesktop) return (
@@ -2166,11 +2226,11 @@ export default function App() {
     return (
       <div>
         <TopBar title={`${j?.make||""} — ${j?.serial||""}`} sub={j?.client}/>
-        <JobTaskSearch value={taskSearch} onChange={setTaskSearch}
-          results={searchTasks(selJob, taskSearch)}
+        <JobTaskSearch
+          search={q => searchTasks(selJob, q)}
           statusOf={tid => getStatus(selJob, tid)}
-          onPick={task => { setTaskSearch(""); go("task",{sec:task.sId, task:task.id}); }}/>
-        {!searchingTasks && <div style={{padding:"12px 14px"}}>
+          onPick={task => go("task",{sec:task.sId, task:task.id})}>
+        <div style={{padding:"12px 14px"}}>
           {secsOf(selJob).map(sec => {
             const st = sStats(selJob, sec.id);
             return (
@@ -2188,7 +2248,8 @@ export default function App() {
               </div>
             );
           })}
-        </div>}
+        </div>
+        </JobTaskSearch>
       </div>
     );
   };
@@ -2389,12 +2450,12 @@ export default function App() {
             ))}
           </div>
         </div>
-        <JobTaskSearch value={taskSearch} onChange={setTaskSearch}
-          results={searchTasks(selJob, taskSearch)}
+        <JobTaskSearch
+          search={q => searchTasks(selJob, q)}
           statusOf={tid => getStatus(selJob, tid)}
-          onPick={task => { setTaskSearch(""); go("task",{sec:task.sId, task:task.id}); }}/>
+          onPick={task => go("task",{sec:task.sId, task:task.id})}>
 
-        {!searchingTasks && tab==="progress" && (
+        {tab==="progress" && (
           <div>
             <div style={{background:CARD,padding:"12px 16px 14px",borderBottom:`1px solid ${BDR}`}}>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:MUTED,marginBottom:6}}>
@@ -2439,7 +2500,7 @@ export default function App() {
           </div>
         )}
 
-        {!searchingTasks && tab==="costings" && (
+        {tab==="costings" && (
           <div>
             <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
@@ -2502,6 +2563,7 @@ export default function App() {
             </div>
           </div>
         )}
+        </JobTaskSearch>
       </div>
     );
   };
@@ -2698,6 +2760,138 @@ export default function App() {
             </div>
           )}
           {confirmPhoDel&&<ConfirmPhotoDel jid={selJob} tid={selTask}/>}
+        </div>
+      </div>
+    );
+  };
+
+  // ── Client portal ─────────────────────────────────────────────────
+  // Read-only view for the machine's owner. Shows progress and what they'll be
+  // invoiced. Deliberately excludes: estimated-vs-actual variance, worker names,
+  // internal hour counts, SRSA's cost basis, and anything editable.
+  const ClientPortal = () => {
+    const [openJob, setOpenJob] = useState(myJobs[0]?.id || null);
+    const job = myJobs.find(j => j.id === openJob) || myJobs[0];
+    if (!job) return (
+      <div style={{minHeight:"100dvh",background:BG,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:30,textAlign:"center"}}>
+        <div style={{maxWidth:200,marginBottom:24}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
+        <div style={{fontSize:14,color:MUTED,lineHeight:1.6,maxWidth:320}}>
+          Hi {myName || "there"} — no machines are linked to your account yet. Give SRSA a call and they'll set it up.
+        </div>
+        <button onClick={doSignOut} style={{marginTop:24,background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"11px 22px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:TXT,letterSpacing:1}}>SIGN OUT</button>
+      </div>
+    );
+
+    const o  = jStats(job.id);
+    const ts = [...tasksOf(job.id).filter(t=>isIn(job.id,t)), ...(customTasks[job.id]||[])];
+    const doneN = ts.filter(t=>getStatus(job.id,t.id)==="completed").length;
+    const pct   = ts.length ? Math.round(doneN/ts.length*100) : 0;
+    // Client-facing figures: labour actually done + hoses actually made.
+    const jobHoses = hoses.filter(h => h.jobId===job.id);
+    const hoseTotal = jobHoses.reduce((s,h)=>s+hoseCalc(h).total, 0);
+    const labourExGst = o.actualCost;                 // hours × agreed rate
+    const invTotal = labourExGst*1.1 + hoseTotal;     // hoses already include GST
+    const photoCount = Object.entries(photos)
+      .filter(([k]) => k.startsWith(job.id+"_")).reduce((s,[,v])=>s+v.length,0);
+    const money = n => `$${n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+
+    return (
+      <div style={{minHeight:"100dvh",background:BG,display:"flex",justifyContent:"center"}}>
+        <div style={{width:"100%",maxWidth:520,paddingBottom:40}}>
+          <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"16px 18px",display:"flex",alignItems:"center",gap:12}}>
+            <div style={{maxWidth:96}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:FF,fontSize:13,fontWeight:700,color:TXT}}>{myName}</div>
+              <div style={{fontSize:10,color:MUTED}}>Rebuild progress</div>
+            </div>
+            <button onClick={doSignOut} style={{background:BDR2,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1}}>SIGN OUT</button>
+          </div>
+
+          {myJobs.length>1 && (
+            <div style={{display:"flex",overflowX:"auto",borderBottom:`1px solid ${BDR}`,background:CARD}}>
+              {myJobs.map(j => (
+                <button key={j.id} onClick={()=>setOpenJob(j.id)}
+                  style={{flex:"1 0 auto",minWidth:120,padding:"11px 14px",background:"none",border:"none",borderBottom:`2px solid ${openJob===j.id?Y:"transparent"}`,cursor:"pointer",whiteSpace:"nowrap"}}>
+                  <div style={{fontFamily:FF,fontSize:12,fontWeight:800,letterSpacing:.5,color:openJob===j.id?Y:MUTED}}>{getTemplate(j.templateId).name}</div>
+                  <div style={{fontSize:9,color:MUTED,marginTop:2}}>{j.serial}</div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div style={{padding:"18px 16px"}}>
+            <div style={{fontFamily:FF,fontSize:20,fontWeight:800,color:TXT}}>{getTemplate(job.templateId).name}</div>
+            <div style={{fontSize:12,color:MUTED,marginTop:3}}>{job.make} {job.model||""} · {job.serial}</div>
+            {job.started && <div style={{fontSize:11,color:MUTED,marginTop:2}}>In the workshop since {job.started}</div>}
+
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"16px 15px",marginTop:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:9}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1.5}}>OVERALL PROGRESS</span>
+                <span style={{fontFamily:MONO,fontSize:22,color:Y}}>{pct}%</span>
+              </div>
+              <div style={{height:8,background:CARD2,borderRadius:4,overflow:"hidden"}}>
+                <div style={{width:`${pct}%`,height:"100%",background:Y,transition:"width .3s"}}/>
+              </div>
+              <div style={{fontSize:11,color:MUTED,marginTop:9}}>
+                {doneN} of {ts.length} jobs complete{photoCount?` · ${photoCount} progress photos on file`:""}
+              </div>
+            </div>
+
+            <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2,margin:"22px 2px 10px"}}>BY SECTION</div>
+            {secsOf(job.id).map(sec => {
+              const secTasks = ts.filter(t => t.sId===sec.id);
+              if (!secTasks.length) return null;
+              const dn = secTasks.filter(t=>getStatus(job.id,t.id)==="completed").length;
+              const p  = Math.round(dn/secTasks.length*100);
+              const held = secTasks.some(t=>getStatus(job.id,t.id)==="on_hold");
+              return (
+                <div key={sec.id} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"11px 13px",marginBottom:7}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:7}}>
+                    <span style={{fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>{sec.name}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:7}}>
+                      {held && <HChip label="ON HOLD" col={BG} bg="#F5A524"/>}
+                      <span style={{fontFamily:MONO,fontSize:13,color:p===100?GRN:MUTED}}>{p}%</span>
+                    </div>
+                  </div>
+                  <div style={{height:4,background:CARD2,borderRadius:2,overflow:"hidden"}}>
+                    <div style={{width:`${p}%`,height:"100%",background:p===100?GRN:Y}}/>
+                  </div>
+                  <div style={{fontSize:10,color:MUTED,marginTop:6}}>{dn} of {secTasks.length} complete</div>
+                </div>
+              );
+            })}
+
+            <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2,margin:"22px 2px 10px"}}>CHARGES TO DATE</div>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"14px 15px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                <div>
+                  <div style={{fontSize:13,color:TXT}}>Labour</div>
+                  <div style={{fontSize:10,color:MUTED,marginTop:1}}>at ${job.lockedRate}/hr + GST</div>
+                </div>
+                <span style={{fontFamily:MONO,fontSize:14,color:TXT}}>{money(labourExGst)}</span>
+              </div>
+              {hoseTotal>0 && (
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                  <div>
+                    <div style={{fontSize:13,color:TXT}}>Hoses made</div>
+                    <div style={{fontSize:10,color:MUTED,marginTop:1}}>{jobHoses.length} hose{jobHoses.length===1?"":"s"}, inc GST</div>
+                  </div>
+                  <span style={{fontFamily:MONO,fontSize:14,color:TXT}}>{money(hoseTotal)}</span>
+                </div>
+              )}
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:8,paddingTop:8,borderTop:`1px solid ${BDR}`}}>
+                <span style={{fontSize:12,color:MUTED}}>GST on labour</span>
+                <span style={{fontFamily:MONO,fontSize:13,color:MUTED}}>{money(labourExGst*0.1)}</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",paddingTop:9,borderTop:`1px solid ${BDR2}`}}>
+                <span style={{fontFamily:FF,fontSize:13,fontWeight:800,color:Y,letterSpacing:1}}>TOTAL INC GST</span>
+                <span style={{fontFamily:MONO,fontSize:19,color:Y}}>{money(invTotal)}</span>
+              </div>
+            </div>
+            <div style={{fontSize:10,color:MUTED,marginTop:10,lineHeight:1.6,padding:"0 2px"}}>
+              Work completed to date. Parts are invoiced separately. This is a live figure, not a final invoice — talk to SRSA for anything that doesn't look right.
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -3240,23 +3434,27 @@ export default function App() {
     </div>
   );
 
-  // Auth routing (technicians). Admin still uses the PIN and is never gated by this.
+  // ── Routing ──
+  // Signed-in accounts route by their role. The PIN remains a fallback so the
+  // supervisor can never be locked out (and is how the first admin promotes
+  // themselves); it can be retired once admin accounts are proven.
   if (!authReady) return <LoadingView/>;
-  if (mode !== "admin" && mode !== "pin") {
-    // A signed-in tech skips the mode picker entirely and lands straight in the app.
+  if (mode !== "pin") {
     if (authUser) {
-      if (!me)                    return <LoadingView/>;          // profile still loading
-      if (me.status !== "approved") return <PendingScreen/>;      // pending or revoked
-    } else {
-      if (mode === "auth")   return <AuthScreen/>;
-      if (mode !== "select") return <ModeSelect/>;
+      if (!me) return <LoadingView/>;                                   // profile loading
+      if (me.status !== "approved") return <PendingScreen/>;            // pending or revoked
+      if (loading) return <LoadingView/>;
+      if (isClientUser) return <ClientPortal/>;                         // read-only customer view
+    } else if (mode !== "admin") {
+      if (mode === "auth") return <AuthScreen/>;
       return <ModeSelect/>;
     }
   }
   if (loading && mode!=="select" && mode!=="pin") return <LoadingView/>;
   if (mode==="select" && !authUser) return <ModeSelect/>;
   if (mode==="pin")    return <PinScreen/>;
-  const isAdmin = mode==="admin";
+  // Admin access comes from either an admin account or the PIN.
+  const isAdmin = mode==="admin" || isAdminUser;
 
   return (
     <ErrorBoundary><div style={{background:BG,minHeight:"100dvh",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-start"}}>
