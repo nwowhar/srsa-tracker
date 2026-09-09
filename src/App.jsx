@@ -149,6 +149,166 @@ const DEP_TYPES = [
   {v:"blocked", label:"Can't start until",   hint:"hard gate — that job must finish"},
 ];
 
+// Job-wide task search. MODULE LEVEL on purpose: defining this inside App()
+// meant every keystroke recreated the component and iOS dropped the keyboard
+// after one character. Keep it out here.
+const JobTaskSearch = ({value, onChange, results, onPick, statusOf}) => {
+  const active = (value||"").trim().length > 0;
+  return (<>
+    <div style={{padding:"12px 14px 4px",background:BG}}>
+      <div style={{position:"relative"}}>
+        <input value={value} onChange={e=>onChange(e.target.value)}
+          placeholder="Search tasks — e.g. 1.03, water pump…"
+          autoCorrect="off" autoCapitalize="none" spellCheck={false}
+          style={{width:"100%",background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:"11px 40px 11px 14px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none"}}/>
+        {active && (
+          <button onClick={()=>onChange("")} aria-label="Clear search"
+            style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:BDR2,border:"none",borderRadius:6,width:26,height:26,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
+            <X size={14} color={MUTED}/>
+          </button>
+        )}
+      </div>
+      {active && <div style={{fontSize:11,color:MUTED,marginTop:6,padding:"0 4px"}}>{results.length} match{results.length===1?"":"es"}</div>}
+    </div>
+    {active && (
+      <div style={{padding:"6px 14px 14px"}}>
+        {results.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 0"}}>No tasks match “{value}”.</div>}
+        {results.map(({task, sec}) => {
+          const st = statusOf(task.id);
+          const col = st==="completed"?GRN : st==="on_hold"?"#F5A524" : Y;
+          return (
+            <div key={task.id} onClick={()=>onPick(task)}
+              style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+              <div style={{background:col,borderRadius:6,minWidth:44,height:28,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 6px",flexShrink:0}}>
+                <span style={{fontFamily:MONO,fontSize:11,fontWeight:800,color:BG}}>{task.id}</span>
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontFamily:FF,fontSize:14,fontWeight:600,color:TXT,overflow:"hidden",textOverflow:"ellipsis"}}>{task.desc}</div>
+                <div style={{fontSize:11,color:MUTED,marginTop:2}}>{sec?.id}. {sec?.name}{task.opt?" · optional":""}</div>
+              </div>
+              <ChevronRight size={16} color={MUTED}/>
+            </div>
+          );
+        })}
+      </div>
+    )}
+  </>);
+};
+
+// ── Edit one bar on the Gantt: duration, fixed start, and dependencies ──
+const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
+    const [dur, setDur]     = useState(String(row.dur ?? ""));
+  const [fixed, setFixed] = useState(row.fixedStart ?? "");
+  const [deps, setDeps]   = useState(row.deps || []);
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy]   = useState(false);
+  const task = tmpl.tasks.find(t => t.id===row.taskId);
+  const descOf = id => tmpl.tasks.find(t=>t.id===id)?.desc || "";
+  // Candidates exclude self and anything already listed.
+  const candidates = tmpl.schedule.map(s=>s.taskId)
+    .filter(id => id!==row.taskId && !deps.some(d=>d.id===id));
+
+  const save = async () => {
+    setBusy(true);
+    await onSave({
+      dur: parseFloat(dur) || 0,
+      fixedStart: fixed==="" ? null : parseFloat(fixed),
+      deps,
+    });
+    setBusy(false); onClose();
+  };
+  const reset = async () => { setBusy(true); await onReset(); setBusy(false); onClose(); };
+  const Label = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
+  const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 13px",color:TXT,fontSize:15,fontFamily:MONO,boxSizing:"border-box",outline:"none"};
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:120,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={{background:CARD,borderRadius:"18px 18px 0 0",padding:"20px 18px 26px",width:"100%",maxWidth:480,border:`1px solid ${BDR}`,boxSizing:"border-box",maxHeight:"88dvh",overflowY:"auto"}}>
+        <div style={{width:36,height:4,background:BDR2,borderRadius:2,margin:"0 auto 18px"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:18}}>
+          <div style={{minWidth:0}}>
+            <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{row.taskId}</div>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.2}}>{task?.desc||"Task"}</div>
+            {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h estimated</div>}
+          </div>
+          <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer",flexShrink:0}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        <div style={{marginBottom:16}}>
+          <Label>DURATION (WORKING DAYS)</Label>
+          <input type="number" step="0.1" min="0" value={dur} onChange={e=>setDur(e.target.value)} style={fld}/>
+        </div>
+
+        <div style={{marginBottom:16}}>
+          <Label>EARLIEST START (DAYS FROM PROJECT START)</Label>
+          <input type="number" step="0.5" min="0" value={fixed} onChange={e=>setFixed(e.target.value)}
+            placeholder="auto — follows the rules below" style={{...fld,fontSize:14}}/>
+          <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.4}}>
+            Leave blank to let the dependencies decide. Set a number to hold it back until at least that day.
+          </div>
+        </div>
+
+        <div style={{marginBottom:8}}>
+          <Label>RULES</Label>
+          {deps.length===0 && <div style={{fontSize:12,color:MUTED,padding:"8px 0 4px"}}>No rules — this can start at day {fixed||0}.</div>}
+          {deps.map((d,i) => (
+            <div key={d.id+i} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{d.id}</span>
+                <span style={{flex:1,fontSize:11,color:MUTED,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(d.id)}</span>
+                <button onClick={()=>setDeps(deps.filter((_,j)=>j!==i))}
+                  style={{background:"none",border:"none",cursor:"pointer",padding:2}}><X size={14} color={MUTED}/></button>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                {DEP_TYPES.map(dt => (
+                  <button key={dt.v} onClick={()=>setDeps(deps.map((x,j)=>j===i?{...x,type:dt.v}:x))}
+                    style={{display:"flex",alignItems:"center",gap:8,background:d.type===dt.v?"rgba(232,176,0,.12)":"transparent",border:`1px solid ${d.type===dt.v?Y:BDR}`,borderRadius:7,padding:"7px 10px",cursor:"pointer",textAlign:"left"}}>
+                    <div style={{width:13,height:13,borderRadius:"50%",border:`2px solid ${d.type===dt.v?Y:BDR2}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {d.type===dt.v && <div style={{width:5,height:5,borderRadius:"50%",background:Y}}/>}
+                    </div>
+                    <span style={{fontSize:12,color:d.type===dt.v?TXT:MUTED}}>{dt.label}</span>
+                    <span style={{fontSize:10,color:MUTED,marginLeft:"auto"}}>{dt.hint}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {!picking && (
+            <button onClick={()=>setPicking(true)}
+              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1,marginTop:4}}>
+              <Plus size={13}/> ADD RULE
+            </button>
+          )}
+          {picking && (
+            <div style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px",marginTop:6,maxHeight:200,overflowY:"auto"}}>
+              <div style={{fontSize:11,color:MUTED,marginBottom:7}}>Which job does this depend on?</div>
+              {candidates.map(id => (
+                <button key={id} onClick={()=>{setDeps([...deps,{id,type:"after"}]); setPicking(false);}}
+                  style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"8px 4px",cursor:"pointer",textAlign:"left"}}>
+                  <span style={{fontFamily:MONO,fontSize:11,color:Y,flexShrink:0}}>{id}</span>
+                  <span style={{fontSize:11,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(id)}</span>
+                </button>
+              ))}
+              <button onClick={()=>setPicking(false)} style={{width:"100%",background:"none",border:"none",padding:"9px 0 2px",cursor:"pointer",fontSize:12,color:MUTED}}>Cancel</button>
+            </div>
+          )}
+        </div>
+
+        <div style={{display:"flex",gap:9,marginTop:18}}>
+          <button onClick={reset} disabled={busy}
+            style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"13px 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
+            RESET
+          </button>
+          <button onClick={save} disabled={busy}
+            style={{flex:1,background:Y,border:"none",borderRadius:9,padding:13,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG,letterSpacing:1}}>
+            {busy?"SAVING…":"SAVE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const groupByMonth = list => {
   const g = {};
   for (const h of list) { const k = (h.date||"").slice(0,7) || "—"; (g[k] = g[k]||[]).push(h); }
@@ -825,48 +985,6 @@ export default function App() {
   };
 
   // Shared search bar rendered above the sections list in Tech/Admin job views.
-  const JobTaskSearch = () => {
-    const results = searchTasks(selJob, taskSearch);
-    const active = taskSearch.trim().length > 0;
-    return (<>
-      <div style={{padding:"12px 14px 4px",background:BG}}>
-        <div style={{position:"relative"}}>
-          <input value={taskSearch} onChange={e=>setTaskSearch(e.target.value)}
-            placeholder="Search tasks — e.g. 1.03, water pump…"
-            style={{width:"100%",background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:"11px 40px 11px 14px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none"}}/>
-          {active && (
-            <button onClick={()=>setTaskSearch("")} aria-label="Clear search"
-              style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:BDR2,border:"none",borderRadius:6,width:26,height:26,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
-              <X size={14} color={MUTED}/>
-            </button>
-          )}
-        </div>
-        {active && <div style={{fontSize:11,color:MUTED,marginTop:6,padding:"0 4px"}}>{results.length} match{results.length===1?"":"es"}</div>}
-      </div>
-      {active && (
-        <div style={{padding:"6px 14px 14px"}}>
-          {results.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 0"}}>No tasks match “{taskSearch}”.</div>}
-          {results.map(({task, sec}) => {
-            const st = getStatus(selJob, task.id);
-            const col = st==="completed"?GRN : st==="on_hold"?"#F5A524" : Y;
-            return (
-              <div key={task.id} onClick={()=>{ setTaskSearch(""); go("task",{sec:task.sId, task:task.id}); }}
-                style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
-                <div style={{background:col,borderRadius:6,minWidth:44,height:28,display:"flex",alignItems:"center",justifyContent:"center",padding:"0 6px",flexShrink:0}}>
-                  <span style={{fontFamily:MONO,fontSize:11,fontWeight:800,color:BG}}>{task.id}</span>
-                </div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontFamily:FF,fontSize:14,fontWeight:600,color:TXT,overflow:"hidden",textOverflow:"ellipsis"}}>{task.desc}</div>
-                  <div style={{fontSize:11,color:MUTED,marginTop:2}}>{sec?.id}. {sec?.name}{task.opt?" · optional":""}</div>
-                </div>
-                <ChevronRight size={16} color={MUTED}/>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </>);
-  };
   const searchingTasks = taskSearch.trim().length > 0;
 
   const getEnt  = (jid, tid) => entries[eKey(jid,tid)] || [];
@@ -982,8 +1100,12 @@ export default function App() {
     setUploading(true); setUploadError(null);
     try {
       for (const raw of files) {
-        const f = await compressImage(raw);
-        const storageRef = ref(storage, `photos/${selJob}/${selTask}/${Date.now()}_${f.name}`);
+        // Compression is best-effort — never let it block an upload.
+        let f = raw;
+        try { f = await compressImage(raw); }
+        catch (ce) { console.warn("Compression skipped:", ce); f = raw; }
+        const safeName = (f.name || "photo.jpg").replace(/[^a-zA-Z0-9._-]/g, "_");
+        const storageRef = ref(storage, `photos/${selJob}/${selTask}/${Date.now()}_${safeName}`);
         const snap = await uploadBytes(storageRef, f);
         const url = await getDownloadURL(snap.ref);
         await addDoc(collection(db,"photos"), {
@@ -993,8 +1115,17 @@ export default function App() {
         });
       }
     } catch(err) {
-      console.error("Upload failed:", err);
-      setUploadError("Upload failed — check your connection and try again.");
+      console.error("Upload failed:", err, "| code:", err?.code, "| auth:", auth.currentUser?.uid, "anon:", auth.currentUser?.isAnonymous);
+      const code = err?.code || "";
+      setUploadError(
+        code==="storage/unauthorized"       ? "Not allowed to upload — you may have been signed out. Sign out and back in." :
+        code==="storage/unauthenticated"    ? "Signed out — sign in again and retry." :
+        code==="storage/retry-limit-exceeded" ? "Upload timed out — weak signal. Try again on better reception." :
+        code==="storage/quota-exceeded"     ? "Storage is full — tell the supervisor." :
+        code==="storage/invalid-argument"   ? "That file type isn't supported. Try taking the photo again." :
+        code ? `Upload failed (${code}). Tell the supervisor.`
+             : `Upload failed — ${err?.message || "unknown error"}.`
+      );
     } finally {
       setUploading(false);
       e.target.value = "";
@@ -2035,7 +2166,10 @@ export default function App() {
     return (
       <div>
         <TopBar title={`${j?.make||""} — ${j?.serial||""}`} sub={j?.client}/>
-        <JobTaskSearch/>
+        <JobTaskSearch value={taskSearch} onChange={setTaskSearch}
+          results={searchTasks(selJob, taskSearch)}
+          statusOf={tid => getStatus(selJob, tid)}
+          onPick={task => { setTaskSearch(""); go("task",{sec:task.sId, task:task.id}); }}/>
         {!searchingTasks && <div style={{padding:"12px 14px"}}>
           {secsOf(selJob).map(sec => {
             const st = sStats(selJob, sec.id);
@@ -2255,7 +2389,10 @@ export default function App() {
             ))}
           </div>
         </div>
-        <JobTaskSearch/>
+        <JobTaskSearch value={taskSearch} onChange={setTaskSearch}
+          results={searchTasks(selJob, taskSearch)}
+          statusOf={tid => getStatus(selJob, tid)}
+          onPick={task => { setTaskSearch(""); go("task",{sec:task.sId, task:task.id}); }}/>
 
         {!searchingTasks && tab==="progress" && (
           <div>
@@ -2561,121 +2698,6 @@ export default function App() {
             </div>
           )}
           {confirmPhoDel&&<ConfirmPhotoDel jid={selJob} tid={selTask}/>}
-        </div>
-      </div>
-    );
-  };
-
-  // ── Edit one bar on the Gantt: duration, fixed start, and dependencies ──
-  const ScheduleEditor = ({job, row, onClose}) => {
-    const tmpl = tmplOf(job.id);
-    const [dur, setDur]     = useState(String(row.dur ?? ""));
-    const [fixed, setFixed] = useState(row.fixedStart ?? "");
-    const [deps, setDeps]   = useState(row.deps || []);
-    const [picking, setPicking] = useState(false);
-    const [busy, setBusy]   = useState(false);
-    const task = tmpl.tasks.find(t => t.id===row.taskId);
-    const descOf = id => tmpl.tasks.find(t=>t.id===id)?.desc || "";
-    // Candidates exclude self and anything already listed.
-    const candidates = tmpl.schedule.map(s=>s.taskId)
-      .filter(id => id!==row.taskId && !deps.some(d=>d.id===id));
-
-    const save = async () => {
-      setBusy(true);
-      await saveSchedRow(job.id, row.taskId, {
-        dur: parseFloat(dur) || 0,
-        fixedStart: fixed==="" ? null : parseFloat(fixed),
-        deps,
-      });
-      setBusy(false); onClose();
-    };
-    const reset = async () => { setBusy(true); await resetSchedRow(job.id, row.taskId); setBusy(false); onClose(); };
-    const Label = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
-    const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 13px",color:TXT,fontSize:15,fontFamily:MONO,boxSizing:"border-box",outline:"none"};
-
-    return (
-      <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:120,display:"flex",alignItems:"flex-end",justifyContent:"center"}} onClick={e=>e.target===e.currentTarget&&onClose()}>
-        <div style={{background:CARD,borderRadius:"18px 18px 0 0",padding:"20px 18px 26px",width:"100%",maxWidth:480,border:`1px solid ${BDR}`,boxSizing:"border-box",maxHeight:"88dvh",overflowY:"auto"}}>
-          <div style={{width:36,height:4,background:BDR2,borderRadius:2,margin:"0 auto 18px"}}/>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:18}}>
-            <div style={{minWidth:0}}>
-              <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{row.taskId}</div>
-              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.2}}>{task?.desc||"Task"}</div>
-              {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h estimated</div>}
-            </div>
-            <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer",flexShrink:0}}><X size={16} color={MUTED}/></button>
-          </div>
-
-          <div style={{marginBottom:16}}>
-            <Label>DURATION (WORKING DAYS)</Label>
-            <input type="number" step="0.1" min="0" value={dur} onChange={e=>setDur(e.target.value)} style={fld}/>
-          </div>
-
-          <div style={{marginBottom:16}}>
-            <Label>EARLIEST START (DAYS FROM PROJECT START)</Label>
-            <input type="number" step="0.5" min="0" value={fixed} onChange={e=>setFixed(e.target.value)}
-              placeholder="auto — follows the rules below" style={{...fld,fontSize:14}}/>
-            <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.4}}>
-              Leave blank to let the dependencies decide. Set a number to hold it back until at least that day.
-            </div>
-          </div>
-
-          <div style={{marginBottom:8}}>
-            <Label>RULES</Label>
-            {deps.length===0 && <div style={{fontSize:12,color:MUTED,padding:"8px 0 4px"}}>No rules — this can start at day {fixed||0}.</div>}
-            {deps.map((d,i) => (
-              <div key={d.id+i} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7}}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                  <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{d.id}</span>
-                  <span style={{flex:1,fontSize:11,color:MUTED,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(d.id)}</span>
-                  <button onClick={()=>setDeps(deps.filter((_,j)=>j!==i))}
-                    style={{background:"none",border:"none",cursor:"pointer",padding:2}}><X size={14} color={MUTED}/></button>
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                  {DEP_TYPES.map(dt => (
-                    <button key={dt.v} onClick={()=>setDeps(deps.map((x,j)=>j===i?{...x,type:dt.v}:x))}
-                      style={{display:"flex",alignItems:"center",gap:8,background:d.type===dt.v?"rgba(232,176,0,.12)":"transparent",border:`1px solid ${d.type===dt.v?Y:BDR}`,borderRadius:7,padding:"7px 10px",cursor:"pointer",textAlign:"left"}}>
-                      <div style={{width:13,height:13,borderRadius:"50%",border:`2px solid ${d.type===dt.v?Y:BDR2}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                        {d.type===dt.v && <div style={{width:5,height:5,borderRadius:"50%",background:Y}}/>}
-                      </div>
-                      <span style={{fontSize:12,color:d.type===dt.v?TXT:MUTED}}>{dt.label}</span>
-                      <span style={{fontSize:10,color:MUTED,marginLeft:"auto"}}>{dt.hint}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-            {!picking && (
-              <button onClick={()=>setPicking(true)}
-                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1,marginTop:4}}>
-                <Plus size={13}/> ADD RULE
-              </button>
-            )}
-            {picking && (
-              <div style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px",marginTop:6,maxHeight:200,overflowY:"auto"}}>
-                <div style={{fontSize:11,color:MUTED,marginBottom:7}}>Which job does this depend on?</div>
-                {candidates.map(id => (
-                  <button key={id} onClick={()=>{setDeps([...deps,{id,type:"after"}]); setPicking(false);}}
-                    style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"8px 4px",cursor:"pointer",textAlign:"left"}}>
-                    <span style={{fontFamily:MONO,fontSize:11,color:Y,flexShrink:0}}>{id}</span>
-                    <span style={{fontSize:11,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(id)}</span>
-                  </button>
-                ))}
-                <button onClick={()=>setPicking(false)} style={{width:"100%",background:"none",border:"none",padding:"9px 0 2px",cursor:"pointer",fontSize:12,color:MUTED}}>Cancel</button>
-              </div>
-            )}
-          </div>
-
-          <div style={{display:"flex",gap:9,marginTop:18}}>
-            <button onClick={reset} disabled={busy}
-              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"13px 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
-              RESET
-            </button>
-            <button onClick={save} disabled={busy}
-              style={{flex:1,background:Y,border:"none",borderRadius:9,padding:13,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG,letterSpacing:1}}>
-              {busy?"SAVING…":"SAVE"}
-            </button>
-          </div>
         </div>
       </div>
     );
@@ -3274,7 +3296,13 @@ export default function App() {
       {editHose && jobs.find(j=>j.id===editHose.jobId) &&
         <HoseBuilderModal job={jobs.find(j=>j.id===editHose.jobId)} initial={editHose}
           onClose={()=>setEditHose(null)} onSave={updHose} defaultWorker={myName} sections={secsOf(editHose.jobId)}/>}
-      {editSched && <ScheduleEditor {...editSched} onClose={()=>setEditSched(null)}/>}
+      {editSched && (
+        <ScheduleEditor {...editSched}
+          tmpl={tmplOf(editSched.job.id)}
+          onSave={patch => saveSchedRow(editSched.job.id, editSched.row.taskId, patch)}
+          onReset={() => resetSchedRow(editSched.job.id, editSched.row.taskId)}
+          onClose={()=>setEditSched(null)}/>
+      )}
       {confirmHoseDel && (
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
           <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:320,width:"100%"}}>
