@@ -305,27 +305,45 @@ const weekRangeLabel = iso => {
   return `${f(mon)} – ${f(sun)}`;
 };
 
-// ── Job card form ────────────────────────────────────────────────
-// MODULE LEVEL: holds several controlled text inputs, so it must not be
-// recreated when App re-renders (see the JobTaskSearch comment above).
+const BUSINESSES = [
+  {v:"burnbank", label:"Burnbank Mechanical & Ag"},
+  {v:"srsa",     label:"Specialised Rebuild Services Australia"},
+];
+const PARTS_SOURCES = ["Supplied", "Ute", "Workshop"];
+const CONSUMABLES   = ["Brake Clean", "Rags", "CAT Caps", "Loctite"];
+
 const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                       onAddClient, onAddMachine, onSave, onClose, onUpload}) => {
   const editing = !!initial;
+  const [business, setBusiness]   = useState(initial?.business || "burnbank");
   const [clientId, setClientId]   = useState(initial?.clientId || "");
   const [newClient, setNewClient] = useState("");
   const [machineId, setMachineId] = useState(initial?.machineId || "");
-  const [newMachine, setNewMachine] = useState(null); // {make,model,serial,rego}
+  const [newMachine, setNewMachine] = useState(null);
   const [date, setDate]           = useState(initial?.date || today());
+  // Two shifts, matching the two time rows on the paper card (split days).
   const [start, setStart]         = useState(initial?.start || "07:00");
   const [finish, setFinish]       = useState(initial?.finish || "17:30");
   const [breakMin, setBreakMin]   = useState(String(initial?.breakMin ?? 30));
+  const [shift2, setShift2]       = useState(!!initial?.start2);
+  const [start2, setStart2]       = useState(initial?.start2 || "");
+  const [finish2, setFinish2]     = useState(initial?.finish2 || "");
+  const [break2Min, setBreak2Min] = useState(String(initial?.break2Min ?? 0));
+  const [adminMin, setAdminMin]   = useState(String(initial?.adminMin ?? 0));
   const [travelMin, setTravelMin] = useState(String(initial?.travelMin ?? 0));
   const [hourMeter, setHourMeter] = useState(initial?.hourMeter ?? "");
   const [jobNo, setJobNo]         = useState(initial?.jobNo || "");
   const [po, setPo]               = useState(initial?.po || "");
-  const [description, setDescription] = useState(initial?.description || "");
-  const [workDone, setWorkDone]   = useState(initial?.workDone || "");
+  const [complaint, setComplaint] = useState(initial?.complaint || "");
+  const [cause, setCause]         = useState(initial?.cause || "");
+  const [correction, setCorrection] = useState(initial?.correction || initial?.workDone || "");
+  const [partsSource, setPartsSource] = useState(initial?.partsSource || "");
+  const [partsCompany, setPartsCompany] = useState(initial?.partsCompany || "");
   const [parts, setParts]         = useState(initial?.parts || []);
+  const [hotwash, setHotwash]     = useState(initial?.hotwash ?? "");
+  const [consumables, setConsumables] = useState(initial?.consumables || []);
+  const [consumOther, setConsumOther] = useState(initial?.consumOther || "");
+  const [status, setStatus]       = useState(initial?.status || "ongoing");
   const [photos, setPhotos]       = useState(initial?.photos || []);
   const [linkedJobId, setLinkedJobId]   = useState(initial?.linkedJobId || "");
   const [linkedTaskId, setLinkedTaskId] = useState(initial?.linkedTaskId || "");
@@ -336,9 +354,12 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   const camRef = useRef(); const galRef = useRef();
 
   const fleet = machines.filter(m => m.clientId === clientId);
-  const hours      = spanHours(start, finish, breakMin);
-  const travelHrs  = Math.round(((Number(travelMin)||0)/60)*100)/100;
-  const totalHours = hours === null ? null : Math.round((hours + travelHrs)*100)/100;
+  const h1 = spanHours(start, finish, breakMin);
+  const h2 = shift2 ? spanHours(start2, finish2, break2Min) : 0;
+  const adminHrs  = Math.round(((Number(adminMin)||0)/60)*100)/100;
+  const travelHrs = Math.round(((Number(travelMin)||0)/60)*100)/100;
+  const onJob     = (h1||0) + (h2||0);
+  const totalHours = h1 === null ? null : Math.round((onJob + adminHrs + travelHrs)*100)/100;
   const linkedTasks = linkedJobId ? tasksForJob(linkedJobId) : [];
 
   const pickPhotos = async e => {
@@ -346,39 +367,43 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
     if (!files.length) return;
     setUpBusy(true); setErr("");
     try {
-      const added = await onUpload(files);
+      const added = await onUpload(files);      // await outside the state updater
       setPhotos(p => [...p, ...added]);
-    } catch (ex) {
-      setErr(`Photo upload failed (${ex?.code || "unknown"}).`);
     }
-    setUpBusy(false);
-    e.target.value = "";
+    catch (ex) { setErr(`Photo upload failed (${ex?.code || "unknown"}).`); }
+    setUpBusy(false); e.target.value = "";
   };
 
-  // Job # and PO are deliberately NOT required — the office adds them later.
+  // Job # and PO stay optional — the office fills those in later.
   const missing = [];
   if (!clientId || clientId === "__new")   missing.push("client");
   if (!machineId || machineId === "__new") missing.push("machine");
   if (!date)                                missing.push("date");
-  if (hours === null)                       missing.push("start and finish times");
-  else if (hours <= 0)                      missing.push("a finish time after the start");
-  if (!workDone.trim())                     missing.push("what you did");
+  if (h1 === null)                          missing.push("start and finish times");
+  else if (onJob <= 0 && adminHrs === 0 && travelHrs === 0) missing.push("some hours");
+  if (!correction.trim())                   missing.push("correction (what you did)");
   const valid = missing.length === 0;
+
   const submit = async () => {
     if (!valid || busy) return;
     if (editing && !confirm) { setConfirm(true); return; }
     setBusy(true); setErr("");
     try {
       await onSave({
-        clientId, machineId, date, start, finish,
-        breakMin: Number(breakMin) || 0,
-        travelMin: Number(travelMin) || 0,
-        hours: totalHours,          // billed/paid hours = on the job + travel
-        onJobHours: hours,          // kept separately so travel can be split out later
+        business, clientId, machineId, date,
+        start, finish, breakMin: Number(breakMin)||0,
+        start2: shift2 ? start2 : null, finish2: shift2 ? finish2 : null,
+        break2Min: shift2 ? (Number(break2Min)||0) : 0,
+        adminMin: Number(adminMin)||0, travelMin: Number(travelMin)||0,
+        onJobHours: onJob, hours: totalHours,
         hourMeter: hourMeter === "" ? null : Number(hourMeter),
         jobNo: jobNo.trim(), po: po.trim(),
-        description: description.trim(), workDone: workDone.trim(),
-        parts, photos,
+        complaint: complaint.trim(), cause: cause.trim(), correction: correction.trim(),
+        workDone: correction.trim(),          // keeps older cards/readers working
+        partsSource, partsCompany: partsCompany.trim(), parts,
+        hotwash: hotwash === "" ? null : Number(hotwash),
+        consumables, consumOther: consumOther.trim(),
+        status, photos,
         worker: initial?.worker || me?.name || "",
         techId: initial?.techId || me?.id || null,
         linkedJobId: linkedJobId || null,
@@ -394,6 +419,33 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   const L = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
   const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"};
   const sel = {...fld, appearance:"none"};
+  const Sub = ({children}) => <div style={{fontSize:10,color:MUTED,marginBottom:4}}>{children}</div>;
+  const TimeRow = ({s,setS,f,setF,b,setB}) => (
+    <>
+      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+        <div style={{flex:1,minWidth:0}}>
+          <Sub>Start</Sub>
+          <select value={s} onChange={e=>setS(e.target.value)} style={{...sel,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}>
+            <option value="">--:--</option>
+            {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+        <span style={{color:MUTED,fontSize:13,paddingBottom:13}}>→</span>
+        <div style={{flex:1,minWidth:0}}>
+          <Sub>Finish</Sub>
+          <select value={f} onChange={e=>setF(e.target.value)} style={{...sel,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}>
+            <option value="">--:--</option>
+            {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+        <div style={{width:92}}>
+          <Sub>Break (min)</Sub>
+          <input type="number" inputMode="numeric" min="0" step="1" value={b} onChange={e=>setB(e.target.value)}
+            style={{...fld,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}/>
+        </div>
+      </div>
+    </>
+  );
 
   return (
     <div style={{position:"fixed",inset:0,background:BG,zIndex:100,display:"flex",justifyContent:"center"}}>
@@ -406,27 +458,39 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
           </div>
         </div>
 
-        <div style={{flex:1,overflowY:"auto",padding:"16px 14px 120px"}}>
+        <div style={{flex:1,overflowY:"auto",padding:"16px 14px 130px"}}>
           {err && <div style={{background:"rgba(255,76,76,.1)",border:`1px solid ${RED}`,borderRadius:9,padding:"10px 12px",marginBottom:14,fontSize:12,color:RED}}>{err}</div>}
 
-          <L>CLIENT</L>
-          <select value={clientId} onChange={e=>{ setClientId(e.target.value); setMachineId(""); }} style={sel}>
-            <option value="">— select client —</option>
-            {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            <option value="__new">+ Add a new client…</option>
-          </select>
-          {clientId === "__new" && (
-            <div style={{display:"flex",gap:8,marginTop:8}}>
-              <input value={newClient} onChange={e=>setNewClient(e.target.value)} placeholder="Client name" style={{...fld,flex:1}}/>
-              <button disabled={!newClient.trim()}
-                onClick={async()=>{ const id = await onAddClient(newClient); setClientId(id); setNewClient(""); }}
-                style={{background:newClient.trim()?Y:BDR2,border:"none",borderRadius:8,padding:"0 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:newClient.trim()?BG:MUTED}}>ADD</button>
-            </div>
-          )}
+          <L>WORK CARRIED OUT FOR</L>
+          <div style={{display:"flex",gap:8}}>
+            {BUSINESSES.map(b => (
+              <button key={b.v} onClick={()=>setBusiness(b.v)}
+                style={{flex:1,background:business===b.v?Y:CARD,border:`1px solid ${business===b.v?Y:BDR2}`,borderRadius:9,padding:"11px 8px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,letterSpacing:.5,color:business===b.v?BG:MUTED,lineHeight:1.25}}>
+                {b.v==="burnbank" ? "BURNBANK\nMECHANICAL & AG" : "SPECIALISED\nREBUILD SERVICES"}
+              </button>
+            ))}
+          </div>
+
+          <div style={{marginTop:18}}>
+            <L>CLIENT</L>
+            <select value={clientId} onChange={e=>{ setClientId(e.target.value); setMachineId(""); }} style={sel}>
+              <option value="">— select client —</option>
+              {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              <option value="__new">+ Add a new client…</option>
+            </select>
+            {clientId === "__new" && (
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <input value={newClient} onChange={e=>setNewClient(e.target.value)} placeholder="Client name (or W/S for workshop)" style={{...fld,flex:1}}/>
+                <button disabled={!newClient.trim()}
+                  onClick={async()=>{ const id = await onAddClient(newClient); setClientId(id); setNewClient(""); }}
+                  style={{background:newClient.trim()?Y:BDR2,border:"none",borderRadius:8,padding:"0 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:newClient.trim()?BG:MUTED}}>ADD</button>
+              </div>
+            )}
+          </div>
 
           {clientId && clientId !== "__new" && (
             <div style={{marginTop:18}}>
-              <L>MACHINE</L>
+              <L>MACHINE — SERIAL / REGO</L>
               <select value={machineId} onChange={e=>{
                   setMachineId(e.target.value);
                   if (e.target.value === "__new") setNewMachine({make:"",model:"",serial:"",rego:""});
@@ -439,8 +503,8 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                 ))}
                 <option value="__new">+ Add a machine to this client…</option>
               </select>
-              {fleet.length>0 && machineId && machineId!=="__new" && (
-                <div style={{fontSize:11,color:GRN,marginTop:6}}>✓ Worked on before — this machine is already on file.</div>
+              {machineId && machineId!=="__new" && (
+                <div style={{fontSize:11,color:GRN,marginTop:6}}>✓ Worked on before — already on file.</div>
               )}
               {machineId === "__new" && newMachine && (
                 <div style={{background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:12,marginTop:8}}>
@@ -459,114 +523,139 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
             </div>
           )}
 
-          <div style={{marginTop:18}}>
-            <L>DATE</L>
-            <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={fld}/>
+          <div style={{marginTop:18,display:"flex",gap:10}}>
+            <div style={{flex:1,minWidth:0}}>
+              <L>DATE</L>
+              <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{...fld,fontSize:14}}/>
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <L>KM / HOURS</L>
+              <input type="number" inputMode="decimal" step="0.1" value={hourMeter} onChange={e=>setHourMeter(e.target.value)}
+                placeholder="Meter reading" style={{...fld,fontFamily:MONO,fontSize:14}}/>
+            </div>
           </div>
 
-          <div style={{marginTop:18}}>
+          <div style={{marginTop:20}}>
+            <L>COMPLAINT — WHAT WAS REPORTED?</L>
+            <textarea value={complaint} onChange={e=>setComplaint(e.target.value)} rows={2}
+              placeholder="Optional" style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4,fontSize:14}}/>
+          </div>
+          <div style={{marginTop:14}}>
+            <L>CAUSE — WHAT WAS WRONG?</L>
+            <textarea value={cause} onChange={e=>setCause(e.target.value)} rows={2}
+              placeholder="Optional" style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4,fontSize:14}}/>
+          </div>
+          <div style={{marginTop:14}}>
+            <L>CORRECTION — WHAT YOU DID</L>
+            <textarea value={correction} onChange={e=>setCorrection(e.target.value)} rows={4}
+              placeholder="Work carried out…" style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4}}/>
+          </div>
+
+          <div style={{marginTop:20}}>
             <L>TIME ON THE JOB</L>
-            {/* Two rows rather than three columns — three side by side wrap badly
-                on a phone once the native select arrows are drawn. */}
-            <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Start</div>
-                <select value={start} onChange={e=>setStart(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",textAlign:"center",padding:"12px 6px"}}>
-                  {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
+            <TimeRow s={start} setS={setStart} f={finish} setF={setFinish} b={breakMin} setB={setBreakMin}/>
+            {!shift2 ? (
+              <button onClick={()=>setShift2(true)}
+                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"9px 0",marginTop:9,cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
+                <Plus size={13}/> ADD A SECOND BLOCK OF TIME
+              </button>
+            ) : (
+              <div style={{marginTop:12,paddingTop:12,borderTop:`1px solid ${BDR}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <span style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5}}>SECOND BLOCK</span>
+                  <button onClick={()=>{setShift2(false); setStart2(""); setFinish2(""); setBreak2Min("0");}}
+                    style={{background:"none",border:"none",cursor:"pointer",color:MUTED,fontSize:11,fontFamily:FF,fontWeight:700,letterSpacing:1,padding:0}}>REMOVE</button>
+                </div>
+                <TimeRow s={start2} setS={setStart2} f={finish2} setF={setFinish2} b={break2Min} setB={setBreak2Min}/>
               </div>
-              <span style={{color:MUTED,fontSize:13,paddingBottom:13}}>→</span>
+            )}
+
+            <div style={{display:"flex",gap:8,marginTop:12}}>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Finish</div>
-                <select value={finish} onChange={e=>setFinish(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",textAlign:"center",padding:"12px 6px"}}>
-                  {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-            </div>
-            <div style={{display:"flex",gap:8,marginTop:9}}>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Break</div>
-                <select value={breakMin} onChange={e=>setBreakMin(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",padding:"12px 8px"}}>
-                  {[0,15,30,45,60,90].map(m => <option key={m} value={m}>{m===0?"None":`${m} min`}</option>)}
-                </select>
+                <Sub>Travel time (min)</Sub>
+                <input type="number" inputMode="numeric" min="0" step="5" value={travelMin} onChange={e=>setTravelMin(e.target.value)}
+                  style={{...fld,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}/>
               </div>
               <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Travel</div>
-                <select value={travelMin} onChange={e=>setTravelMin(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",padding:"12px 8px"}}>
-                  {[0,15,30,45,60,75,90,105,120,150,180,240,300,360].map(m =>
-                    <option key={m} value={m}>{m===0?"None":(m<60?`${m} min`:`${(m/60).toFixed(m%60?1:0)} hr${m>=120?"s":""}`)}</option>)}
-                </select>
+                <Sub>Admin time (min)</Sub>
+                <input type="number" inputMode="numeric" min="0" step="5" value={adminMin} onChange={e=>setAdminMin(e.target.value)}
+                  style={{...fld,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}/>
               </div>
             </div>
-            <div style={{background:CARD,border:`1px solid ${totalHours?Y:BDR}`,borderRadius:9,padding:"11px 13px",marginTop:9}}>
+
+            <div style={{background:CARD,border:`1px solid ${totalHours?Y:BDR}`,borderRadius:9,padding:"11px 13px",marginTop:10}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1.5}}>TOTAL HOURS</span>
                 <span style={{fontFamily:MONO,fontSize:19,color:totalHours?Y:MUTED}}>{totalHours===null?"—":fmtHrs(totalHours)}</span>
               </div>
-              {travelHrs>0 && hours!==null && (
+              {(travelHrs>0 || adminHrs>0 || h2>0) && h1!==null && (
                 <div style={{fontSize:10,color:MUTED,marginTop:4,fontFamily:MONO}}>
-                  {fmtHrs(hours)} on the job + {fmtHrs(travelHrs)} travel
+                  {fmtHrs(onJob)} on the job
+                  {adminHrs>0 && ` + ${fmtHrs(adminHrs)} admin`}
+                  {travelHrs>0 && ` + ${fmtHrs(travelHrs)} travel`}
                 </div>
               )}
             </div>
           </div>
 
-          <div style={{marginTop:18}}>
-            <L>HOUR METER READING</L>
-            <input type="number" inputMode="decimal" step="0.1" value={hourMeter} onChange={e=>setHourMeter(e.target.value)}
-              placeholder="Reading off the machine" style={{...fld,fontFamily:MONO}}/>
-          </div>
-
-          <div style={{marginTop:18}}>
-            <L>DESCRIPTION — WHAT WAS THE JOB?</L>
-            <textarea value={description} onChange={e=>setDescription(e.target.value)} rows={2}
-              placeholder="e.g. Boom hose blown out in paddock"
-              style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4}}/>
-          </div>
-
-          <div style={{marginTop:18}}>
-            <L>WHAT YOU DID</L>
-            <textarea value={workDone} onChange={e=>setWorkDone(e.target.value)} rows={4}
-              placeholder="Work carried out, parts replaced, anything the customer should know…"
-              style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4}}/>
-          </div>
-
-          <div style={{marginTop:18,background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:"12px 14px"}}>
-            <L>OFFICE USE — LEAVE BLANK IF YOU DON'T HAVE THEM</L>
-            <div style={{display:"flex",gap:10}}>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Job #</div>
-                <input value={jobNo} onChange={e=>setJobNo(e.target.value)} placeholder="Optional" autoCapitalize="characters" style={{...fld,fontFamily:MONO,fontSize:14}}/>
-              </div>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>PO number</div>
-                <input value={po} onChange={e=>setPo(e.target.value)} placeholder="Optional" autoCapitalize="characters" style={{...fld,fontFamily:MONO,fontSize:14}}/>
-              </div>
+          <div style={{marginTop:20}}>
+            <L>PARTS FROM</L>
+            <div style={{display:"flex",gap:7}}>
+              {PARTS_SOURCES.map(s => (
+                <button key={s} onClick={()=>setPartsSource(partsSource===s?"":s)}
+                  style={{flex:1,background:partsSource===s?Y:CARD,border:`1px solid ${partsSource===s?Y:BDR2}`,borderRadius:8,padding:"9px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,letterSpacing:.5,color:partsSource===s?BG:MUTED}}>
+                  {s.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            {partsSource === "Supplied" && (
+              <input value={partsCompany} onChange={e=>setPartsCompany(e.target.value)} placeholder="Supplied by which company?"
+                style={{...fld,marginTop:8,fontSize:14}}/>
+            )}
+            <div style={{marginTop:10}}>
+              {parts.map((p,i)=>(
+                <div key={i} style={{display:"flex",gap:7,marginBottom:7}}>
+                  <input value={p.pn} onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,pn:e.target.value}:x))}
+                    placeholder="Part no." autoCapitalize="characters" style={{...fld,width:104,fontSize:13,fontFamily:MONO,padding:"12px 8px"}}/>
+                  <input value={p.desc} onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,desc:e.target.value}:x))}
+                    placeholder="Description" style={{...fld,flex:1,minWidth:0,fontSize:14}}/>
+                  <input type="number" inputMode="numeric" min="1" value={p.qty}
+                    onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,qty:e.target.value}:x))}
+                    style={{...fld,width:54,fontSize:14,fontFamily:MONO,padding:"12px 4px",textAlign:"center"}}/>
+                  <button onClick={()=>setParts(parts.filter((_,j)=>j!==i))}
+                    style={{background:BDR2,border:"none",borderRadius:8,padding:"0 9px",cursor:"pointer"}}><X size={14} color={MUTED}/></button>
+                </div>
+              ))}
+              <button onClick={()=>setParts([...parts,{pn:"",desc:"",qty:1}])}
+                style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
+                <Plus size={13}/> ADD A PART
+              </button>
             </div>
           </div>
 
-          <div style={{marginTop:18}}>
-            <L>PARTS USED</L>
-            {parts.map((p,i)=>(
-              <div key={i} style={{display:"flex",gap:7,marginBottom:7}}>
-                <input value={p.desc} onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,desc:e.target.value}:x))}
-                  placeholder="Part description" style={{...fld,flex:1,fontSize:14}}/>
-                <input value={p.pn} onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,pn:e.target.value}:x))}
-                  placeholder="Part no." autoCapitalize="characters" style={{...fld,width:110,fontSize:13,fontFamily:MONO}}/>
-                <input type="number" inputMode="numeric" min="1" value={p.qty}
-                  onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,qty:e.target.value}:x))}
-                  style={{...fld,width:58,fontSize:14,fontFamily:MONO,padding:"12px 6px"}}/>
-                <button onClick={()=>setParts(parts.filter((_,j)=>j!==i))}
-                  style={{background:BDR2,border:"none",borderRadius:8,padding:"0 10px",cursor:"pointer"}}><X size={14} color={MUTED}/></button>
-              </div>
-            ))}
-            <button onClick={()=>setParts([...parts,{desc:"",pn:"",qty:1}])}
-              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
-              <Plus size={13}/> ADD A PART
-            </button>
+          <div style={{marginTop:20}}>
+            <L>CONSUMABLES USED</L>
+            <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+              {CONSUMABLES.map(c => {
+                const on = consumables.includes(c);
+                return (
+                  <button key={c} onClick={()=>setConsumables(on?consumables.filter(x=>x!==c):[...consumables,c])}
+                    style={{background:on?Y:CARD,border:`1px solid ${on?Y:BDR2}`,borderRadius:8,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:on?BG:MUTED}}>
+                    {c}
+                  </button>
+                );
+              })}
+            </div>
+            <input value={consumOther} onChange={e=>setConsumOther(e.target.value)} placeholder="Other consumables…"
+              style={{...fld,marginTop:8,fontSize:14}}/>
+            <div style={{marginTop:10}}>
+              <Sub>Hotwash cycles</Sub>
+              <input type="number" inputMode="numeric" min="0" value={hotwash} onChange={e=>setHotwash(e.target.value)}
+                placeholder="0" style={{...fld,fontFamily:MONO,fontSize:14}}/>
+            </div>
           </div>
 
-          <div style={{marginTop:18}}>
+          <div style={{marginTop:20}}>
             <L>PHOTO OF COMPLETED JOB</L>
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>camRef.current?.click()} disabled={upBusy}
@@ -595,6 +684,32 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
             )}
           </div>
 
+          <div style={{marginTop:20}}>
+            <L>JOB STATUS</L>
+            <div style={{display:"flex",gap:8}}>
+              {[["ongoing","ONGOING"],["completed","COMPLETED"]].map(([v,l])=>(
+                <button key={v} onClick={()=>setStatus(v)}
+                  style={{flex:1,background:status===v?(v==="completed"?GRN:Y):CARD,border:`1px solid ${status===v?(v==="completed"?GRN:Y):BDR2}`,borderRadius:9,padding:"12px 0",cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:800,letterSpacing:1,color:status===v?BG:MUTED}}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{marginTop:20,background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:"12px 14px"}}>
+            <L>OFFICE USE — LEAVE BLANK IF YOU DON'T HAVE THEM</L>
+            <div style={{display:"flex",gap:10}}>
+              <div style={{flex:1,minWidth:0}}>
+                <Sub>Job #</Sub>
+                <input value={jobNo} onChange={e=>setJobNo(e.target.value)} placeholder="Optional" autoCapitalize="characters" style={{...fld,fontFamily:MONO,fontSize:14}}/>
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <Sub>PO number</Sub>
+                <input value={po} onChange={e=>setPo(e.target.value)} placeholder="Optional" autoCapitalize="characters" style={{...fld,fontFamily:MONO,fontSize:14}}/>
+              </div>
+            </div>
+          </div>
+
           <div style={{marginTop:18,background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px"}}>
             <L>PART OF A REBUILD? (OPTIONAL)</L>
             <div style={{fontSize:11,color:MUTED,marginBottom:9,lineHeight:1.45}}>
@@ -614,7 +729,6 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
         </div>
 
         <div style={{position:"fixed",bottom:0,left:0,right:0,display:"flex",flexDirection:"column",alignItems:"center",background:"linear-gradient(transparent, #0C0D10 30%)",padding:"24px 14px 18px",paddingBottom:"calc(18px + env(safe-area-inset-bottom))"}}>
-          {/* Say what's missing rather than leaving a dead grey button. */}
           {!valid && (
             <div style={{width:"100%",maxWidth:452,background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"9px 12px",marginBottom:8,fontSize:11,color:MUTED,lineHeight:1.4}}>
               Still needed: <span style={{color:Y}}>{missing.join(", ")}</span>
@@ -632,9 +746,9 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
               <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:Y,marginBottom:6}}>DOUBLE CHECK</div>
               <div style={{fontSize:13,color:MUTED,marginBottom:14}}>These hours may already have gone through for pay. Make sure this is right:</div>
               <div style={{background:CARD2,borderRadius:10,padding:"10px 12px",marginBottom:16,fontFamily:MONO,fontSize:12,color:TXT,lineHeight:1.7}}>
-                <div>{date} · {start}–{finish} = {fmtHrs(hours)}</div>
+                <div>{date} · {start}–{finish}{shift2&&start2?` + ${start2}–${finish2}`:""}</div>
+                <div>Total {fmtHrs(totalHours)}</div>
                 {jobNo.trim() && <div>Job {jobNo.trim()}</div>}
-                {po.trim() && <div>PO {po.trim()}</div>}
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setConfirm(false)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>GO BACK</button>
@@ -648,7 +762,6 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   );
 };
 
-// One job card rendered as a card. Money never appears here.
 const JobCardRow = ({card, clientName, machineLabel, onEdit, onDelete, showWorker}) => (
   <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,marginBottom:10,overflow:"hidden"}}>
     <div style={{padding:"12px 14px",cursor:onEdit?"pointer":"default"}} onClick={()=>onEdit&&onEdit(card)}>
@@ -657,17 +770,27 @@ const JobCardRow = ({card, clientName, machineLabel, onEdit, onDelete, showWorke
         {card.jobNo && <HChip label={`JOB ${card.jobNo}`} col={BG} bg={Y}/>}
         {card.po && <HChip label={`PO ${card.po}`} col={TXT} bg={BDR2}/>}
         {card.linkedJobId && <HChip label="REBUILD" col={BG} bg={GRN}/>}
+        {card.status==="completed" && <HChip label="COMPLETED" col={BG} bg={GRN}/>}
+        {card.status==="ongoing"   && <HChip label="ONGOING" col={BG} bg="#F5A524"/>}
         <span style={{marginLeft:"auto",fontFamily:MONO,fontSize:15,color:Y}}>{fmtHrs(card.hours)}</span>
       </div>
       <div style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT,marginTop:5}}>{clientName}</div>
       <div style={{fontSize:11,color:MUTED,marginTop:1}}>{machineLabel}</div>
-      {card.workDone && (
+      {card.business && (
+        <div style={{fontSize:10,color:Y,marginTop:2,letterSpacing:.5}}>
+          {card.business==="srsa" ? "SRSA" : "BURNBANK MECHANICAL & AG"}
+        </div>
+      )}
+      {(card.correction || card.workDone) && (
         <div style={{fontSize:12,color:TXT,marginTop:7,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>
-          {card.workDone}
+          {card.correction || card.workDone}
         </div>
       )}
       <div style={{fontSize:10,color:MUTED,marginTop:6,letterSpacing:.5}}>
-        {card.start}–{card.finish}{card.breakMin?` · ${card.breakMin}min break`:""}{card.travelMin?` · ${card.travelMin}min travel`:""}
+        {card.start}–{card.finish}{card.start2?` + ${card.start2}–${card.finish2}`:""}
+        {card.breakMin?` · ${card.breakMin}min break`:""}
+        {card.travelMin?` · ${card.travelMin}min travel`:""}
+        {card.adminMin?` · ${card.adminMin}min admin`:""}
         {card.hourMeter!=null?` · ${card.hourMeter}hrs on meter`:""}
         {showWorker && card.worker?` · ${card.worker}`:""}
         {card.parts?.length?` · ${card.parts.length} part${card.parts.length===1?"":"s"}`:""}
@@ -3540,6 +3663,7 @@ export default function App() {
     const [fTech, setFTech] = useState("");
     const [fClient, setFClient] = useState("");
     const [q, setQ]         = useState("");   // job # / PO search
+    const [fBiz, setFBiz]   = useState("");   // burnbank | srsa
     const [group, setGroup] = useState("day");  // day | week | tech
     const [confirmDel, setConfirmDel] = useState(null);
 
@@ -3547,13 +3671,15 @@ export default function App() {
       .filter(c => (!from || (c.date||"") >= from) && (!to || (c.date||"") <= to))
       .filter(c => !fTech   || c.techId === fTech || c.worker === fTech)
       .filter(c => !fClient || c.clientId === fClient)
+      .filter(c => !fBiz || (c.business || "burnbank") === fBiz)
       .filter(c => {
         const s = q.trim().toLowerCase();
         if (!s) return true;
         return (c.jobNo||"").toLowerCase().includes(s)
             || (c.po||"").toLowerCase().includes(s)
-            || (c.workDone||"").toLowerCase().includes(s)
-            || (c.description||"").toLowerCase().includes(s);
+            || (c.correction||c.workDone||"").toLowerCase().includes(s)
+            || (c.complaint||"").toLowerCase().includes(s)
+            || (c.cause||"").toLowerCase().includes(s);
       })
       .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||0)-(a.createdAt||0));
 
@@ -3604,6 +3730,14 @@ export default function App() {
               {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            {[["","BOTH"],["burnbank","BURNBANK"],["srsa","SRSA"]].map(([v,l])=>(
+              <button key={v} onClick={()=>setFBiz(v)}
+                style={{flex:1,background:fBiz===v?Y:CARD2,border:`1px solid ${fBiz===v?Y:BDR2}`,borderRadius:7,padding:"7px 0",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:1,color:fBiz===v?BG:MUTED}}>
+                {l}
+              </button>
+            ))}
+          </div>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search job #, PO or work done…"
             style={{...fld,width:"100%",boxSizing:"border-box",marginBottom:8}}/>
           <div style={{display:"flex",gap:8}}>
@@ -3613,7 +3747,7 @@ export default function App() {
                 {l}
               </button>
             ))}
-            <button onClick={()=>{setFrom("");setTo("");setFTech("");setFClient("");setQ("");}}
+            <button onClick={()=>{setFrom("");setTo("");setFTech("");setFClient("");setQ("");setFBiz("");}}
               style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"7px 11px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED}}>CLEAR</button>
           </div>
         </div>
