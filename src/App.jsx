@@ -200,6 +200,430 @@ const JobTaskSearch = ({search, statusOf, onPick, children}) => {
   </>);
 };
 
+// Build the sign-up message for an invited person. Kept plain-text so it reads
+// the same in a text message, an email, or pasted into WhatsApp.
+const APP_URL = "https://srsa-tracker.web.app";
+const inviteMessage = (inv, jobs) => {
+  const role = inv.role || "tech";
+  const who  = role === "client" ? "TECHNICIAN" : "TECHNICIAN"; // both sign in via the same button
+  const machines = role === "client"
+    ? (inv.jobIds || []).map(id => {
+        const j = jobs.find(x => x.id === id);
+        return j ? `${j.make || ""} ${j.model || ""} (${j.serial})`.trim() : null;
+      }).filter(Boolean)
+    : [];
+  const lines = [];
+  if (role === "client") {
+    lines.push("Hi — SRSA has set you up with access to track your rebuild.");
+    if (machines.length) lines.push("", `You'll be able to see progress and charges for: ${machines.join(", ")}.`);
+  } else if (role === "admin") {
+    lines.push("Hi — you've been given administrator access to the SRSA job tracker.");
+  } else {
+    lines.push("Hi — you've been set up on the SRSA job tracker.");
+  }
+  lines.push("",
+    "To get started:",
+    `1. Go to ${APP_URL}`,
+    `2. Tap ${who}, then "Create an account"`,
+    `3. Sign up using this email: ${inv.email}`,
+    "",
+    "You'll be straight in — no waiting for approval.",
+    "",
+    "Tip: after signing in, use your browser's \"Add to Home Screen\" so it opens like an app.");
+  return lines.join("\n");
+};
+const shareInvite = async (inv, jobs, setNote) => {
+  const text = inviteMessage(inv, jobs);
+  const subject = "Your SRSA job tracker login";
+  // Native share sheet first (phones): lets them pick Messages, Mail, WhatsApp…
+  if (navigator.share) {
+    try { await navigator.share({title: subject, text}); return; }
+    catch (e) { if (e?.name === "AbortError") return; } // user cancelled
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    setNote("Invite message copied — paste it into a text or email.");
+  } catch {
+    window.prompt("Copy this message and send it to them:", text);
+  }
+};
+
+// ── Job cards ─────────────────────────────────────────────────────
+// Day-to-day field work, separate from the rebuild jobs. A card may optionally
+// be linked to a rebuild task, in which case its hours also feed that job's
+// costings (see cardEntryId / syncCardEntry in App).
+const hhmmToMin = t => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((t||"").trim());
+  return m ? (+m[1])*60 + (+m[2]) : null;
+};
+// Finish before start is treated as crossing midnight rather than an error.
+const spanHours = (start, finish, breakMin=0) => {
+  const s = hhmmToMin(start), f = hhmmToMin(finish);
+  if (s === null || f === null) return null;
+  let mins = f - s;
+  if (mins < 0) mins += 24*60;
+  mins -= (Number(breakMin) || 0);
+  return mins > 0 ? Math.round(mins/60*100)/100 : 0;
+};
+const fmtHrs = h => `${(Number(h)||0).toFixed(2)}h`;
+// ISO week key, so weekly totals line up with how the boys get paid.
+const weekKey = iso => {
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d)) return "—";
+  const t = new Date(d); t.setDate(d.getDate() + 4 - (d.getDay()||7));
+  const y0 = new Date(t.getFullYear(), 0, 1);
+  const wk = Math.ceil((((t - y0)/86400000) + 1)/7);
+  return `${t.getFullYear()}-W${String(wk).padStart(2,"0")}`;
+};
+const weekRangeLabel = iso => {
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d)) return "";
+  const mon = new Date(d); mon.setDate(d.getDate() - ((d.getDay()+6)%7));
+  const sun = new Date(mon); sun.setDate(mon.getDate()+6);
+  const f = x => `${String(x.getDate()).padStart(2,"0")}/${String(x.getMonth()+1).padStart(2,"0")}`;
+  return `${f(mon)} – ${f(sun)}`;
+};
+
+// ── Job card form ────────────────────────────────────────────────
+// MODULE LEVEL: holds several controlled text inputs, so it must not be
+// recreated when App re-renders (see the JobTaskSearch comment above).
+const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
+                      onAddClient, onAddMachine, onSave, onClose, onUpload}) => {
+  const editing = !!initial;
+  const [clientId, setClientId]   = useState(initial?.clientId || "");
+  const [newClient, setNewClient] = useState("");
+  const [machineId, setMachineId] = useState(initial?.machineId || "");
+  const [newMachine, setNewMachine] = useState(null); // {make,model,serial,rego}
+  const [date, setDate]           = useState(initial?.date || today());
+  const [start, setStart]         = useState(initial?.start || "");
+  const [finish, setFinish]       = useState(initial?.finish || "");
+  const [breakMin, setBreakMin]   = useState(String(initial?.breakMin ?? 0));
+  const [hourMeter, setHourMeter] = useState(initial?.hourMeter ?? "");
+  const [jobNo, setJobNo]         = useState(initial?.jobNo || "");
+  const [po, setPo]               = useState(initial?.po || "");
+  const [description, setDescription] = useState(initial?.description || "");
+  const [workDone, setWorkDone]   = useState(initial?.workDone || "");
+  const [parts, setParts]         = useState(initial?.parts || []);
+  const [photos, setPhotos]       = useState(initial?.photos || []);
+  const [linkedJobId, setLinkedJobId]   = useState(initial?.linkedJobId || "");
+  const [linkedTaskId, setLinkedTaskId] = useState(initial?.linkedTaskId || "");
+  const [busy, setBusy]     = useState(false);
+  const [upBusy, setUpBusy] = useState(false);
+  const [err, setErr]       = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const camRef = useRef(); const galRef = useRef();
+
+  const fleet = machines.filter(m => m.clientId === clientId);
+  const hours = spanHours(start, finish, breakMin);
+  const linkedTasks = linkedJobId ? tasksForJob(linkedJobId) : [];
+
+  const pickPhotos = async e => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setUpBusy(true); setErr("");
+    try {
+      const added = await onUpload(files);
+      setPhotos(p => [...p, ...added]);
+    } catch (ex) {
+      setErr(`Photo upload failed (${ex?.code || "unknown"}).`);
+    }
+    setUpBusy(false);
+    e.target.value = "";
+  };
+
+  const valid = clientId && machineId && date && hours !== null && hours > 0 && workDone.trim();
+  const submit = async () => {
+    if (!valid || busy) return;
+    if (editing && !confirm) { setConfirm(true); return; }
+    setBusy(true); setErr("");
+    try {
+      await onSave({
+        clientId, machineId, date, start, finish,
+        breakMin: Number(breakMin) || 0, hours,
+        hourMeter: hourMeter === "" ? null : Number(hourMeter),
+        jobNo: jobNo.trim(), po: po.trim(),
+        description: description.trim(), workDone: workDone.trim(),
+        parts, photos,
+        worker: initial?.worker || me?.name || "",
+        techId: initial?.techId || me?.id || null,
+        linkedJobId: linkedJobId || null,
+        linkedTaskId: linkedJobId ? (linkedTaskId || null) : null,
+      }, initial?.id);
+      onClose();
+    } catch (ex) {
+      setErr(`Couldn't save (${ex?.code || "unknown"}). Try again.`);
+      setBusy(false);
+    }
+  };
+
+  const L = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
+  const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"};
+  const sel = {...fld, appearance:"none"};
+
+  return (
+    <div style={{position:"fixed",inset:0,background:BG,zIndex:100,display:"flex",justifyContent:"center"}}>
+      <div style={{width:"100%",maxWidth:480,display:"flex",flexDirection:"column",height:"100dvh"}}>
+        <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"14px 16px",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+          <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}><X size={18} color={TXT}/></button>
+          <div style={{flex:1}}>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:700,color:TXT}}>{editing?"EDIT JOB CARD":"NEW JOB CARD"}</div>
+            <div style={{fontSize:11,color:MUTED}}>{initial?.worker || me?.name || ""}</div>
+          </div>
+        </div>
+
+        <div style={{flex:1,overflowY:"auto",padding:"16px 14px 120px"}}>
+          {err && <div style={{background:"rgba(255,76,76,.1)",border:`1px solid ${RED}`,borderRadius:9,padding:"10px 12px",marginBottom:14,fontSize:12,color:RED}}>{err}</div>}
+
+          <L>CLIENT</L>
+          <select value={clientId} onChange={e=>{ setClientId(e.target.value); setMachineId(""); }} style={sel}>
+            <option value="">— select client —</option>
+            {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            <option value="__new">+ Add a new client…</option>
+          </select>
+          {clientId === "__new" && (
+            <div style={{display:"flex",gap:8,marginTop:8}}>
+              <input value={newClient} onChange={e=>setNewClient(e.target.value)} placeholder="Client name" style={{...fld,flex:1}}/>
+              <button disabled={!newClient.trim()}
+                onClick={async()=>{ const id = await onAddClient(newClient); setClientId(id); setNewClient(""); }}
+                style={{background:newClient.trim()?Y:BDR2,border:"none",borderRadius:8,padding:"0 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:newClient.trim()?BG:MUTED}}>ADD</button>
+            </div>
+          )}
+
+          {clientId && clientId !== "__new" && (
+            <div style={{marginTop:18}}>
+              <L>MACHINE</L>
+              <select value={machineId} onChange={e=>{
+                  setMachineId(e.target.value);
+                  if (e.target.value === "__new") setNewMachine({make:"",model:"",serial:"",rego:""});
+                }} style={sel}>
+                <option value="">— select machine —</option>
+                {fleet.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {[m.make, m.model].filter(Boolean).join(" ")}{m.rego?` · ${m.rego}`:""}{m.serial?` · ${m.serial}`:""}
+                  </option>
+                ))}
+                <option value="__new">+ Add a machine to this client…</option>
+              </select>
+              {fleet.length>0 && machineId && machineId!=="__new" && (
+                <div style={{fontSize:11,color:GRN,marginTop:6}}>✓ Worked on before — this machine is already on file.</div>
+              )}
+              {machineId === "__new" && newMachine && (
+                <div style={{background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:12,marginTop:8}}>
+                  {[["make","Make (e.g. John Deere)"],["model","Model"],["serial","Serial number"],["rego","Rego (if applicable)"]].map(([k,ph])=>(
+                    <input key={k} value={newMachine[k]} placeholder={ph} autoCapitalize="characters"
+                      onChange={e=>setNewMachine({...newMachine,[k]:e.target.value})}
+                      style={{...fld,marginBottom:8,fontSize:14}}/>
+                  ))}
+                  <button disabled={!newMachine.make.trim()}
+                    onClick={async()=>{ const id = await onAddMachine(clientId, newMachine); setMachineId(id); setNewMachine(null); }}
+                    style={{width:"100%",background:newMachine.make.trim()?Y:BDR2,border:"none",borderRadius:8,padding:11,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:800,color:newMachine.make.trim()?BG:MUTED,letterSpacing:1}}>
+                    ADD MACHINE
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{marginTop:18}}>
+            <L>DATE</L>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={fld}/>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <L>TIME ON THE JOB</L>
+            <div style={{display:"flex",gap:8}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Start</div>
+                <input type="time" value={start} onChange={e=>setStart(e.target.value)} style={{...fld,fontFamily:MONO}}/>
+              </div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Finish</div>
+                <input type="time" value={finish} onChange={e=>setFinish(e.target.value)} style={{...fld,fontFamily:MONO}}/>
+              </div>
+              <div style={{width:86}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Break (min)</div>
+                <input type="number" inputMode="numeric" min="0" step="5" value={breakMin} onChange={e=>setBreakMin(e.target.value)} style={{...fld,fontFamily:MONO,padding:"12px 8px"}}/>
+              </div>
+            </div>
+            <div style={{background:CARD,border:`1px solid ${hours?Y:BDR}`,borderRadius:9,padding:"11px 13px",marginTop:9,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1.5}}>HOURS WORKED</span>
+              <span style={{fontFamily:MONO,fontSize:19,color:hours?Y:MUTED}}>{hours===null?"—":fmtHrs(hours)}</span>
+            </div>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <L>HOUR METER READING</L>
+            <input type="number" inputMode="decimal" step="0.1" value={hourMeter} onChange={e=>setHourMeter(e.target.value)}
+              placeholder="Reading off the machine" style={{...fld,fontFamily:MONO}}/>
+          </div>
+
+          <div style={{marginTop:18,display:"flex",gap:10}}>
+            <div style={{flex:1}}>
+              <L>JOB #</L>
+              <input value={jobNo} onChange={e=>setJobNo(e.target.value)} placeholder="SRSA job no." autoCapitalize="characters" style={{...fld,fontFamily:MONO}}/>
+            </div>
+            <div style={{flex:1}}>
+              <L>PO NUMBER</L>
+              <input value={po} onChange={e=>setPo(e.target.value)} placeholder="If supplied" autoCapitalize="characters" style={{...fld,fontFamily:MONO}}/>
+            </div>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <L>DESCRIPTION — WHAT WAS THE JOB?</L>
+            <textarea value={description} onChange={e=>setDescription(e.target.value)} rows={2}
+              placeholder="e.g. Boom hose blown out in paddock"
+              style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4}}/>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <L>WHAT YOU DID</L>
+            <textarea value={workDone} onChange={e=>setWorkDone(e.target.value)} rows={4}
+              placeholder="Work carried out, parts replaced, anything the customer should know…"
+              style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4}}/>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <L>PARTS USED</L>
+            {parts.map((p,i)=>(
+              <div key={i} style={{display:"flex",gap:7,marginBottom:7}}>
+                <input value={p.desc} onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,desc:e.target.value}:x))}
+                  placeholder="Part description" style={{...fld,flex:1,fontSize:14}}/>
+                <input value={p.pn} onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,pn:e.target.value}:x))}
+                  placeholder="Part no." autoCapitalize="characters" style={{...fld,width:110,fontSize:13,fontFamily:MONO}}/>
+                <input type="number" inputMode="numeric" min="1" value={p.qty}
+                  onChange={e=>setParts(parts.map((x,j)=>j===i?{...x,qty:e.target.value}:x))}
+                  style={{...fld,width:58,fontSize:14,fontFamily:MONO,padding:"12px 6px"}}/>
+                <button onClick={()=>setParts(parts.filter((_,j)=>j!==i))}
+                  style={{background:BDR2,border:"none",borderRadius:8,padding:"0 10px",cursor:"pointer"}}><X size={14} color={MUTED}/></button>
+              </div>
+            ))}
+            <button onClick={()=>setParts([...parts,{desc:"",pn:"",qty:1}])}
+              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
+              <Plus size={13}/> ADD A PART
+            </button>
+          </div>
+
+          <div style={{marginTop:18}}>
+            <L>PHOTO OF COMPLETED JOB</L>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>camRef.current?.click()} disabled={upBusy}
+                style={{flex:1,background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"12px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:1}}>
+                {upBusy?"UPLOADING…":"CAMERA"}
+              </button>
+              <button onClick={()=>galRef.current?.click()} disabled={upBusy}
+                style={{flex:1,background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"12px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>
+                GALLERY
+              </button>
+            </div>
+            <input ref={camRef} type="file" accept="image/*" capture="environment" multiple style={{display:"none"}} onChange={pickPhotos}/>
+            <input ref={galRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={pickPhotos}/>
+            {photos.length>0 && (
+              <div style={{display:"flex",gap:7,flexWrap:"wrap",marginTop:9}}>
+                {photos.map((p,i)=>(
+                  <div key={i} style={{position:"relative"}}>
+                    <img src={p.url} alt="" style={{width:66,height:66,objectFit:"cover",borderRadius:8,border:`1px solid ${BDR2}`}}/>
+                    <button onClick={()=>setPhotos(photos.filter((_,j)=>j!==i))}
+                      style={{position:"absolute",top:-6,right:-6,background:RED,border:"none",borderRadius:"50%",width:20,height:20,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
+                      <X size={11} color="#fff"/>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{marginTop:18,background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 14px"}}>
+            <L>PART OF A REBUILD? (OPTIONAL)</L>
+            <div style={{fontSize:11,color:MUTED,marginBottom:9,lineHeight:1.45}}>
+              Link this card to a rebuild job and these hours also count towards that job's costings.
+            </div>
+            <select value={linkedJobId} onChange={e=>{ setLinkedJobId(e.target.value); setLinkedTaskId(""); }} style={{...sel,fontSize:14}}>
+              <option value="">Not part of a rebuild</option>
+              {jobs.map(j => <option key={j.id} value={j.id}>{j.client} — {j.serial}</option>)}
+            </select>
+            {linkedJobId && (
+              <select value={linkedTaskId} onChange={e=>setLinkedTaskId(e.target.value)} style={{...sel,fontSize:14,marginTop:8}}>
+                <option value="">— which task? —</option>
+                {linkedTasks.map(t => <option key={t.id} value={t.id}>{t.id} · {t.desc}</option>)}
+              </select>
+            )}
+          </div>
+        </div>
+
+        <div style={{position:"fixed",bottom:0,left:0,right:0,display:"flex",justifyContent:"center",background:"linear-gradient(transparent, #0C0D10 35%)",padding:"24px 14px 18px"}}>
+          <button onClick={submit} disabled={!valid||busy}
+            style={{width:"100%",maxWidth:452,background:valid?Y:BDR2,border:"none",borderRadius:10,padding:15,cursor:valid?"pointer":"default",fontFamily:FF,fontSize:16,fontWeight:800,color:valid?BG:MUTED,letterSpacing:1}}>
+            {busy?"SAVING…":(editing?"SAVE CHANGES":"SAVE JOB CARD")}
+          </button>
+        </div>
+
+        {confirm && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:120,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:340,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:Y,marginBottom:6}}>DOUBLE CHECK</div>
+              <div style={{fontSize:13,color:MUTED,marginBottom:14}}>These hours may already have gone through for pay. Make sure this is right:</div>
+              <div style={{background:CARD2,borderRadius:10,padding:"10px 12px",marginBottom:16,fontFamily:MONO,fontSize:12,color:TXT,lineHeight:1.7}}>
+                <div>{date} · {start}–{finish} = {fmtHrs(hours)}</div>
+                {jobNo.trim() && <div>Job {jobNo.trim()}</div>}
+                {po.trim() && <div>PO {po.trim()}</div>}
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={()=>setConfirm(false)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>GO BACK</button>
+                <button onClick={submit} style={{flex:1,background:Y,border:"none",borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG}}>{busy?"SAVING…":"CONFIRM"}</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// One job card rendered as a card. Money never appears here.
+const JobCardRow = ({card, clientName, machineLabel, onEdit, onDelete, showWorker}) => (
+  <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,marginBottom:10,overflow:"hidden"}}>
+    <div style={{padding:"12px 14px",cursor:onEdit?"pointer":"default"}} onClick={()=>onEdit&&onEdit(card)}>
+      <div style={{display:"flex",alignItems:"center",gap:7,flexWrap:"wrap"}}>
+        <span style={{fontFamily:MONO,fontSize:12,color:MUTED}}>{card.date}</span>
+        {card.jobNo && <HChip label={`JOB ${card.jobNo}`} col={BG} bg={Y}/>}
+        {card.po && <HChip label={`PO ${card.po}`} col={TXT} bg={BDR2}/>}
+        {card.linkedJobId && <HChip label="REBUILD" col={BG} bg={GRN}/>}
+        <span style={{marginLeft:"auto",fontFamily:MONO,fontSize:15,color:Y}}>{fmtHrs(card.hours)}</span>
+      </div>
+      <div style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT,marginTop:5}}>{clientName}</div>
+      <div style={{fontSize:11,color:MUTED,marginTop:1}}>{machineLabel}</div>
+      {card.workDone && (
+        <div style={{fontSize:12,color:TXT,marginTop:7,lineHeight:1.45,display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>
+          {card.workDone}
+        </div>
+      )}
+      <div style={{fontSize:10,color:MUTED,marginTop:6,letterSpacing:.5}}>
+        {card.start}–{card.finish}{card.breakMin?` · ${card.breakMin}min break`:""}
+        {card.hourMeter!=null?` · ${card.hourMeter}hrs on meter`:""}
+        {showWorker && card.worker?` · ${card.worker}`:""}
+        {card.parts?.length?` · ${card.parts.length} part${card.parts.length===1?"":"s"}`:""}
+        {card.photos?.length?` · ${card.photos.length} photo${card.photos.length===1?"":"s"}`:""}
+      </div>
+    </div>
+    {(onEdit || onDelete) && (
+      <div style={{display:"flex",borderTop:`1px solid ${BDR}`}}>
+        {onEdit && (
+          <button onClick={()=>onEdit(card)}
+            style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,background:"transparent",border:"none",padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:Y}}>
+            <Edit2 size={12}/> EDIT
+          </button>
+        )}
+        {onDelete && (
+          <button onClick={()=>onDelete(card)}
+            style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,background:"transparent",border:"none",borderLeft:onEdit?`1px solid ${BDR}`:"none",padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:MUTED}}>
+            <Trash2 size={13}/> DELETE
+          </button>
+        )}
+      </div>
+    )}
+  </div>
+);
+
 const groupByMonth = list => {
   const g = {};
   for (const h of list) { const k = (h.date||"").slice(0,7) || "—"; (g[k] = g[k]||[]).push(h); }
@@ -738,6 +1162,15 @@ export default function App() {
       });
       setCustomTasks(ct);
     }));
+    unsubs.push(onSnapshot(collection(db,"clients"), snap => {
+      setClients(snap.docs.map(d => ({id:d.id, ...d.data()})).sort((a,b)=>(a.name||"").localeCompare(b.name||"")));
+    }, () => {}));
+    unsubs.push(onSnapshot(collection(db,"machines"), snap => {
+      setMachines(snap.docs.map(d => ({id:d.id, ...d.data()})));
+    }, () => {}));
+    unsubs.push(onSnapshot(collection(db,"jobcards"), snap => {
+      setJobCards(snap.docs.map(d => ({id:d.id, ...d.data()})));
+    }, () => {}));
     unsubs.push(onSnapshot(collection(db,"invites"), snap => {
       setInvites(snap.docs.map(d => ({id:d.id, ...d.data()})));
     }, () => {}));
@@ -781,6 +1214,11 @@ export default function App() {
   const [hoses, setHoses]             = useState([]);    // hose records (Hoses feature)
   const [schedOv, setSchedOv]         = useState({});    // `${jobId}_${taskId}` -> schedule override
   const [invites, setInvites]         = useState([]);    // pre-approved signups: {email, role, jobIds}
+  const [clients, setClients]         = useState([]);    // customer list for job cards
+  const [machines, setMachines]       = useState([]);    // each client's fleet
+  const [jobCards, setJobCards]       = useState([]);    // day-to-day job cards
+  const [showCard, setShowCard]       = useState(false); // new card form open
+  const [editCard, setEditCard]       = useState(null);  // card being edited
   const [editSched, setEditSched]     = useState(null);  // {job,row} being edited on the Gantt
   const [showHoseBuilder, setShowHoseBuilder] = useState(false);
   const [confirmHoseDel, setConfirmHoseDel]   = useState(null); // hose pending delete (tech view)
@@ -1207,6 +1645,49 @@ export default function App() {
     return targets.length;
   };
 
+  // ── Job card handlers ──
+  const addClient  = async name => {
+    const ref = await addDoc(collection(db,"clients"), {name:name.trim(), createdAt:Date.now()});
+    return ref.id;
+  };
+  const addMachine = async (clientId, m) => {
+    const ref = await addDoc(collection(db,"machines"), {clientId, ...m, createdAt:Date.now()});
+    return ref.id;
+  };
+  // A card linked to a rebuild task also writes a time entry so the hours show
+  // up in that job's costings. The entry id is derived from the card id, so
+  // editing the card updates the same entry instead of creating a duplicate.
+  const syncCardEntry = async (cardId, data) => {
+    const entryId = `card_${cardId}`;
+    if (data.linkedJobId && data.linkedTaskId && data.hours > 0) {
+      await setDoc(doc(db,"entries",entryId), {
+        jobId: data.linkedJobId, taskId: data.linkedTaskId,
+        hours: data.hours, date: data.date,
+        worker: data.worker, workerId: data.techId || null,
+        notes: `Job card${data.jobNo?` ${data.jobNo}`:""}${data.workDone?`: ${data.workDone.slice(0,120)}`:""}`,
+        fromCard: cardId,
+      });
+    } else {
+      await deleteDoc(doc(db,"entries",entryId)).catch(()=>{});
+    }
+  };
+  const saveCard = async (data, id) => {
+    if (id) {
+      await setDoc(doc(db,"jobcards",id), {...data, updatedAt:Date.now()}, {merge:true});
+      await syncCardEntry(id, data);
+      return id;
+    }
+    const ref = await addDoc(collection(db,"jobcards"), {...data, createdAt:Date.now()});
+    await syncCardEntry(ref.id, data);
+    return ref.id;
+  };
+  // Deleting is admin-only by design — techs can correct a card but not remove it.
+  const delCard = async id => {
+    await deleteDoc(doc(db,"jobcards",id));
+    await deleteDoc(doc(db,"entries",`card_${id}`)).catch(()=>{});
+  };
+  const goCards = () => { setStack([]); setView("cards"); setSelJob(null); setSelSec(null); setSelTask(null); };
+
   const goUsers       = () => { setStack([]); setView("users"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   // Display name of the signed-in tech, used to pre-fill worker fields.
@@ -1467,7 +1948,7 @@ export default function App() {
         </div>
         <div style={{padding:"14px"}}>
           {userErr && (
-            <div style={{background:"rgba(255,76,76,.1)",border:`1px solid ${RED}`,borderRadius:10,padding:"11px 13px",marginBottom:12,fontSize:12,color:RED,lineHeight:1.5}}>
+            <div style={{background:userErr.includes("copied")?"rgba(40,199,111,.1)":"rgba(255,76,76,.1)",border:`1px solid ${userErr.includes("copied")?GRN:RED}`,borderRadius:10,padding:"11px 13px",marginBottom:12,fontSize:12,color:userErr.includes("copied")?GRN:RED,lineHeight:1.5}}>
               {userErr}
             </div>
           )}
@@ -1535,6 +2016,14 @@ export default function App() {
                   {" · waiting for them to sign up"}
                 </div>
               </div>
+              <button onClick={()=>shareInvite(inv, jobs, setUserErr)}
+                style={{background:CARD2,border:`1px solid ${Y}`,borderRadius:7,padding:"7px 11px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:.8,color:Y,flexShrink:0}}>
+                SEND
+              </button>
+              <a href={`mailto:${encodeURIComponent(inv.email)}?subject=${encodeURIComponent("Your SRSA job tracker login")}&body=${encodeURIComponent(inviteMessage(inv, jobs))}`}
+                style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"7px 11px",fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.8,color:MUTED,textDecoration:"none",flexShrink:0}}>
+                EMAIL
+              </a>
               <button onClick={()=>delInvite(inv.id)} style={{background:"none",border:"none",cursor:"pointer",padding:4}}><X size={15} color={MUTED}/></button>
             </div>
           ))}
@@ -1592,7 +2081,14 @@ export default function App() {
                 <button onClick={()=>{setInviteOpen(false); setInvEmail(""); setInvJobs([]);}}
                   style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED}}>CANCEL</button>
                 <button disabled={!invEmail.trim()}
-                  onClick={async()=>{ await addInvite(invEmail, invRole, invJobs); setInviteOpen(false); setInvEmail(""); setInvJobs([]); }}
+                  onClick={async()=>{
+                    const em = invEmail, r = invRole, js = invJobs;
+                    await addInvite(em, r, js);
+                    setInviteOpen(false); setInvEmail(""); setInvJobs([]);
+                    // Hand them the message straight away rather than making the
+                    // supervisor hunt for the SEND button afterwards.
+                    shareInvite({email: em.trim().toLowerCase(), role: r, jobIds: js}, jobs, setUserErr);
+                  }}
                   style={{flex:1,background:invEmail.trim()?Y:BDR2,border:"none",borderRadius:8,padding:11,cursor:invEmail.trim()?"pointer":"default",fontFamily:FF,fontSize:13,fontWeight:800,color:invEmail.trim()?BG:MUTED,letterSpacing:1}}>
                   CREATE INVITE
                 </button>
@@ -2161,8 +2657,8 @@ export default function App() {
 
   const BottomNav = () => {
     const navItems = mode==="admin"
-      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASHBOARD",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:isAdminUser?"SIGN OUT":"SWITCH",Icon:LogOut,action:()=>isAdminUser?doSignOut():setMode("select"),active:false}]
-      : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SIGN OUT",Icon:LogOut,action:doSignOut,active:false}];
+      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASH",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:isAdminUser?"SIGN OUT":"SWITCH",Icon:LogOut,action:()=>isAdminUser?doSignOut():setMode("select"),active:false}]
+      : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SIGN OUT",Icon:LogOut,action:doSignOut,active:false}];
     const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
     if (isAdmin && isDesktop) return (
       <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"0 24px",display:"flex",alignItems:"center",gap:4,position:"sticky",top:0,zIndex:20,order:-1}}>
@@ -2897,6 +3393,217 @@ export default function App() {
     );
   };
 
+  // Photos for job cards go to their own Storage folder, compressed like task photos.
+  const uploadCardPhotos = async files => {
+    const out = [];
+    for (const raw of files) {
+      let f = raw;
+      try { f = await compressImage(raw); } catch { f = raw; }
+      const safe = (f.name || "photo.jpg").replace(/[^a-zA-Z0-9._-]/g, "_");
+      const r = ref(storage, `jobcards/${Date.now()}_${safe}`);
+      const snap = await uploadBytes(r, f);
+      out.push({url: await getDownloadURL(snap.ref), path: snap.ref.fullPath});
+    }
+    return out;
+  };
+  const clientName   = id => clients.find(c=>c.id===id)?.name || "—";
+  const machineLabel = id => {
+    const m = machines.find(x=>x.id===id);
+    if (!m) return "—";
+    return [[m.make,m.model].filter(Boolean).join(" "), m.rego, m.serial].filter(Boolean).join(" · ");
+  };
+  const tasksForJob = jid => [...tasksOf(jid).filter(t=>isIn(jid,t)), ...(customTasks[jid]||[])];
+
+  // ── Technician: my job cards ──
+  const TechCardsView = () => {
+    const mine = jobCards
+      .filter(c => (me?.id && c.techId === me.id) || (!c.techId && c.worker === myName))
+      .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||0)-(a.createdAt||0));
+    const byDay = {};
+    mine.forEach(c => { (byDay[c.date] = byDay[c.date] || []).push(c); });
+    const days = Object.entries(byDay).sort((a,b)=>b[0].localeCompare(a[0]));
+    const weekTotal = mine.filter(c => weekKey(c.date) === weekKey(today()))
+                          .reduce((s,c)=>s+(Number(c.hours)||0), 0);
+    return (
+      <div style={{paddingBottom:20}}>
+        <div style={{background:CARD,padding:"20px 18px 16px",borderBottom:`1px solid ${BDR}`}}>
+          <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>JOB CARDS</div>
+          <div style={{fontSize:12,color:MUTED,marginTop:3}}>Your day-to-day work</div>
+          <div style={{display:"flex",gap:8,marginTop:12}}>
+            <div style={{flex:1,background:CARD2,borderRadius:9,padding:"10px 12px"}}>
+              <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>THIS WEEK</div>
+              <div style={{fontFamily:MONO,fontSize:18,color:Y,marginTop:2}}>{fmtHrs(weekTotal)}</div>
+            </div>
+            <div style={{flex:1,background:CARD2,borderRadius:9,padding:"10px 12px"}}>
+              <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>CARDS</div>
+              <div style={{fontFamily:MONO,fontSize:18,color:TXT,marginTop:2}}>{mine.length}</div>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:"14px"}}>
+          <button onClick={()=>setShowCard(true)}
+            style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:Y,border:"none",borderRadius:12,padding:16,cursor:"pointer",fontFamily:FF,fontSize:16,fontWeight:800,color:BG,letterSpacing:1,marginBottom:16}}>
+            <Plus size={18}/> NEW JOB CARD
+          </button>
+          {days.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 10px",lineHeight:1.6}}>No job cards yet.<br/>Fill one in at the end of each job.</div>}
+          {days.map(([d, cards]) => (
+            <div key={d}>
+              <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 2px 10px"}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>{d}</span>
+                <div style={{flex:1,height:1,background:BDR}}/>
+                <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{fmtHrs(cards.reduce((s,c)=>s+(Number(c.hours)||0),0))}</span>
+              </div>
+              {cards.map(c => (
+                <JobCardRow key={c.id} card={c} clientName={clientName(c.clientId)}
+                  machineLabel={machineLabel(c.machineId)} onEdit={setEditCard}/>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ── Admin: timesheets ──
+  const AdminCardsView = () => {
+    const [from, setFrom]   = useState("");
+    const [to, setTo]       = useState("");
+    const [fTech, setFTech] = useState("");
+    const [fClient, setFClient] = useState("");
+    const [q, setQ]         = useState("");   // job # / PO search
+    const [group, setGroup] = useState("day");  // day | week | tech
+    const [confirmDel, setConfirmDel] = useState(null);
+
+    const filtered = jobCards
+      .filter(c => (!from || (c.date||"") >= from) && (!to || (c.date||"") <= to))
+      .filter(c => !fTech   || c.techId === fTech || c.worker === fTech)
+      .filter(c => !fClient || c.clientId === fClient)
+      .filter(c => {
+        const s = q.trim().toLowerCase();
+        if (!s) return true;
+        return (c.jobNo||"").toLowerCase().includes(s)
+            || (c.po||"").toLowerCase().includes(s)
+            || (c.workDone||"").toLowerCase().includes(s)
+            || (c.description||"").toLowerCase().includes(s);
+      })
+      .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||0)-(a.createdAt||0));
+
+    const total = filtered.reduce((s,c)=>s+(Number(c.hours)||0), 0);
+    // Per-tech totals, always shown so payroll questions are one glance away.
+    const byTech = {};
+    filtered.forEach(c => {
+      const k = c.worker || "Unassigned";
+      byTech[k] = (byTech[k]||0) + (Number(c.hours)||0);
+    });
+    const techTotals = Object.entries(byTech).sort((a,b)=>b[1]-a[1]);
+
+    const groups = {};
+    filtered.forEach(c => {
+      const k = group==="day" ? c.date
+              : group==="week" ? weekKey(c.date)
+              : (c.worker || "Unassigned");
+      (groups[k] = groups[k] || []).push(c);
+    });
+    const groupList = Object.entries(groups).sort((a,b)=>
+      group==="tech" ? a[0].localeCompare(b[0]) : b[0].localeCompare(a[0]));
+
+    const fld = {background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",minWidth:0};
+    return (
+      <div style={{paddingBottom:20}}>
+        <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+              <ChevronLeft size={18} color={TXT}/>
+            </button>
+            <div style={{flex:1}}>
+              <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>TIMESHEETS</div>
+              <div style={{fontSize:11,color:MUTED}}>{filtered.length} card{filtered.length===1?"":"s"} · {fmtHrs(total)}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            <input type="date" value={from} onChange={e=>setFrom(e.target.value)} style={{...fld,flex:1}}/>
+            <span style={{color:MUTED,fontSize:12,alignSelf:"center"}}>to</span>
+            <input type="date" value={to} onChange={e=>setTo(e.target.value)} style={{...fld,flex:1}}/>
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            <select value={fTech} onChange={e=>setFTech(e.target.value)} style={{...fld,flex:1,appearance:"none",color:fTech?TXT:MUTED}}>
+              <option value="">All techs</option>
+              {approvedTechs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <select value={fClient} onChange={e=>setFClient(e.target.value)} style={{...fld,flex:1,appearance:"none",color:fClient?TXT:MUTED}}>
+              <option value="">All clients</option>
+              {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search job #, PO or work done…"
+            style={{...fld,width:"100%",boxSizing:"border-box",marginBottom:8}}/>
+          <div style={{display:"flex",gap:8}}>
+            {[["day","BY DAY"],["week","BY WEEK"],["tech","BY TECH"]].map(([v,l])=>(
+              <button key={v} onClick={()=>setGroup(v)}
+                style={{flex:1,background:group===v?Y:CARD2,border:`1px solid ${group===v?Y:BDR2}`,borderRadius:7,padding:"7px 0",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:1,color:group===v?BG:MUTED}}>
+                {l}
+              </button>
+            ))}
+            <button onClick={()=>{setFrom("");setTo("");setFTech("");setFClient("");setQ("");}}
+              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"7px 11px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED}}>CLEAR</button>
+          </div>
+        </div>
+
+        <div style={{padding:"14px"}}>
+          {techTotals.length>0 && (
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"12px 14px",marginBottom:14}}>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:800,color:Y,letterSpacing:2,marginBottom:9}}>HOURS PER TECH</div>
+              {techTotals.map(([name,h])=>(
+                <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
+                  <span style={{fontSize:13,color:name==="Unassigned"?MUTED:TXT}}>{name}</span>
+                  <span style={{fontFamily:MONO,fontSize:14,color:Y}}>{fmtHrs(h)}</span>
+                </div>
+              ))}
+              <div style={{display:"flex",justifyContent:"space-between",paddingTop:8,marginTop:3,borderTop:`1px solid ${BDR}`}}>
+                <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:TXT,letterSpacing:1}}>TOTAL</span>
+                <span style={{fontFamily:MONO,fontSize:16,color:Y}}>{fmtHrs(total)}</span>
+              </div>
+            </div>
+          )}
+
+          {filtered.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 10px"}}>No job cards match these filters.</div>}
+          {groupList.map(([k, cards]) => (
+            <div key={k}>
+              <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 2px 10px"}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>
+                  {group==="week" ? `WEEK ${k.split("-W")[1]||""}` : k.toUpperCase()}
+                </span>
+                {group==="week" && cards[0] && <span style={{fontSize:10,color:MUTED}}>{weekRangeLabel(cards[0].date)}</span>}
+                <div style={{flex:1,height:1,background:BDR}}/>
+                <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{fmtHrs(cards.reduce((s,c)=>s+(Number(c.hours)||0),0))}</span>
+              </div>
+              {cards.map(c => (
+                <JobCardRow key={c.id} card={c} clientName={clientName(c.clientId)}
+                  machineLabel={machineLabel(c.machineId)} showWorker={group!=="tech"}
+                  onEdit={setEditCard} onDelete={setConfirmDel}/>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        {confirmDel && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:330,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,marginBottom:8}}>DELETE JOB CARD?</div>
+              <div style={{fontSize:13,color:MUTED,marginBottom:18,lineHeight:1.5}}>
+                {confirmDel.worker}'s {fmtHrs(confirmDel.hours)} on {confirmDel.date} will be removed{confirmDel.linkedJobId?", including from the rebuild job's costings":""}.
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={()=>setConfirmDel(null)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>CANCEL</button>
+                <button onClick={()=>{delCard(confirmDel.id); setConfirmDel(null);}} style={{flex:1,background:RED,border:"none",borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:"#fff"}}>DELETE</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const DashboardView = () => {
     const [range, setRange] = useState("all"); // all | 30 | 7
     const [dashJob, setDashJob] = useState("all"); // "all" | jobId
@@ -3474,10 +4181,12 @@ export default function App() {
           {view==="task"      && <AdminTaskView/>}
           {view==="dashboard" && <DashboardView/>}
           {view==="users"     && <AdminUsersView/>}
+          {view==="cards"     && <AdminCardsView/>}
         </>) : (<>
           {view==="jobs"    && <TechJobsView/>}
           {view==="hoses"   && <TechHosesView/>}
           {view==="hoseJob" && <TechHoseJobView/>}
+          {view==="cards"   && <TechCardsView/>}
           {view==="job"     && <TechJobView/>}
           {view==="section" && <TechSectionView/>}
           {view==="task"    && <TechTaskView/>}
@@ -3494,6 +4203,15 @@ export default function App() {
       {editHose && jobs.find(j=>j.id===editHose.jobId) &&
         <HoseBuilderModal job={jobs.find(j=>j.id===editHose.jobId)} initial={editHose}
           onClose={()=>setEditHose(null)} onSave={updHose} defaultWorker={myName} sections={secsOf(editHose.jobId)}/>}
+      {(showCard || editCard) && (
+        <JobCardForm
+          initial={editCard}
+          clients={clients} machines={machines} jobs={jobs}
+          tasksForJob={tasksForJob} me={me}
+          onAddClient={addClient} onAddMachine={addMachine}
+          onUpload={uploadCardPhotos} onSave={saveCard}
+          onClose={()=>{ setShowCard(false); setEditCard(null); }}/>
+      )}
       {editSched && (
         <ScheduleEditor {...editSched}
           tmpl={tmplOf(editSched.job.id)}
