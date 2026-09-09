@@ -253,9 +253,22 @@ const shareInvite = async (inv, jobs, setNote) => {
 // be linked to a rebuild task, in which case its hours also feed that job's
 // costings (see cardEntryId / syncCardEntry in App).
 const hhmmToMin = t => {
-  const m = /^(\d{1,2}):(\d{2})$/.exec((t||"").trim());
+  // Some mobile browsers hand back "07:00:00" from a time input — accept both.
+  const m = /^(\d{1,2}):(\d{2})(?::\d{2})?$/.exec((t||"").trim());
   return m ? (+m[1])*60 + (+m[2]) : null;
 };
+// Quarter-hour options — the boys work to the quarter, not the minute.
+const TIME_OPTIONS = (() => {
+  const out = [];
+  for (let m = 4*60; m <= 23*60 + 45; m += 15) {
+    const hh = String(Math.floor(m/60)).padStart(2,"0");
+    const mm = String(m%60).padStart(2,"0");
+    out.push(`${hh}:${mm}`);
+  }
+  return out;
+})();
+const QUARTER_HOURS = [0,0.25,0.5,0.75,1,1.25,1.5,1.75,2,2.5,3,3.5,4,5,6];
+const DEFAULT_START = "07:00", DEFAULT_FINISH = "17:30";
 // Finish before start is treated as crossing midnight rather than an error.
 const spanHours = (start, finish, breakMin=0) => {
   const s = hhmmToMin(start), f = hhmmToMin(finish);
@@ -266,6 +279,14 @@ const spanHours = (start, finish, breakMin=0) => {
   return mins > 0 ? Math.round(mins/60*100)/100 : 0;
 };
 const fmtHrs = h => `${(Number(h)||0).toFixed(2)}h`;
+// Quarter-hour slots — a dropdown beats a native time picker on a phone with gloves.
+const TIME_SLOTS = (() => {
+  const out = [];
+  for (let m = 0; m < 24*60; m += 15) {
+    out.push(`${String(Math.floor(m/60)).padStart(2,"0")}:${String(m%60).padStart(2,"0")}`);
+  }
+  return out;
+})();
 // ISO week key, so weekly totals line up with how the boys get paid.
 const weekKey = iso => {
   const d = new Date(iso + "T00:00:00");
@@ -295,9 +316,10 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   const [machineId, setMachineId] = useState(initial?.machineId || "");
   const [newMachine, setNewMachine] = useState(null); // {make,model,serial,rego}
   const [date, setDate]           = useState(initial?.date || today());
-  const [start, setStart]         = useState(initial?.start || "");
-  const [finish, setFinish]       = useState(initial?.finish || "");
-  const [breakMin, setBreakMin]   = useState(String(initial?.breakMin ?? 0));
+  const [start, setStart]         = useState(initial?.start || "07:00");
+  const [finish, setFinish]       = useState(initial?.finish || "17:30");
+  const [breakMin, setBreakMin]   = useState(String(initial?.breakMin ?? 30));
+  const [travelMin, setTravelMin] = useState(String(initial?.travelMin ?? 0));
   const [hourMeter, setHourMeter] = useState(initial?.hourMeter ?? "");
   const [jobNo, setJobNo]         = useState(initial?.jobNo || "");
   const [po, setPo]               = useState(initial?.po || "");
@@ -314,7 +336,9 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   const camRef = useRef(); const galRef = useRef();
 
   const fleet = machines.filter(m => m.clientId === clientId);
-  const hours = spanHours(start, finish, breakMin);
+  const hours      = spanHours(start, finish, breakMin);
+  const travelHrs  = Math.round(((Number(travelMin)||0)/60)*100)/100;
+  const totalHours = hours === null ? null : Math.round((hours + travelHrs)*100)/100;
   const linkedTasks = linkedJobId ? tasksForJob(linkedJobId) : [];
 
   const pickPhotos = async e => {
@@ -331,7 +355,15 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
     e.target.value = "";
   };
 
-  const valid = clientId && machineId && date && hours !== null && hours > 0 && workDone.trim();
+  // Job # and PO are deliberately NOT required — the office adds them later.
+  const missing = [];
+  if (!clientId || clientId === "__new")   missing.push("client");
+  if (!machineId || machineId === "__new") missing.push("machine");
+  if (!date)                                missing.push("date");
+  if (hours === null)                       missing.push("start and finish times");
+  else if (hours <= 0)                      missing.push("a finish time after the start");
+  if (!workDone.trim())                     missing.push("what you did");
+  const valid = missing.length === 0;
   const submit = async () => {
     if (!valid || busy) return;
     if (editing && !confirm) { setConfirm(true); return; }
@@ -339,7 +371,10 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
     try {
       await onSave({
         clientId, machineId, date, start, finish,
-        breakMin: Number(breakMin) || 0, hours,
+        breakMin: Number(breakMin) || 0,
+        travelMin: Number(travelMin) || 0,
+        hours: totalHours,          // billed/paid hours = on the job + travel
+        onJobHours: hours,          // kept separately so travel can be split out later
         hourMeter: hourMeter === "" ? null : Number(hourMeter),
         jobNo: jobNo.trim(), po: po.trim(),
         description: description.trim(), workDone: workDone.trim(),
@@ -431,23 +466,48 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
 
           <div style={{marginTop:18}}>
             <L>TIME ON THE JOB</L>
-            <div style={{display:"flex",gap:8}}>
-              <div style={{flex:1}}>
+            {/* Two rows rather than three columns — three side by side wrap badly
+                on a phone once the native select arrows are drawn. */}
+            <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+              <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Start</div>
-                <input type="time" value={start} onChange={e=>setStart(e.target.value)} style={{...fld,fontFamily:MONO}}/>
+                <select value={start} onChange={e=>setStart(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",textAlign:"center",padding:"12px 6px"}}>
+                  {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
               </div>
-              <div style={{flex:1}}>
+              <span style={{color:MUTED,fontSize:13,paddingBottom:13}}>→</span>
+              <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Finish</div>
-                <input type="time" value={finish} onChange={e=>setFinish(e.target.value)} style={{...fld,fontFamily:MONO}}/>
-              </div>
-              <div style={{width:86}}>
-                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Break (min)</div>
-                <input type="number" inputMode="numeric" min="0" step="5" value={breakMin} onChange={e=>setBreakMin(e.target.value)} style={{...fld,fontFamily:MONO,padding:"12px 8px"}}/>
+                <select value={finish} onChange={e=>setFinish(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",textAlign:"center",padding:"12px 6px"}}>
+                  {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
               </div>
             </div>
-            <div style={{background:CARD,border:`1px solid ${hours?Y:BDR}`,borderRadius:9,padding:"11px 13px",marginTop:9,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1.5}}>HOURS WORKED</span>
-              <span style={{fontFamily:MONO,fontSize:19,color:hours?Y:MUTED}}>{hours===null?"—":fmtHrs(hours)}</span>
+            <div style={{display:"flex",gap:8,marginTop:9}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Break</div>
+                <select value={breakMin} onChange={e=>setBreakMin(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",padding:"12px 8px"}}>
+                  {[0,15,30,45,60,90].map(m => <option key={m} value={m}>{m===0?"None":`${m} min`}</option>)}
+                </select>
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Travel</div>
+                <select value={travelMin} onChange={e=>setTravelMin(e.target.value)} style={{...fld,fontFamily:MONO,appearance:"none",padding:"12px 8px"}}>
+                  {[0,15,30,45,60,75,90,105,120,150,180,240,300,360].map(m =>
+                    <option key={m} value={m}>{m===0?"None":(m<60?`${m} min`:`${(m/60).toFixed(m%60?1:0)} hr${m>=120?"s":""}`)}</option>)}
+                </select>
+              </div>
+            </div>
+            <div style={{background:CARD,border:`1px solid ${totalHours?Y:BDR}`,borderRadius:9,padding:"11px 13px",marginTop:9}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1.5}}>TOTAL HOURS</span>
+                <span style={{fontFamily:MONO,fontSize:19,color:totalHours?Y:MUTED}}>{totalHours===null?"—":fmtHrs(totalHours)}</span>
+              </div>
+              {travelHrs>0 && hours!==null && (
+                <div style={{fontSize:10,color:MUTED,marginTop:4,fontFamily:MONO}}>
+                  {fmtHrs(hours)} on the job + {fmtHrs(travelHrs)} travel
+                </div>
+              )}
             </div>
           </div>
 
@@ -455,17 +515,6 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
             <L>HOUR METER READING</L>
             <input type="number" inputMode="decimal" step="0.1" value={hourMeter} onChange={e=>setHourMeter(e.target.value)}
               placeholder="Reading off the machine" style={{...fld,fontFamily:MONO}}/>
-          </div>
-
-          <div style={{marginTop:18,display:"flex",gap:10}}>
-            <div style={{flex:1}}>
-              <L>JOB #</L>
-              <input value={jobNo} onChange={e=>setJobNo(e.target.value)} placeholder="SRSA job no." autoCapitalize="characters" style={{...fld,fontFamily:MONO}}/>
-            </div>
-            <div style={{flex:1}}>
-              <L>PO NUMBER</L>
-              <input value={po} onChange={e=>setPo(e.target.value)} placeholder="If supplied" autoCapitalize="characters" style={{...fld,fontFamily:MONO}}/>
-            </div>
           </div>
 
           <div style={{marginTop:18}}>
@@ -480,6 +529,20 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
             <textarea value={workDone} onChange={e=>setWorkDone(e.target.value)} rows={4}
               placeholder="Work carried out, parts replaced, anything the customer should know…"
               style={{...fld,resize:"vertical",fontFamily:"inherit",lineHeight:1.4}}/>
+          </div>
+
+          <div style={{marginTop:18,background:CARD,border:`1px dashed ${BDR2}`,borderRadius:10,padding:"12px 14px"}}>
+            <L>OFFICE USE — LEAVE BLANK IF YOU DON'T HAVE THEM</L>
+            <div style={{display:"flex",gap:10}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>Job #</div>
+                <input value={jobNo} onChange={e=>setJobNo(e.target.value)} placeholder="Optional" autoCapitalize="characters" style={{...fld,fontFamily:MONO,fontSize:14}}/>
+              </div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:10,color:MUTED,marginBottom:4}}>PO number</div>
+                <input value={po} onChange={e=>setPo(e.target.value)} placeholder="Optional" autoCapitalize="characters" style={{...fld,fontFamily:MONO,fontSize:14}}/>
+              </div>
+            </div>
           </div>
 
           <div style={{marginTop:18}}>
@@ -550,7 +613,13 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
           </div>
         </div>
 
-        <div style={{position:"fixed",bottom:0,left:0,right:0,display:"flex",justifyContent:"center",background:"linear-gradient(transparent, #0C0D10 35%)",padding:"24px 14px 18px"}}>
+        <div style={{position:"fixed",bottom:0,left:0,right:0,display:"flex",flexDirection:"column",alignItems:"center",background:"linear-gradient(transparent, #0C0D10 30%)",padding:"24px 14px 18px",paddingBottom:"calc(18px + env(safe-area-inset-bottom))"}}>
+          {/* Say what's missing rather than leaving a dead grey button. */}
+          {!valid && (
+            <div style={{width:"100%",maxWidth:452,background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"9px 12px",marginBottom:8,fontSize:11,color:MUTED,lineHeight:1.4}}>
+              Still needed: <span style={{color:Y}}>{missing.join(", ")}</span>
+            </div>
+          )}
           <button onClick={submit} disabled={!valid||busy}
             style={{width:"100%",maxWidth:452,background:valid?Y:BDR2,border:"none",borderRadius:10,padding:15,cursor:valid?"pointer":"default",fontFamily:FF,fontSize:16,fontWeight:800,color:valid?BG:MUTED,letterSpacing:1}}>
             {busy?"SAVING…":(editing?"SAVE CHANGES":"SAVE JOB CARD")}
@@ -598,7 +667,7 @@ const JobCardRow = ({card, clientName, machineLabel, onEdit, onDelete, showWorke
         </div>
       )}
       <div style={{fontSize:10,color:MUTED,marginTop:6,letterSpacing:.5}}>
-        {card.start}–{card.finish}{card.breakMin?` · ${card.breakMin}min break`:""}
+        {card.start}–{card.finish}{card.breakMin?` · ${card.breakMin}min break`:""}{card.travelMin?` · ${card.travelMin}min travel`:""}
         {card.hourMeter!=null?` · ${card.hourMeter}hrs on meter`:""}
         {showWorker && card.worker?` · ${card.worker}`:""}
         {card.parts?.length?` · ${card.parts.length} part${card.parts.length===1?"":"s"}`:""}
