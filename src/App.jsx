@@ -377,7 +377,8 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   // Job # and PO stay optional — the office fills those in later.
   const missing = [];
   if (!clientId || clientId === "__new")   missing.push("client");
-  if (!machineId || machineId === "__new") missing.push("machine");
+  // Machine is optional: workshop time and delivery runs have no machine.
+  if (machineId === "__new")                missing.push("machine details");
   if (!date)                                missing.push("date");
   if (h1 === null)                          missing.push("start and finish times");
   else if (onJob <= 0 && adminHrs === 0 && travelHrs === 0) missing.push("some hours");
@@ -472,6 +473,11 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
           </div>
 
           <div style={{marginTop:18}}>
+            <L>DATE</L>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={fld}/>
+          </div>
+
+          <div style={{marginTop:18}}>
             <L>CLIENT</L>
             <select value={clientId} onChange={e=>{ setClientId(e.target.value); setMachineId(""); }} style={sel}>
               <option value="">— select client —</option>
@@ -495,7 +501,7 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                   setMachineId(e.target.value);
                   if (e.target.value === "__new") setNewMachine({make:"",model:"",serial:"",rego:""});
                 }} style={sel}>
-                <option value="">— select machine —</option>
+                <option value="">— no machine (workshop / timesheet) —</option>
                 {fleet.map(m => (
                   <option key={m.id} value={m.id}>
                     {[m.make, m.model].filter(Boolean).join(" ")}{m.rego?` · ${m.rego}`:""}{m.serial?` · ${m.serial}`:""}
@@ -503,9 +509,18 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                 ))}
                 <option value="__new">+ Add a machine to this client…</option>
               </select>
-              {machineId && machineId!=="__new" && (
-                <div style={{fontSize:11,color:GRN,marginTop:6}}>✓ Worked on before — already on file.</div>
-              )}
+              {machineId && machineId!=="__new" && (() => {
+                const m = machines.find(x=>x.id===machineId);
+                return (
+                  <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:9,padding:"10px 12px",marginTop:8}}>
+                    <div style={{fontSize:11,color:GRN,marginBottom:6}}>✓ Worked on before — already on file.</div>
+                    <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
+                      {m?.serial && <div><div style={{fontSize:9,color:MUTED,letterSpacing:1}}>SERIAL</div><div style={{fontFamily:MONO,fontSize:12,color:TXT}}>{m.serial}</div></div>}
+                      {m?.rego   && <div><div style={{fontSize:9,color:MUTED,letterSpacing:1}}>REGO</div><div style={{fontFamily:MONO,fontSize:12,color:TXT}}>{m.rego}</div></div>}
+                    </div>
+                  </div>
+                );
+              })()}
               {machineId === "__new" && newMachine && (
                 <div style={{background:CARD,border:`1px solid ${BDR2}`,borderRadius:10,padding:12,marginTop:8}}>
                   {[["make","Make (e.g. John Deere)"],["model","Model"],["serial","Serial number"],["rego","Rego (if applicable)"]].map(([k,ph])=>(
@@ -520,20 +535,16 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                   </button>
                 </div>
               )}
+
+              {machineId && machineId!=="__new" && (
+                <div style={{marginTop:14}}>
+                  <L>KM / HOURS ON THE MACHINE</L>
+                  <input type="number" inputMode="decimal" step="0.1" value={hourMeter} onChange={e=>setHourMeter(e.target.value)}
+                    placeholder="Meter reading" style={{...fld,fontFamily:MONO}}/>
+                </div>
+              )}
             </div>
           )}
-
-          <div style={{marginTop:18,display:"flex",gap:10}}>
-            <div style={{flex:1,minWidth:0}}>
-              <L>DATE</L>
-              <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{...fld,fontSize:14}}/>
-            </div>
-            <div style={{flex:1,minWidth:0}}>
-              <L>KM / HOURS</L>
-              <input type="number" inputMode="decimal" step="0.1" value={hourMeter} onChange={e=>setHourMeter(e.target.value)}
-                placeholder="Meter reading" style={{...fld,fontFamily:MONO,fontSize:14}}/>
-            </div>
-          </div>
 
           <div style={{marginTop:20}}>
             <L>COMPLAINT — WHAT WAS REPORTED?</L>
@@ -775,7 +786,7 @@ const JobCardRow = ({card, clientName, machineLabel, onEdit, onDelete, showWorke
         <span style={{marginLeft:"auto",fontFamily:MONO,fontSize:15,color:Y}}>{fmtHrs(card.hours)}</span>
       </div>
       <div style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT,marginTop:5}}>{clientName}</div>
-      <div style={{fontSize:11,color:MUTED,marginTop:1}}>{machineLabel}</div>
+      <div style={{fontSize:11,color:MUTED,marginTop:1,fontStyle:card.machineId?"normal":"italic"}}>{machineLabel}</div>
       {card.business && (
         <div style={{fontSize:10,color:Y,marginTop:2,letterSpacing:.5}}>
           {card.business==="srsa" ? "SRSA" : "BURNBANK MECHANICAL & AG"}
@@ -3600,6 +3611,7 @@ export default function App() {
   };
   const clientName   = id => clients.find(c=>c.id===id)?.name || "—";
   const machineLabel = id => {
+    if (!id) return "Workshop / timesheet";   // no machine on this card
     const m = machines.find(x=>x.id===id);
     if (!m) return "—";
     return [[m.make,m.model].filter(Boolean).join(" "), m.rego, m.serial].filter(Boolean).join(" · ");
