@@ -312,6 +312,38 @@ const BUSINESSES = [
 const PARTS_SOURCES = ["Supplied", "Ute", "Workshop"];
 const CONSUMABLES   = ["Brake Clean", "Rags", "CAT Caps", "Loctite"];
 
+// Shared bits for the job card form. MODULE LEVEL because TimeRow contains a
+// text input — defining it inside the form would recreate it on every keystroke
+// and iOS would drop the keyboard mid-entry.
+const FLD  = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"};
+const SELF = {...FLD, appearance:"none"};
+const CardLabel = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
+const CardSub   = ({children}) => <div style={{fontSize:10,color:MUTED,marginBottom:4}}>{children}</div>;
+const TimeRow = ({s,setS,f,setF,b,setB}) => (
+  <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+    <div style={{flex:1,minWidth:0}}>
+      <CardSub>Start</CardSub>
+      <select value={s} onChange={e=>setS(e.target.value)} style={{...SELF,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}>
+        <option value="">--:--</option>
+        {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
+      </select>
+    </div>
+    <span style={{color:MUTED,fontSize:13,paddingBottom:13}}>→</span>
+    <div style={{flex:1,minWidth:0}}>
+      <CardSub>Finish</CardSub>
+      <select value={f} onChange={e=>setF(e.target.value)} style={{...SELF,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}>
+        <option value="">--:--</option>
+        {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
+      </select>
+    </div>
+    <div style={{width:92}}>
+      <CardSub>Break (min)</CardSub>
+      <input type="number" inputMode="numeric" min="0" step="1" value={b} onChange={e=>setB(e.target.value)}
+        style={{...FLD,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}/>
+    </div>
+  </div>
+);
+
 const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                       onAddClient, onAddMachine, onSave, onClose, onUpload}) => {
   const editing = !!initial;
@@ -352,6 +384,24 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   const [err, setErr]       = useState("");
   const [confirm, setConfirm] = useState(false);
   const camRef = useRef(); const galRef = useRef();
+
+  const [addingClient, setAddingClient] = useState(false);
+  const [clientErr, setClientErr] = useState("");
+  const addClientNow = async () => {
+    const name = newClient.trim();
+    if (!name) { setClientErr("Type the client's name first."); return; }
+    // Re-use an existing client rather than creating a near-duplicate.
+    const dupe = clients.find(c => (c.name||"").trim().toLowerCase() === name.toLowerCase());
+    if (dupe) { setClientId(dupe.id); setNewClient(""); setClientErr(""); return; }
+    setAddingClient(true); setClientErr("");
+    try {
+      const id = await onAddClient(name);
+      setClientId(id); setNewClient("");
+    } catch (e) {
+      setClientErr(`Couldn't add that client (${e?.code || "unknown"}).`);
+    }
+    setAddingClient(false);
+  };
 
   const fleet = machines.filter(m => m.clientId === clientId);
   const h1 = spanHours(start, finish, breakMin);
@@ -417,36 +467,9 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
     }
   };
 
-  const L = ({children}) => <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>{children}</div>;
-  const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"12px 14px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"};
-  const sel = {...fld, appearance:"none"};
-  const Sub = ({children}) => <div style={{fontSize:10,color:MUTED,marginBottom:4}}>{children}</div>;
-  const TimeRow = ({s,setS,f,setF,b,setB}) => (
-    <>
-      <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
-        <div style={{flex:1,minWidth:0}}>
-          <Sub>Start</Sub>
-          <select value={s} onChange={e=>setS(e.target.value)} style={{...sel,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}>
-            <option value="">--:--</option>
-            {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </div>
-        <span style={{color:MUTED,fontSize:13,paddingBottom:13}}>→</span>
-        <div style={{flex:1,minWidth:0}}>
-          <Sub>Finish</Sub>
-          <select value={f} onChange={e=>setF(e.target.value)} style={{...sel,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}>
-            <option value="">--:--</option>
-            {TIME_SLOTS.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </div>
-        <div style={{width:92}}>
-          <Sub>Break (min)</Sub>
-          <input type="number" inputMode="numeric" min="0" step="1" value={b} onChange={e=>setB(e.target.value)}
-            style={{...fld,fontFamily:MONO,textAlign:"center",padding:"12px 6px"}}/>
-        </div>
-      </div>
-    </>
-  );
+  const L = CardLabel, Sub = CardSub;
+  const fld = FLD;
+  const sel = SELF;
 
   return (
     <div style={{position:"fixed",inset:0,background:BG,zIndex:100,display:"flex",justifyContent:"center"}}>
@@ -485,11 +508,20 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
               <option value="__new">+ Add a new client…</option>
             </select>
             {clientId === "__new" && (
-              <div style={{display:"flex",gap:8,marginTop:8}}>
-                <input value={newClient} onChange={e=>setNewClient(e.target.value)} placeholder="Client name (or W/S for workshop)" style={{...fld,flex:1}}/>
-                <button disabled={!newClient.trim()}
-                  onClick={async()=>{ const id = await onAddClient(newClient); setClientId(id); setNewClient(""); }}
-                  style={{background:newClient.trim()?Y:BDR2,border:"none",borderRadius:8,padding:"0 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:newClient.trim()?BG:MUTED}}>ADD</button>
+              <div style={{marginTop:8}}>
+                <div style={{display:"flex",gap:8}}>
+                  <input value={newClient} onChange={e=>setNewClient(e.target.value)}
+                    placeholder="Client name (or W/S for workshop)"
+                    autoCapitalize="words" autoCorrect="off"
+                    onKeyDown={e=>{ if (e.key==="Enter") { e.preventDefault(); addClientNow(); } }}
+                    style={{...fld,flex:1,minWidth:0}}/>
+                  {/* Always clickable — a dead grey button gives no clue why. */}
+                  <button onClick={addClientNow} disabled={addingClient}
+                    style={{background:Y,border:"none",borderRadius:8,padding:"0 18px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:BG,flexShrink:0}}>
+                    {addingClient?"…":"ADD"}
+                  </button>
+                </div>
+                {clientErr && <div style={{fontSize:11,color:RED,marginTop:6}}>{clientErr}</div>}
               </div>
             )}
           </div>
@@ -528,11 +560,18 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                       onChange={e=>setNewMachine({...newMachine,[k]:e.target.value})}
                       style={{...fld,marginBottom:8,fontSize:14}}/>
                   ))}
-                  <button disabled={!newMachine.make.trim()}
-                    onClick={async()=>{ const id = await onAddMachine(clientId, newMachine); setMachineId(id); setNewMachine(null); }}
-                    style={{width:"100%",background:newMachine.make.trim()?Y:BDR2,border:"none",borderRadius:8,padding:11,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:800,color:newMachine.make.trim()?BG:MUTED,letterSpacing:1}}>
+                  <button onClick={async()=>{
+                      if (!newMachine.make.trim()) { setClientErr("Give the machine a make at least."); return; }
+                      setClientErr("");
+                      try {
+                        const id = await onAddMachine(clientId, newMachine);
+                        setMachineId(id); setNewMachine(null);
+                      } catch (e) { setClientErr(`Couldn't add that machine (${e?.code || "unknown"}).`); }
+                    }}
+                    style={{width:"100%",background:Y,border:"none",borderRadius:8,padding:11,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:800,color:BG,letterSpacing:1}}>
                     ADD MACHINE
                   </button>
+                  {clientErr && <div style={{fontSize:11,color:RED,marginTop:6}}>{clientErr}</div>}
                 </div>
               )}
 
