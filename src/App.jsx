@@ -1780,7 +1780,7 @@ export default function App() {
   // unscheduled rows so they can be added to the plan later.
   const schedRows = jid => {
     const tmpl = tmplOf(jid);
-    return tmpl.schedule.map(s => {
+    const fromTemplate = tmpl.schedule.map(s => {
       const ov = schedOv[eKey(jid, s.taskId)] || {};
       return {
         taskId: s.taskId,
@@ -1792,7 +1792,48 @@ export default function App() {
         lane: ov.lane ?? s.lane ?? "Main Flow",
         hidden: ov.hidden ?? false,
       };
-    }).filter(r => !r.hidden);
+    });
+    // Tasks the supervisor dropped into a week that the original sheet never
+    // scheduled — these carry their own fixedStart and duration.
+    const inTemplate = new Set(tmpl.schedule.map(s => s.taskId));
+    const added = Object.values(schedOv)
+      .filter(o => o.jobId === jid && !inTemplate.has(o.taskId) && !o.hidden)
+      .map(o => ({
+        taskId: o.taskId,
+        dur: o.dur ?? 1,
+        fixedStart: o.fixedStart ?? null,
+        deps: o.deps ?? [],
+        lane: o.lane ?? "Planned",
+        hidden: false,
+      }));
+    return [...fromTemplate, ...added].filter(r => !r.hidden);
+  };
+
+  // Working days between a job's start and a calendar date (Mon–Fri only).
+  // This is what turns "put it in the week of the 21st" into a Gantt offset.
+  const workingOffset = (startISO, targetISO) => {
+    if (!startISO || !targetISO) return 0;
+    const a = new Date(startISO + "T00:00:00"), b = new Date(targetISO + "T00:00:00");
+    if (isNaN(a) || isNaN(b)) return 0;
+    if (b <= a) return 0;
+    let n = 0;
+    for (const d = new Date(a); d < b; d.setDate(d.getDate()+1)) {
+      const w = d.getDay();
+      if (w !== 0 && w !== 6) n++;
+    }
+    return n;
+  };
+  // Put a task into a given week with an estimated number of days. Clearing any
+  // dependencies is deliberate — an explicitly planned week wins over the
+  // sheet's original ordering.
+  const planTaskIntoWeek = async (jid, taskId, weekStartISO, days) => {
+    const job = jobs.find(j => j.id === jid);
+    await saveSchedRow(jid, taskId, {
+      fixedStart: workingOffset(job?.started, weekStartISO),
+      dur: Number(days) || 1,
+      deps: [],
+      plannedWeek: weekStartISO,
+    });
   };
   // Derive a starting dependency from the template's own ordering.
   const defaultDeps = (tmpl, s) => {
@@ -4257,21 +4298,23 @@ export default function App() {
   };
 
   // ── Admin: weekly work plan ──
-  // Picks the tasks whose scheduled window overlaps the chosen week, lists the
-  // parts each one needs, and lets the supervisor assign them to a tech. Assigned
-  // work then shows on that tech's home screen with a direct link to the task.
+  // This is the planning tool, not a read-only slice of the Gantt: dropping a
+  // task into a week writes its start and duration, and the Gantt redraws from
+  // that. Tasks the original sheet scheduled appear automatically in whichever
+  // week they land in; anything else can be added by hand.
   const PlanView = () => {
     const [weekStart, setWeekStart] = useState(mondayOf(today()));
     const [planJob, setPlanJob]     = useState(jobs[0]?.id || "");
-    const [picking, setPicking]     = useState(null);   // task awaiting a tech
+    const [picking, setPicking]     = useState(null);    // task awaiting a tech
+    const [adding, setAdding]       = useState(false);   // "add a job to this week" open
+    const [addQ, setAddQ]           = useState("");
+    const [addDaysBy, setAddDaysBy] = useState({});      // taskId -> day estimate being typed
     const job  = jobs.find(j => j.id === planJob);
     const weekEnd = addDays(weekStart, 6);
 
-    // Which tasks land in this week, per the live schedule?
     const rows = job ? schedRows(job.id) : [];
     const {times} = rows.length ? computeSchedule(rows) : {times:{}};
     const startISO = job?.started || weekStart;
-    // Convert a working-day offset into a calendar date from the job start.
     const dateAtOffset = off => {
       const d = new Date(startISO + "T00:00:00");
       let left = Math.round(off);
@@ -4285,9 +4328,22 @@ export default function App() {
       .sort((a,b) => a.from.localeCompare(b.from) || a.taskId.localeCompare(b.taskId));
 
     const tmpl = job ? tmplOf(job.id) : null;
-    const taskOf  = id => tmpl?.tasks.find(t => t.id===id);
+    const taskOf = id => tmpl?.tasks.find(t => t.id===id);
     const partsOfTask = id => (tmpl?.parts || []).filter(p => p.taskId === id);
     const totalHrs = inWeek.reduce((s,r)=>s+(taskOf(r.taskId)?.est||0), 0);
+    const totalDays = inWeek.reduce((s,r)=>s+(Number(r.dur)||0), 0);
+    const inWeekIds = new Set(inWeek.map(r => r.taskId));
+
+    // Candidates to add: any task on this job not already landing in this week.
+    const addable = (() => {
+      if (!tmpl) return [];
+      const s = addQ.trim().toLowerCase();
+      const pool = tmpl.tasks.filter(t => isIn(job.id, t) && !inWeekIds.has(t.id));
+      if (!s) return pool.slice(0, 40);
+      return pool.filter(t => t.id.toLowerCase().includes(s) || (t.desc||"").toLowerCase().includes(s)).slice(0, 40);
+    })();
+
+    const noStart = job && !job.started;
 
     return (
       <div style={{paddingBottom:24}}>
@@ -4298,7 +4354,9 @@ export default function App() {
             </button>
             <div style={{flex:1}}>
               <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>WEEK PLAN</div>
-              <div style={{fontSize:11,color:MUTED}}>{weekRangeLabel(weekStart)} · {inWeek.length} job{inWeek.length===1?"":"s"} · {totalHrs}h</div>
+              <div style={{fontSize:11,color:MUTED}}>
+                {weekRangeLabel(weekStart)} · {inWeek.length} job{inWeek.length===1?"":"s"} · {totalDays.toFixed(1)} days · {totalHrs}h
+              </div>
             </div>
           </div>
           <div style={{display:"flex",gap:8}}>
@@ -4319,18 +4377,79 @@ export default function App() {
 
         <div style={{padding: isDesktop?"16px 24px":"14px"}}>
           {!job && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 0"}}>No jobs yet.</div>}
-          {job && inWeek.length===0 && (
-            <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 20px",lineHeight:1.6}}>
-              Nothing scheduled for this week on {getTemplate(job.templateId).name}.<br/>
-              {!job.started && "Set a start date on the job so the schedule can line up with real dates."}
+
+          {noStart && (
+            <div style={{background:"rgba(245,165,36,.1)",border:"1px solid #F5A524",borderRadius:11,padding:"12px 14px",marginBottom:14,fontSize:12,color:"#F5A524",lineHeight:1.5}}>
+              This job has no start date, so weeks can't line up with the schedule. Set one on the job first.
             </div>
           )}
+
+          {/* Add a task to this week — the bit that actually plans */}
+          {job && !noStart && (
+            <div style={{marginBottom:14}}>
+              {!adding ? (
+                <button onClick={()=>setAdding(true)}
+                  style={{display:"flex",alignItems:"center",justifyContent:"center",gap:7,width:"100%",background:Y,border:"none",borderRadius:11,padding:14,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG,letterSpacing:1}}>
+                  <Plus size={16}/> PUT A JOB IN THIS WEEK
+                </button>
+              ) : (
+                <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:12,padding:"13px 14px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:9}}>
+                    <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:1}}>ADD TO {weekRangeLabel(weekStart).toUpperCase()}</span>
+                    <button onClick={()=>{setAdding(false); setAddQ(""); setAddDaysBy({});}}
+                      style={{background:"none",border:"none",cursor:"pointer",padding:2}}><X size={15} color={MUTED}/></button>
+                  </div>
+                  <input value={addQ} onChange={e=>setAddQ(e.target.value)} placeholder="Search task number or description…"
+                    autoCorrect="off" autoCapitalize="none"
+                    style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"10px 12px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none",marginBottom:9}}/>
+                  <div style={{maxHeight:300,overflowY:"auto",border:`1px solid ${BDR}`,borderRadius:9}}>
+                    {addable.length===0 && <div style={{padding:"18px 12px",textAlign:"center",fontSize:12,color:MUTED}}>No tasks match.</div>}
+                    {addable.map(t => {
+                      const d = addDaysBy[t.id] ?? "";
+                      // Default the estimate to the task's hours at 9.5h/day.
+                      const suggested = Math.max(0.5, Math.round((t.est/9.5)*2)/2);
+                      return (
+                        <div key={t.id} style={{display:"flex",alignItems:"center",gap:9,borderBottom:`1px solid ${BDR}`,padding:"9px 11px"}}>
+                          <span style={{fontFamily:MONO,fontSize:11,color:Y,minWidth:38,flexShrink:0}}>{t.id}</span>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:13,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</div>
+                            <div style={{fontSize:10,color:MUTED,marginTop:1}}>{t.est}h est · suggest {suggested}d</div>
+                          </div>
+                          <input type="number" step="0.5" min="0.5" value={d} placeholder={String(suggested)}
+                            onChange={e=>setAddDaysBy({...addDaysBy, [t.id]: e.target.value})}
+                            style={{width:56,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"8px 4px",color:TXT,fontSize:13,fontFamily:MONO,textAlign:"center",outline:"none",flexShrink:0}}/>
+                          <button onClick={async()=>{
+                              await planTaskIntoWeek(job.id, t.id, weekStart, d===""?suggested:d);
+                              setAddDaysBy({...addDaysBy, [t.id]: undefined});
+                            }}
+                            style={{background:Y,border:"none",borderRadius:7,padding:"8px 11px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:BG,flexShrink:0}}>
+                            ADD
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{fontSize:10,color:MUTED,marginTop:8,lineHeight:1.5}}>
+                    Days is the estimate for how long it'll take. Adding a job sets its position on the Gantt chart to this week.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {job && !noStart && inWeek.length===0 && !adding && (
+            <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 20px",lineHeight:1.6}}>
+              Nothing scheduled for this week yet.
+            </div>
+          )}
+
           <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(auto-fill,minmax(340px,1fr))":"1fr",gap:12}}>
           {inWeek.map(r => {
             const t = taskOf(r.taskId);
             const parts = partsOfTask(r.taskId);
             const a = assignOf(job.id, r.taskId);
             const st = getStatus(job.id, r.taskId);
+            const planned = !!schedOv[eKey(job.id, r.taskId)];
             return (
               <div key={r.taskId} style={{background:CARD,border:`1px solid ${st==="completed"?GRN:(a?Y:BDR)}`,borderRadius:12,overflow:"hidden"}}>
                 <div style={{padding:"13px 14px",cursor:"pointer"}}
@@ -4339,7 +4458,8 @@ export default function App() {
                     <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{r.taskId}</span>
                     {st==="completed" && <HChip label="DONE" col={BG} bg={GRN}/>}
                     {st==="on_hold"   && <HChip label="ON HOLD" col={BG} bg="#F5A524"/>}
-                    <span style={{marginLeft:"auto",fontFamily:MONO,fontSize:12,color:MUTED}}>{t?.est||0}h</span>
+                    {planned && <HChip label="PLANNED" col={TXT} bg={BDR2}/>}
+                    <span style={{marginLeft:"auto",fontFamily:MONO,fontSize:12,color:MUTED}}>{r.dur}d · {t?.est||0}h</span>
                   </div>
                   <div style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT,lineHeight:1.3}}>{t?.desc||r.taskId}</div>
                   <div style={{fontSize:11,color:MUTED,marginTop:4}}>
@@ -4363,13 +4483,9 @@ export default function App() {
                 <div style={{display:"flex",borderTop:`1px solid ${BDR}`,alignItems:"center"}}>
                   {a ? (
                     <>
-                      <div style={{flex:1,padding:"9px 14px",fontSize:12,color:Y,fontFamily:FF,fontWeight:700}}>
-                        {a.techName || "Assigned"}
-                      </div>
+                      <div style={{flex:1,padding:"9px 14px",fontSize:12,color:Y,fontFamily:FF,fontWeight:700}}>{a.techName || "Assigned"}</div>
                       <button onClick={()=>unassignTask(job.id, r.taskId)}
-                        style={{background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"9px 14px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
-                        UNASSIGN
-                      </button>
+                        style={{background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"9px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>UNASSIGN</button>
                     </>
                   ) : (
                     <button onClick={()=>setPicking(r.taskId)}
@@ -4377,6 +4493,10 @@ export default function App() {
                       ASSIGN TO A TECH
                     </button>
                   )}
+                  <button onClick={()=>setEditSched({job, row:r})}
+                    style={{background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"9px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
+                    DAYS
+                  </button>
                 </div>
               </div>
             );
@@ -4405,6 +4525,7 @@ export default function App() {
       </div>
     );
   };
+
 
   const DashboardView = () => {
     const [range, setRange] = useState("all"); // all | 30 | 7
