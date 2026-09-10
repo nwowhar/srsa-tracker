@@ -297,6 +297,17 @@ const weekKey = iso => {
   const wk = Math.ceil((((t - y0)/86400000) + 1)/7);
   return `${t.getFullYear()}-W${String(wk).padStart(2,"0")}`;
 };
+const mondayOf = iso => {
+  const d = new Date((iso || today()) + "T00:00:00");
+  if (isNaN(d)) return today();
+  d.setDate(d.getDate() - ((d.getDay()+6)%7));
+  return d.toISOString().split("T")[0];
+};
+const addDays = (iso, n) => {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate()+n);
+  return d.toISOString().split("T")[0];
+};
 const weekRangeLabel = iso => {
   const d = new Date(iso + "T00:00:00");
   if (isNaN(d)) return "";
@@ -344,6 +355,117 @@ const TimeRow = ({s,setS,f,setF,b,setB}) => (
     </div>
   </div>
 );
+
+// ── Edit one bar on the Gantt: duration, fixed start, and dependencies ──
+// MODULE LEVEL — holds controlled text inputs.
+const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
+  const [dur, setDur]     = useState(String(row.dur ?? ""));
+  const [fixed, setFixed] = useState(row.fixedStart ?? "");
+  const [deps, setDeps]   = useState(row.deps || []);
+  const [picking, setPicking] = useState(false);
+  const [busy, setBusy]   = useState(false);
+  const task = tmpl.tasks.find(t => t.id === row.taskId);
+  const descOf = id => tmpl.tasks.find(t => t.id === id)?.desc || "";
+  const candidates = tmpl.schedule.map(s => s.taskId)
+    .filter(id => id !== row.taskId && !deps.some(d => d.id === id));
+
+  const save = async () => {
+    setBusy(true);
+    await onSave({
+      dur: parseFloat(dur) || 0,
+      fixedStart: fixed === "" ? null : parseFloat(fixed),
+      deps,
+    });
+    setBusy(false); onClose();
+  };
+  const reset = async () => { setBusy(true); await onReset(); setBusy(false); onClose(); };
+  const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 13px",color:TXT,fontSize:15,fontFamily:MONO,boxSizing:"border-box",outline:"none"};
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:120,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+         onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={{background:CARD,borderRadius:"18px 18px 0 0",padding:"20px 18px 26px",width:"100%",maxWidth:480,border:`1px solid ${BDR}`,boxSizing:"border-box",maxHeight:"88dvh",overflowY:"auto"}}>
+        <div style={{width:36,height:4,background:BDR2,borderRadius:2,margin:"0 auto 18px"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:18}}>
+          <div style={{minWidth:0}}>
+            <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{row.taskId}</div>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.2}}>{task?.desc || "Task"}</div>
+            {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h estimated</div>}
+          </div>
+          <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer",flexShrink:0}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        <div style={{marginBottom:16}}>
+          <CardLabel>DURATION (WORKING DAYS)</CardLabel>
+          <input type="number" step="0.1" min="0" value={dur} onChange={e=>setDur(e.target.value)} style={fld}/>
+        </div>
+
+        <div style={{marginBottom:16}}>
+          <CardLabel>EARLIEST START (DAYS FROM PROJECT START)</CardLabel>
+          <input type="number" step="0.5" min="0" value={fixed} onChange={e=>setFixed(e.target.value)}
+            placeholder="auto — follows the rules below" style={{...fld,fontSize:14}}/>
+          <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.4}}>
+            Leave blank to let the rules decide. Set a number to hold it back until at least that day.
+          </div>
+        </div>
+
+        <div style={{marginBottom:8}}>
+          <CardLabel>RULES</CardLabel>
+          {deps.length===0 && <div style={{fontSize:12,color:MUTED,padding:"8px 0 4px"}}>No rules — this can start at day {fixed||0}.</div>}
+          {deps.map((d,i) => (
+            <div key={d.id+i} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{d.id}</span>
+                <span style={{flex:1,fontSize:11,color:MUTED,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(d.id)}</span>
+                <button onClick={()=>setDeps(deps.filter((_,j)=>j!==i))}
+                  style={{background:"none",border:"none",cursor:"pointer",padding:2}}><X size={14} color={MUTED}/></button>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                {DEP_TYPES.map(dt => (
+                  <button key={dt.v} onClick={()=>setDeps(deps.map((x,j)=>j===i?{...x,type:dt.v}:x))}
+                    style={{display:"flex",alignItems:"center",gap:8,background:d.type===dt.v?"rgba(232,176,0,.12)":"transparent",border:`1px solid ${d.type===dt.v?Y:BDR}`,borderRadius:7,padding:"7px 10px",cursor:"pointer",textAlign:"left"}}>
+                    <div style={{width:13,height:13,borderRadius:"50%",border:`2px solid ${d.type===dt.v?Y:BDR2}`,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      {d.type===dt.v && <div style={{width:5,height:5,borderRadius:"50%",background:Y}}/>}
+                    </div>
+                    <span style={{fontSize:12,color:d.type===dt.v?TXT:MUTED}}>{dt.label}</span>
+                    <span style={{fontSize:10,color:MUTED,marginLeft:"auto"}}>{dt.hint}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {!picking ? (
+            <button onClick={()=>setPicking(true)}
+              style={{display:"flex",alignItems:"center",justifyContent:"center",gap:6,width:"100%",background:"none",border:`1px dashed ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1,marginTop:4}}>
+              <Plus size={13}/> ADD RULE
+            </button>
+          ) : (
+            <div style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px",marginTop:6,maxHeight:200,overflowY:"auto"}}>
+              <div style={{fontSize:11,color:MUTED,marginBottom:7}}>Which job does this depend on?</div>
+              {candidates.map(id => (
+                <button key={id} onClick={()=>{setDeps([...deps,{id,type:"after"}]); setPicking(false);}}
+                  style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"8px 4px",cursor:"pointer",textAlign:"left"}}>
+                  <span style={{fontFamily:MONO,fontSize:11,color:Y,flexShrink:0}}>{id}</span>
+                  <span style={{fontSize:11,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(id)}</span>
+                </button>
+              ))}
+              <button onClick={()=>setPicking(false)} style={{width:"100%",background:"none",border:"none",padding:"9px 0 2px",cursor:"pointer",fontSize:12,color:MUTED}}>Cancel</button>
+            </div>
+          )}
+        </div>
+
+        <div style={{display:"flex",gap:9,marginTop:18}}>
+          <button onClick={reset} disabled={busy}
+            style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"13px 16px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:700,color:MUTED,letterSpacing:1}}>RESET</button>
+          <button onClick={save} disabled={busy}
+            style={{flex:1,background:Y,border:"none",borderRadius:9,padding:13,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:BG,letterSpacing:1}}>
+            {busy?"SAVING…":"SAVE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                       onAddClient, onAddMachine, onSave, onClose, onUpload}) => {
@@ -1431,6 +1553,9 @@ export default function App() {
     unsubs.push(onSnapshot(collection(db,"machines"), snap => {
       setMachines(snap.docs.map(d => ({id:d.id, ...d.data()})));
     }, () => {}));
+    unsubs.push(onSnapshot(collection(db,"assignments"), snap => {
+      setAssigns(snap.docs.map(d => ({id:d.id, ...d.data()})));
+    }, () => {}));
     unsubs.push(onSnapshot(collection(db,"jobcards"), snap => {
       setJobCards(snap.docs.map(d => ({id:d.id, ...d.data()})));
     }, () => {}));
@@ -1480,6 +1605,7 @@ export default function App() {
   const [clients, setClients]         = useState([]);    // customer list for job cards
   const [machines, setMachines]       = useState([]);    // each client's fleet
   const [jobCards, setJobCards]       = useState([]);    // day-to-day job cards
+  const [assigns, setAssigns]         = useState([]);    // weekly task assignments to techs
   const [showCard, setShowCard]       = useState(false); // new card form open
   const [editCard, setEditCard]       = useState(null);  // card being edited
   const [editSched, setEditSched]     = useState(null);  // {job,row} being edited on the Gantt
@@ -1975,6 +2101,21 @@ export default function App() {
     await deleteDoc(doc(db,"jobcards",id));
     await deleteDoc(doc(db,"entries",`card_${id}`)).catch(()=>{});
   };
+  // Assign a scheduled task to a tech for a given week. Doc id keeps it unique
+  // per job+task so re-assigning replaces rather than stacking up.
+  const assignTask = async (jobId, taskId, tech, weekStart) => {
+    await setDoc(doc(db,"assignments", `${jobId}_${taskId}`), {
+      jobId, taskId,
+      techId: tech?.id || null, techName: tech?.name || "",
+      weekStart, assignedAt: Date.now(),
+    });
+  };
+  const unassignTask = async (jobId, taskId) => {
+    await deleteDoc(doc(db,"assignments", `${jobId}_${taskId}`)).catch(()=>{});
+  };
+  const assignOf = (jobId, taskId) => assigns.find(a => a.jobId===jobId && a.taskId===taskId);
+  const goPlan  = () => { setStack([]); setView("plan"); setSelJob(null); setSelSec(null); setSelTask(null); };
+
   const goCards = () => { setStack([]); setView("cards"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   const goUsers       = () => { setStack([]); setView("users"); setSelJob(null); setSelSec(null); setSelTask(null); };
@@ -2946,7 +3087,7 @@ export default function App() {
 
   const BottomNav = () => {
     const navItems = mode==="admin"
-      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASH",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:isAdminUser?"SIGN OUT":"SWITCH",Icon:LogOut,action:()=>isAdminUser?doSignOut():setMode("select"),active:false}]
+      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"PLAN",Icon:BarChart3,action:goPlan,active:view==="plan"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASH",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:isAdminUser?"SIGN OUT":"SWITCH",Icon:LogOut,action:()=>isAdminUser?doSignOut():setMode("select"),active:false}]
       : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SIGN OUT",Icon:LogOut,action:doSignOut,active:false}];
     const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
     if (isAdmin && isDesktop) return (
@@ -2987,13 +3128,53 @@ export default function App() {
           ? <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>Welcome, {myName}</div>
           : <div style={{fontFamily:FF,fontSize:11,color:MUTED,letterSpacing:2}}>TECHNICIAN VIEW</div>}
       </div>
+      {(() => {
+        // Work the supervisor has put on this tech's plate, newest week first.
+        const mine = assigns
+          .filter(a => me?.id && a.techId === me.id)
+          .filter(a => getStatus(a.jobId, a.taskId) !== "completed")
+          .sort((a,b) => (a.weekStart||"").localeCompare(b.weekStart||""));
+        if (!mine.length) return null;
+        return (
+          <div style={{padding:"14px 14px 0"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>ASSIGNED TO YOU</span>
+              <div style={{flex:1,height:1,background:BDR}}/>
+              <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{mine.length}</span>
+            </div>
+            {mine.map(a => {
+              const j = jobs.find(x => x.id === a.jobId);
+              const t = j ? tasksOf(j.id).find(x => x.id === a.taskId) : null;
+              const st = getStatus(a.jobId, a.taskId);
+              return (
+                <button key={a.id} onClick={()=>{ setSelJob(a.jobId); go("task",{job:a.jobId, sec:t?.sId, task:a.taskId}); }}
+                  style={{display:"flex",alignItems:"center",gap:11,width:"100%",textAlign:"left",background:CARD,border:`1px solid ${st==="on_hold"?"#F5A524":Y}`,borderRadius:11,padding:"12px 13px",marginBottom:8,cursor:"pointer"}}>
+                  <div style={{background:Y,borderRadius:7,minWidth:46,height:30,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+                    <span style={{fontFamily:MONO,fontSize:11,fontWeight:800,color:BG}}>{a.taskId}</span>
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontFamily:FF,fontSize:14,fontWeight:700,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                      {t?.desc || a.taskId}
+                    </div>
+                    <div style={{fontSize:10,color:MUTED,marginTop:2}}>
+                      {j?.client || ""}{a.weekStart?` · week of ${weekRangeLabel(a.weekStart)}`:""}{st==="on_hold"?" · ON HOLD":""}
+                    </div>
+                  </div>
+                  <ChevronRight size={16} color={MUTED}/>
+                </button>
+              );
+            })}
+          </div>
+        );
+      })()}
       <div style={{padding:"16px 14px"}}>
         <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2,marginBottom:12}}>ACTIVE JOBS</div>
         {jobs.map(j => (
           <div key={j.id} onClick={()=>go("job",{job:j.id})} style={{background:CARD,borderRadius:12,border:`1px solid ${BDR}`,overflow:"hidden",cursor:"pointer",marginBottom:10}}>
             <div style={{height:4,background:`linear-gradient(90deg,${Y},${YD})`}}/>
             <div style={{padding:16}}>
-              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.1,marginBottom:4}}>{j.make}{j.model?` ${j.model}`:""} Sprayer</div>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.1,marginBottom:4}}>{getTemplate(j.templateId).name}</div>
+              <div style={{fontSize:11,color:MUTED,marginBottom:4}}>{j.make}{j.model?` ${j.model}`:""}</div>
               <div style={{fontFamily:MONO,fontSize:12,color:Y,marginBottom:4}}>{j.serial}</div>
               <div style={{fontSize:12,color:MUTED}}>{j.client}</div>
               <div style={{display:"flex",alignItems:"center",justifyContent:"flex-end",marginTop:10}}>
@@ -3932,6 +4113,156 @@ export default function App() {
     );
   };
 
+  // ── Admin: weekly work plan ──
+  // Picks the tasks whose scheduled window overlaps the chosen week, lists the
+  // parts each one needs, and lets the supervisor assign them to a tech. Assigned
+  // work then shows on that tech's home screen with a direct link to the task.
+  const PlanView = () => {
+    const [weekStart, setWeekStart] = useState(mondayOf(today()));
+    const [planJob, setPlanJob]     = useState(jobs[0]?.id || "");
+    const [picking, setPicking]     = useState(null);   // task awaiting a tech
+    const job  = jobs.find(j => j.id === planJob);
+    const weekEnd = addDays(weekStart, 6);
+
+    // Which tasks land in this week, per the live schedule?
+    const rows = job ? schedRows(job.id) : [];
+    const {times} = rows.length ? computeSchedule(rows) : {times:{}};
+    const startISO = job?.started || weekStart;
+    // Convert a working-day offset into a calendar date from the job start.
+    const dateAtOffset = off => {
+      const d = new Date(startISO + "T00:00:00");
+      let left = Math.round(off);
+      while (left > 0) { d.setDate(d.getDate()+1); const w=d.getDay(); if (w!==0&&w!==6) left--; }
+      return d.toISOString().split("T")[0];
+    };
+    const inWeek = rows.map(r => {
+      const t = times[r.taskId] || {start:0,end:0};
+      return {...r, from: dateAtOffset(t.start), to: dateAtOffset(t.end), off:t};
+    }).filter(r => r.from <= weekEnd && r.to >= weekStart)
+      .sort((a,b) => a.from.localeCompare(b.from) || a.taskId.localeCompare(b.taskId));
+
+    const tmpl = job ? tmplOf(job.id) : null;
+    const taskOf  = id => tmpl?.tasks.find(t => t.id===id);
+    const partsOfTask = id => (tmpl?.parts || []).filter(p => p.taskId === id);
+    const totalHrs = inWeek.reduce((s,r)=>s+(taskOf(r.taskId)?.est||0), 0);
+
+    return (
+      <div style={{paddingBottom:24}}>
+        <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+              <ChevronLeft size={18} color={TXT}/>
+            </button>
+            <div style={{flex:1}}>
+              <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>WEEK PLAN</div>
+              <div style={{fontSize:11,color:MUTED}}>{weekRangeLabel(weekStart)} · {inWeek.length} job{inWeek.length===1?"":"s"} · {totalHrs}h</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <select value={planJob} onChange={e=>setPlanJob(e.target.value)}
+              style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",appearance:"none",minWidth:0}}>
+              {jobs.map(j => <option key={j.id} value={j.id}>{getTemplate(j.templateId).name} — {j.client}</option>)}
+            </select>
+            <button onClick={()=>setWeekStart(addDays(weekStart,-7))}
+              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"0 12px",cursor:"pointer",color:TXT}}>‹</button>
+            <input type="date" value={weekStart} onChange={e=>setWeekStart(mondayOf(e.target.value))}
+              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none"}}/>
+            <button onClick={()=>setWeekStart(addDays(weekStart,7))}
+              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"0 12px",cursor:"pointer",color:TXT}}>›</button>
+            <button onClick={()=>setWeekStart(mondayOf(today()))}
+              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"0 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED}}>THIS WEEK</button>
+          </div>
+        </div>
+
+        <div style={{padding: isDesktop?"16px 24px":"14px"}}>
+          {!job && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 0"}}>No jobs yet.</div>}
+          {job && inWeek.length===0 && (
+            <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 20px",lineHeight:1.6}}>
+              Nothing scheduled for this week on {getTemplate(job.templateId).name}.<br/>
+              {!job.started && "Set a start date on the job so the schedule can line up with real dates."}
+            </div>
+          )}
+          <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(auto-fill,minmax(340px,1fr))":"1fr",gap:12}}>
+          {inWeek.map(r => {
+            const t = taskOf(r.taskId);
+            const parts = partsOfTask(r.taskId);
+            const a = assignOf(job.id, r.taskId);
+            const st = getStatus(job.id, r.taskId);
+            return (
+              <div key={r.taskId} style={{background:CARD,border:`1px solid ${st==="completed"?GRN:(a?Y:BDR)}`,borderRadius:12,overflow:"hidden"}}>
+                <div style={{padding:"13px 14px",cursor:"pointer"}}
+                     onClick={()=>{ setSelJob(job.id); go("task",{job:job.id, sec:t?.sId, task:r.taskId}); }}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:6}}>
+                    <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{r.taskId}</span>
+                    {st==="completed" && <HChip label="DONE" col={BG} bg={GRN}/>}
+                    {st==="on_hold"   && <HChip label="ON HOLD" col={BG} bg="#F5A524"/>}
+                    <span style={{marginLeft:"auto",fontFamily:MONO,fontSize:12,color:MUTED}}>{t?.est||0}h</span>
+                  </div>
+                  <div style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT,lineHeight:1.3}}>{t?.desc||r.taskId}</div>
+                  <div style={{fontSize:11,color:MUTED,marginTop:4}}>
+                    {r.from === r.to ? r.from : `${r.from} → ${r.to}`}
+                    {r.deps?.length ? ` · after ${r.deps.map(d=>d.id).join(", ")}` : ""}
+                  </div>
+                  {parts.length>0 && (
+                    <div style={{marginTop:9,paddingTop:9,borderTop:`1px solid ${BDR}`}}>
+                      <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:5}}>PARTS NEEDED ({parts.length})</div>
+                      {parts.slice(0,6).map((p,i)=>(
+                        <div key={i} style={{display:"flex",gap:8,fontSize:11,marginBottom:3}}>
+                          <span style={{fontFamily:MONO,color:MUTED,minWidth:70,flexShrink:0}}>{p.pn||"—"}</span>
+                          <span style={{color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.desc}</span>
+                          <span style={{fontFamily:MONO,color:MUTED}}>×{p.qty}</span>
+                        </div>
+                      ))}
+                      {parts.length>6 && <div style={{fontSize:10,color:MUTED,marginTop:3}}>+{parts.length-6} more</div>}
+                    </div>
+                  )}
+                </div>
+                <div style={{display:"flex",borderTop:`1px solid ${BDR}`,alignItems:"center"}}>
+                  {a ? (
+                    <>
+                      <div style={{flex:1,padding:"9px 14px",fontSize:12,color:Y,fontFamily:FF,fontWeight:700}}>
+                        {a.techName || "Assigned"}
+                      </div>
+                      <button onClick={()=>unassignTask(job.id, r.taskId)}
+                        style={{background:"transparent",border:"none",borderLeft:`1px solid ${BDR}`,padding:"9px 14px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
+                        UNASSIGN
+                      </button>
+                    </>
+                  ) : (
+                    <button onClick={()=>setPicking(r.taskId)}
+                      style={{flex:1,background:"transparent",border:"none",padding:"9px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:1}}>
+                      ASSIGN TO A TECH
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          </div>
+        </div>
+
+        {picking && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:20,maxWidth:340,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:16,fontWeight:800,color:TXT,marginBottom:4}}>ASSIGN {picking}</div>
+              <div style={{fontSize:12,color:MUTED,marginBottom:14}}>{taskOf(picking)?.desc}</div>
+              {approvedTechs.length===0 && <div style={{fontSize:12,color:MUTED,padding:"10px 0"}}>No approved techs yet.</div>}
+              {approvedTechs.map(t => (
+                <button key={t.id} onClick={()=>{ assignTask(job.id, picking, t, weekStart); setPicking(null); }}
+                  style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"12px 14px",marginBottom:7,cursor:"pointer",textAlign:"left"}}>
+                  <span style={{fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>{t.name}</span>
+                  <ChevronRight size={15} color={MUTED}/>
+                </button>
+              ))}
+              <button onClick={()=>setPicking(null)}
+                style={{width:"100%",marginTop:6,background:"none",border:`1px solid ${BDR2}`,borderRadius:8,padding:11,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:MUTED}}>CANCEL</button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const DashboardView = () => {
     const [range, setRange] = useState("all"); // all | 30 | 7
     const [dashJob, setDashJob] = useState("all"); // "all" | jobId
@@ -4499,7 +4830,7 @@ export default function App() {
           .app-shell { max-width:420px; box-shadow:0 0 60px rgba(0,0,0,.5); border-left:1px solid #272A35; border-right:1px solid #272A35; }
         }
       `}</style>
-      <div style={{width:"100%",maxWidth: isAdmin&&isDesktop?"1100px":"480px",display:"flex",flexDirection:"column",minHeight:"100dvh",boxShadow: isDesktop?"0 0 60px rgba(0,0,0,.5)":"none",borderLeft: isDesktop?`1px solid ${BDR}`:"none",borderRight: isDesktop?`1px solid ${BDR}`:"none"}}>
+      <div style={{width:"100%",maxWidth: isAdmin&&isDesktop?"none":"480px",display:"flex",flexDirection:"column",minHeight:"100dvh",boxShadow: (isDesktop&&!isAdmin)?"0 0 60px rgba(0,0,0,.5)":"none",borderLeft: (isDesktop&&!isAdmin)?`1px solid ${BDR}`:"none",borderRight: (isDesktop&&!isAdmin)?`1px solid ${BDR}`:"none"}}>
       <div style={{flex:1,overflowY:"auto",paddingBottom: (isAdmin && isDesktop) ? 0 : 72}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
@@ -4510,6 +4841,7 @@ export default function App() {
           {view==="dashboard" && <DashboardView/>}
           {view==="users"     && <AdminUsersView/>}
           {view==="cards"     && <AdminCardsView/>}
+          {view==="plan"      && <PlanView/>}
         </>) : (<>
           {view==="jobs"    && <TechJobsView/>}
           {view==="hoses"   && <TechHosesView/>}
