@@ -6,6 +6,7 @@ import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "fire
 import { getAuth, signInAnonymously, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut, sendPasswordResetEmail } from "firebase/auth";
 import { PRICE_ITEMS } from "./priceList.js";
 import { MACHINES, MACHINE_LIST, DEFAULT_TEMPLATE, getTemplate } from "./templates.js";
+import { CLIENT_SEED } from "./clientSeed.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDvvwcT083aF2H5SiuSvvDyWepwpfkMQO0",
@@ -385,6 +386,13 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
   const [confirm, setConfirm] = useState(false);
   const camRef = useRef(); const galRef = useRef();
 
+  const [clientQ, setClientQ] = useState("");
+  // Narrow the picker, but never hide the client that's already selected.
+  const shownClients = (() => {
+    const q = clientQ.trim().toLowerCase();
+    if (!q) return clients;
+    return clients.filter(c => (c.name||"").toLowerCase().includes(q) || c.id === clientId);
+  })();
   const [addingClient, setAddingClient] = useState(false);
   const [clientErr, setClientErr] = useState("");
   const addClientNow = async () => {
@@ -502,11 +510,24 @@ const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
 
           <div style={{marginTop:18}}>
             <L>CLIENT</L>
+            {/* With 300+ clients a plain dropdown is unusable on a phone, so the
+                list is filtered by a search box that appears once it gets long. */}
+            {clients.length > 12 && clientId !== "__new" && (
+              <input value={clientQ} onChange={e=>setClientQ(e.target.value)}
+                placeholder="Type to narrow the list…"
+                autoCorrect="off" autoCapitalize="none"
+                style={{...fld,marginBottom:8,fontSize:14}}/>
+            )}
             <select value={clientId} onChange={e=>{ setClientId(e.target.value); setMachineId(""); }} style={sel}>
               <option value="">— select client —</option>
-              {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {shownClients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               <option value="__new">+ Add a new client…</option>
             </select>
+            {clientQ.trim() && shownClients.length===0 && (
+              <div style={{fontSize:11,color:MUTED,marginTop:6}}>
+                No client matches “{clientQ}”. Pick “Add a new client” to create one.
+              </div>
+            )}
             {clientId === "__new" && (
               <div style={{marginTop:8}}>
                 <div style={{display:"flex",gap:8}}>
@@ -1892,6 +1913,32 @@ export default function App() {
     const ref = await addDoc(collection(db,"clients"), {name:name.trim(), createdAt:Date.now()});
     return ref.id;
   };
+  // One-off bulk import of the accounting system's customer list. Safe to run
+  // more than once: anything already present (matched on lowercased name) is
+  // skipped, so it tops up rather than duplicating.
+  const importClients = async onProgress => {
+    const have = new Set(clients.map(c => (c.name||"").trim().toLowerCase()));
+    const todo = CLIENT_SEED.filter(c => !have.has(c.name.trim().toLowerCase()));
+    for (let i = 0; i < todo.length; i += 400) {
+      const batch = writeBatch(db);
+      todo.slice(i, i+400).forEach(c => {
+        batch.set(doc(collection(db,"clients")), {
+          name: c.name,
+          customerNo: c.num || "",
+          contact: c.contact || "",
+          phone: c.phone || "",
+          email: c.email || "",
+          address: c.addr || "",
+          createdAt: Date.now(),
+          importedAt: Date.now(),
+        });
+      });
+      await batch.commit();
+      onProgress?.(Math.min(i+400, todo.length), todo.length);
+    }
+    return todo.length;
+  };
+
   const addMachine = async (clientId, m) => {
     const ref = await addDoc(collection(db,"machines"), {clientId, ...m, createdAt:Date.now()});
     return ref.id;
@@ -3717,6 +3764,10 @@ export default function App() {
     const [fBiz, setFBiz]   = useState("");   // burnbank | srsa
     const [group, setGroup] = useState("day");  // day | week | tech
     const [confirmDel, setConfirmDel] = useState(null);
+    const [impBusy, setImpBusy] = useState(false);
+    const [impMsg, setImpMsg]   = useState("");
+    const notImported = CLIENT_SEED.filter(c =>
+      !clients.some(x => (x.name||"").trim().toLowerCase() === c.name.trim().toLowerCase())).length;
 
     const filtered = jobCards
       .filter(c => (!from || (c.date||"") >= from) && (!to || (c.date||"") <= to))
@@ -3804,6 +3855,29 @@ export default function App() {
         </div>
 
         <div style={{padding:"14px"}}>
+          {/* Client list import — only shown while there's something left to bring in. */}
+          {notImported > 0 && (
+            <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:12,padding:"13px 14px",marginBottom:14}}>
+              <div style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:1,marginBottom:4}}>CLIENT LIST</div>
+              <div style={{fontSize:12,color:MUTED,lineHeight:1.5,marginBottom:11}}>
+                {notImported} customer{notImported===1?"":"s"} from the accounting export {notImported===1?"isn't":"aren't"} in the app yet.
+                Importing adds them with contact, phone, email and address. Existing clients are left alone.
+              </div>
+              {impMsg && <div style={{fontSize:12,color:GRN,marginBottom:10}}>{impMsg}</div>}
+              <button disabled={impBusy}
+                onClick={async()=>{
+                  setImpBusy(true); setImpMsg("");
+                  try {
+                    const n = await importClients((done,total)=>setImpMsg(`Importing ${done} of ${total}…`));
+                    setImpMsg(`Imported ${n} client${n===1?"":"s"}.`);
+                  } catch (e) { setImpMsg(`Import failed (${e?.code||"unknown"}).`); }
+                  setImpBusy(false);
+                }}
+                style={{width:"100%",background:Y,border:"none",borderRadius:9,padding:12,cursor:impBusy?"default":"pointer",fontFamily:FF,fontSize:13,fontWeight:800,color:BG,letterSpacing:1}}>
+                {impBusy ? "IMPORTING…" : `IMPORT ${notImported} CLIENTS`}
+              </button>
+            </div>
+          )}
           {techTotals.length>0 && (
             <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"12px 14px",marginBottom:14}}>
               <div style={{fontFamily:FF,fontSize:10,fontWeight:800,color:Y,letterSpacing:2,marginBottom:9}}>HOURS PER TECH</div>
