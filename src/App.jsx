@@ -467,6 +467,113 @@ const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
   );
 };
 
+// ── Split / move a time entry onto another task ──
+// MODULE LEVEL — controlled inputs, must survive App re-renders.
+const SplitEntryModal = ({entry, jobs, tasksForJob, secsForJob, onSplit, onClose}) => {
+  const [hours, setHours] = useState(String(entry.hours));
+  const [destJob, setDestJob] = useState(entry.jobId);
+  const [destTask, setDestTask] = useState("");
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const orig = Number(entry.hours) || 0;
+  const move = Number(hours) || 0;
+  const remain = Math.round((orig - move)*100)/100;
+  const tasks = tasksForJob(destJob);
+  const secs  = secsForJob(destJob);
+  const shown = (() => {
+    const s = q.trim().toLowerCase();
+    const pool = tasks.filter(t => !(destJob===entry.jobId && t.id===entry.taskId));
+    if (!s) return pool.slice(0, 60);
+    return pool.filter(t => t.id.toLowerCase().includes(s) || (t.desc||"").toLowerCase().includes(s)).slice(0, 60);
+  })();
+  const ok = move > 0 && move <= orig && destTask;
+
+  const go = async () => {
+    if (!ok || busy) return;
+    setBusy(true); setErr("");
+    try { await onSplit(entry, move, destJob, destTask); onClose(); }
+    catch (e) { setErr(`Couldn't move that (${e?.code || e?.message || "unknown"}).`); setBusy(false); }
+  };
+  const fld = {width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 13px",color:TXT,fontSize:15,boxSizing:"border-box",outline:"none"};
+
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:120,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+         onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={{background:CARD,borderRadius:"18px 18px 0 0",padding:"20px 18px 26px",width:"100%",maxWidth:480,border:`1px solid ${BDR}`,boxSizing:"border-box",maxHeight:"90dvh",overflowY:"auto"}}>
+        <div style={{width:36,height:4,background:BDR2,borderRadius:2,margin:"0 auto 18px"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+          <div>
+            <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT}}>MOVE HOURS</div>
+            <div style={{fontSize:12,color:MUTED,marginTop:3}}>
+              {orig}h on {entry.taskId}{entry.worker?` · ${entry.worker}`:""} · {entry.date}
+            </div>
+          </div>
+          <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer"}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        {err && <div style={{background:"rgba(255,76,76,.1)",border:`1px solid ${RED}`,borderRadius:9,padding:"10px 12px",marginBottom:14,fontSize:12,color:RED}}>{err}</div>}
+
+        <CardLabel>HOW MANY HOURS TO MOVE?</CardLabel>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <input type="number" inputMode="decimal" step="0.25" min="0" max={orig}
+            value={hours} onChange={e=>setHours(e.target.value)} style={{...fld,flex:1,fontFamily:MONO,fontSize:18}}/>
+          <button onClick={()=>setHours(String(orig))}
+            style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"11px 14px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1,whiteSpace:"nowrap"}}>
+            ALL {orig}h
+          </button>
+        </div>
+        <div style={{background:CARD2,borderRadius:9,padding:"10px 12px",marginTop:9,fontSize:12,color:MUTED,lineHeight:1.6}}>
+          {move<=0 || move>orig
+            ? <span style={{color:RED}}>Enter between 0 and {orig} hours.</span>
+            : move===orig
+              ? <>The whole entry moves across. Nothing stays on <span style={{fontFamily:MONO,color:TXT}}>{entry.taskId}</span>.</>
+              : <>
+                  <span style={{fontFamily:MONO,color:Y}}>{move}h</span> moves across ·{" "}
+                  <span style={{fontFamily:MONO,color:TXT}}>{remain}h</span> stays on {entry.taskId}
+                </>}
+        </div>
+
+        <div style={{marginTop:18}}>
+          <CardLabel>MOVE IT TO</CardLabel>
+          {jobs.length>1 && (
+            <select value={destJob} onChange={e=>{setDestJob(e.target.value); setDestTask("");}}
+              style={{...fld,appearance:"none",marginBottom:8,fontSize:14}}>
+              {jobs.map(j => <option key={j.id} value={j.id}>{j.client} — {j.serial}</option>)}
+            </select>
+          )}
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search task number or description…"
+            autoCorrect="off" autoCapitalize="none" style={{...fld,marginBottom:8,fontSize:14}}/>
+          <div style={{maxHeight:260,overflowY:"auto",border:`1px solid ${BDR}`,borderRadius:9}}>
+            {shown.length===0 && <div style={{padding:"18px 12px",textAlign:"center",fontSize:12,color:MUTED}}>No tasks match.</div>}
+            {shown.map(t => {
+              const on = destTask===t.id;
+              const sec = secs.find(s => s.id===t.sId);
+              return (
+                <button key={t.id} onClick={()=>setDestTask(t.id)}
+                  style={{display:"flex",alignItems:"center",gap:10,width:"100%",textAlign:"left",background:on?"rgba(232,176,0,.12)":"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"10px 12px",cursor:"pointer"}}>
+                  <span style={{fontFamily:MONO,fontSize:11,color:on?Y:MUTED,minWidth:38,flexShrink:0}}>{t.id}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</div>
+                    <div style={{fontSize:10,color:MUTED,marginTop:1}}>{sec?.id}. {sec?.name}</div>
+                  </div>
+                  {on && <span style={{color:Y,fontSize:14,fontWeight:800}}>✓</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <button onClick={go} disabled={!ok||busy}
+          style={{width:"100%",marginTop:18,background:ok?Y:BDR2,border:"none",borderRadius:10,padding:14,cursor:ok?"pointer":"default",fontFamily:FF,fontSize:15,fontWeight:800,color:ok?BG:MUTED,letterSpacing:1}}>
+          {busy ? "MOVING…" : (move===orig ? "MOVE ENTRY" : `MOVE ${move||0}h`)}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 const JobCardForm = ({initial, clients, machines, jobs, tasksForJob, me,
                       onAddClient, onAddMachine, onSave, onClose, onUpload}) => {
   const editing = !!initial;
@@ -1633,6 +1740,7 @@ export default function App() {
   const [ctForm, setCtForm]           = useState({desc:"",est:"",cost:"",opt:false});
   const [showAdd, setShowAdd]     = useState(false);
   const [editEntry, setEditEntry]   = useState(null);
+  const [splitEntry, setSplitEntry] = useState(null);  // time entry being split/moved
   const [showJob, setShowJob]     = useState(false);
   const [editJob, setEditJob]     = useState(null);
   const [jForm, setJForm]         = useState({client:"",serial:"",make:"John Deere",model:"",started:today()});
@@ -1802,6 +1910,27 @@ export default function App() {
     setShowAdd(false); setHForm({hours:"",notes:"",date:today(),worker:""});
   };
   const delEntry = async (jid, tid, id) => { await deleteDoc(doc(db,"entries",id)); };
+
+  // Move some (or all) of an entry's hours onto another task. Moving the whole
+  // lot deletes the original; a partial move leaves the remainder behind.
+  const splitMoveEntry = async (entry, hoursToMove, destJobId, destTaskId) => {
+    const move = Math.round(Number(hoursToMove)*100)/100;
+    const orig = Number(entry.hours) || 0;
+    if (!(move > 0) || move > orig) throw new Error("invalid split");
+    await addDoc(collection(db,"entries"), {
+      jobId: destJobId, taskId: destTaskId,
+      hours: move,
+      rate: entry.rate || jobs.find(j=>j.id===destJobId)?.lockedRate || hourlyRate,
+      date: entry.date, worker: entry.worker || "", workerId: entry.workerId || null,
+      notes: entry.notes ? `${entry.notes} (moved from ${entry.taskId})` : `Moved from ${entry.taskId}`,
+    });
+    if (move === orig) {
+      await deleteDoc(doc(db,"entries", entry.id));
+    } else {
+      await setDoc(doc(db,"entries", entry.id),
+        {hours: Math.round((orig-move)*100)/100}, {merge:true});
+    }
+  };
   const updateEntry = async (id, data) => {
     await setDoc(doc(db,"entries",id), data, {merge:true});
     setEditEntry(null);
@@ -3662,7 +3791,13 @@ export default function App() {
                 {e.notes&&<div style={{fontSize:12,color:MUTED,marginBottom:2}}>{e.notes}</div>}
                 <div style={{fontFamily:MONO,fontSize:10,color:BDR2}}>{e.worker}</div>
               </div>
-              <div style={{fontFamily:FF,fontSize:11,color:MUTED,marginLeft:8}}>EDIT →</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6,marginLeft:8,flexShrink:0}}>
+                <div style={{fontFamily:FF,fontSize:11,color:MUTED,textAlign:"right"}}>EDIT →</div>
+                <button onClick={ev=>{ ev.stopPropagation(); setSplitEntry(e); }}
+                  style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:6,padding:"5px 9px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:.5,color:Y,whiteSpace:"nowrap"}}>
+                  SPLIT / MOVE
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -4871,6 +5006,11 @@ export default function App() {
           onAddClient={addClient} onAddMachine={addMachine}
           onUpload={uploadCardPhotos} onSave={saveCard}
           onClose={()=>{ setShowCard(false); setEditCard(null); }}/>
+      )}
+      {splitEntry && (
+        <SplitEntryModal entry={splitEntry} jobs={jobs}
+          tasksForJob={tasksForJob} secsForJob={secsOf}
+          onSplit={splitMoveEntry} onClose={()=>setSplitEntry(null)}/>
       )}
       {editSched && (
         <ScheduleEditor {...editSched}
