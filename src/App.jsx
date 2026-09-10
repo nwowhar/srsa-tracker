@@ -280,6 +280,13 @@ const spanHours = (start, finish, breakMin=0) => {
   return mins > 0 ? Math.round(mins/60*100)/100 : 0;
 };
 const fmtHrs = h => `${(Number(h)||0).toFixed(2)}h`;
+// Photos taken before the `date` field existed only have an en-AU timestamp
+// string ("11/09/2026, 7:28:00 am"), so fall back to parsing that.
+const photoDate = p => {
+  if (p?.date) return p.date;
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(p?.ts || "");
+  return m ? `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}` : "";
+};
 // Quarter-hour slots — a dropdown beats a native time picker on a phone with gloves.
 const TIME_SLOTS = (() => {
   const out = [];
@@ -1960,7 +1967,8 @@ export default function App() {
         await addDoc(collection(db,"photos"), {
           jobId:selJob, taskId:selTask,
           url, name:f.name, storagePath:snap.ref.fullPath,
-          ts:new Date().toLocaleString("en-AU")
+          ts:new Date().toLocaleString("en-AU"),
+          date: today()   // sortable ISO date for day-by-day views
         });
       }
     } catch(err) {
@@ -4401,6 +4409,7 @@ export default function App() {
   const DashboardView = () => {
     const [range, setRange] = useState("all"); // all | 30 | 7
     const [dashJob, setDashJob] = useState("all"); // "all" | jobId
+    const [pickedDay, setPickedDay] = useState(null); // heatmap day drill-down
     const cutoff = range==="all" ? null
       : new Date(Date.now() - (range==="30"?30:7)*864e5).toISOString().split("T")[0];
     const inRange = d => !cutoff || (d||"") >= cutoff;
@@ -4477,7 +4486,7 @@ export default function App() {
       </div>
     );
     // ── Calendar heatmap: one square per day, shade by hours logged ──
-    const CalendarHeatmap = ({byDate, weeks=18}) => {
+    const CalendarHeatmap = ({byDate, weeks=18, onPick, selected}) => {
       const today = new Date();
       // Walk back to the Monday that starts the earliest visible week.
       const end = new Date(today); end.setHours(0,0,0,0);
@@ -4522,7 +4531,10 @@ export default function App() {
             ) : null)}
             {cols.map((days,w) => days.map((day,d) => day && (
               <rect key={`${w}-${d}`} x={LBL+w*(CELL+GAP)} y={TOP+d*(CELL+GAP)}
-                width={CELL} height={CELL} rx="2.5" fill={shade(day.h)}>
+                width={CELL} height={CELL} rx="2.5" fill={shade(day.h)}
+                stroke={selected===day.iso ? Y : "none"} strokeWidth={selected===day.iso ? 1.6 : 0}
+                style={{cursor:"pointer"}}
+                onClick={()=>onPick && onPick(selected===day.iso ? null : day.iso)}>
                 <title>{day.iso} — {day.h ? `${day.h.toFixed(1)}h` : "no hours"}</title>
               </rect>
             )))}
@@ -4813,8 +4825,91 @@ export default function App() {
             </div>
           </Section>
 
-          <Section title="WORK CALENDAR" right={daysWorked?`${daysWorked} days worked`:""}>
-            <CalendarHeatmap byDate={hoursByDate}/>
+          <Section title="WORK CALENDAR" right={pickedDay ? "tap the square again to close" : (daysWorked?`${daysWorked} days worked — tap a day`:"")}>
+            <CalendarHeatmap byDate={hoursByDate} onPick={setPickedDay} selected={pickedDay}/>
+            {pickedDay && (() => {
+              // Everything that happened on the chosen day, within the current job scope.
+              const dayEntries = allEntries.filter(e => e.date === pickedDay);
+              const dayHoses   = hoses.filter(h => inJob(h.jobId) && h.date === pickedDay);
+              const dayCards   = jobCards.filter(c => c.date === pickedDay);
+              const dayPhotos  = [];
+              Object.entries(photos).forEach(([k, arr]) => {
+                const jid = k.split("_")[0];
+                if (!inJob(jid)) return;
+                arr.forEach(p => { if (photoDate(p) === pickedDay) dayPhotos.push({...p, jobId:jid}); });
+              });
+              const dayHours = dayEntries.reduce((s,e)=>s+(Number(e.hours)||0), 0);
+              const nothing = !dayEntries.length && !dayHoses.length && !dayCards.length && !dayPhotos.length;
+              const taskDesc = (jid, tid) => tasksOf(jid).find(t=>t.id===tid)?.desc || tid;
+
+              return (
+                <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:11,padding:"14px 15px",marginTop:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:12}}>
+                    <span style={{fontFamily:FF,fontSize:14,fontWeight:800,color:TXT}}>{pickedDay}</span>
+                    <span style={{fontFamily:MONO,fontSize:14,color:Y}}>{dayHours?fmtHrs(dayHours):"no hours"}</span>
+                  </div>
+                  {nothing && <div style={{fontSize:12,color:MUTED,padding:"8px 0"}}>Nothing logged on this day.</div>}
+
+                  {dayEntries.length>0 && (
+                    <div style={{marginBottom:14}}>
+                      <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:7}}>HOURS LOGGED</div>
+                      {dayEntries.map(e => (
+                        <div key={e.id} onClick={()=>{ setSelJob(e.jobId); go("task",{job:e.jobId, sec:tasksOf(e.jobId).find(t=>t.id===e.taskId)?.sId, task:e.taskId}); }}
+                          style={{display:"flex",alignItems:"center",gap:10,background:CARD2,borderRadius:8,padding:"9px 11px",marginBottom:6,cursor:"pointer"}}>
+                          <span style={{fontFamily:MONO,fontSize:12,color:Y,minWidth:38}}>{e.taskId}</span>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:12,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{taskDesc(e.jobId, e.taskId)}</div>
+                            {e.worker && <div style={{fontSize:10,color:MUTED,marginTop:1}}>{e.worker}</div>}
+                          </div>
+                          <span style={{fontFamily:MONO,fontSize:13,color:TXT}}>{e.hours}h</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {dayCards.length>0 && (
+                    <div style={{marginBottom:14}}>
+                      <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:7}}>JOB CARDS</div>
+                      {dayCards.map(c => (
+                        <div key={c.id} style={{background:CARD2,borderRadius:8,padding:"9px 11px",marginBottom:6}}>
+                          <div style={{display:"flex",justifyContent:"space-between",gap:8}}>
+                            <span style={{fontSize:12,color:TXT}}>{clientName(c.clientId)}</span>
+                            <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{fmtHrs(c.hours)}</span>
+                          </div>
+                          <div style={{fontSize:10,color:MUTED,marginTop:2}}>{c.worker}{c.jobNo?` · job ${c.jobNo}`:""}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {dayHoses.length>0 && (
+                    <div style={{marginBottom:14}}>
+                      <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:7}}>HOSES MADE</div>
+                      {dayHoses.map(h => (
+                        <div key={h.id} style={{display:"flex",justifyContent:"space-between",gap:8,background:CARD2,borderRadius:8,padding:"9px 11px",marginBottom:6}}>
+                          <span style={{fontSize:12,color:TXT}}>{lenMm(h)}mm {h.hose?.itemNo||""}</span>
+                          <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{fmt$(hoseCalc(h).total)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {dayPhotos.length>0 && (
+                    <div>
+                      <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:7}}>PHOTOS ({dayPhotos.length})</div>
+                      <div style={{display:"flex",gap:7,flexWrap:"wrap"}}>
+                        {dayPhotos.slice(0,18).map((p,i) => (
+                          <a key={i} href={p.url} target="_blank" rel="noreferrer" title={`${p.taskId} — ${p.ts||""}`}>
+                            <img src={p.url} alt="" style={{width:62,height:62,objectFit:"cover",borderRadius:7,border:`1px solid ${BDR2}`,display:"block"}}/>
+                          </a>
+                        ))}
+                      </div>
+                      {dayPhotos.length>18 && <div style={{fontSize:10,color:MUTED,marginTop:6}}>+{dayPhotos.length-18} more</div>}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </Section>
 
           <Section title="HOURS OVER TIME" right={avgPerDay?`${avgPerDay.toFixed(1)}h avg/day`:""}>
