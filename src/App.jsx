@@ -5060,7 +5060,7 @@ export default function App() {
           .app-shell { max-width:420px; box-shadow:0 0 60px rgba(0,0,0,.5); border-left:1px solid #272A35; border-right:1px solid #272A35; }
         }
       `}</style>
-      <div style={{width:"100%",maxWidth: isAdmin&&isDesktop?"none":"480px",display:"flex",flexDirection:"column",minHeight:"100dvh",boxShadow: (isDesktop&&!isAdmin)?"0 0 60px rgba(0,0,0,.5)":"none",borderLeft: (isDesktop&&!isAdmin)?`1px solid ${BDR}`:"none",borderRight: (isDesktop&&!isAdmin)?`1px solid ${BDR}`:"none"}}>
+      <div style={{width:"100%",maxWidth: isAdmin&&isDesktop?"1100px":"480px",display:"flex",flexDirection:"column",minHeight:"100dvh",boxShadow: isDesktop?"0 0 60px rgba(0,0,0,.5)":"none",borderLeft: isDesktop?`1px solid ${BDR}`:"none",borderRight: isDesktop?`1px solid ${BDR}`:"none"}}>
       <div style={{flex:1,overflowY:"auto",paddingBottom: (isAdmin && isDesktop) ? 0 : 72}}>
         {isAdmin ? (<>
           {view==="jobs"      && <AdminJobsView/>}
