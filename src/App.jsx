@@ -194,7 +194,8 @@ const barDates = (anchorISO, start, end) => ({
   to:   calAddDays(anchorISO, Math.max(Math.floor(start), Math.ceil(end - 1e-6) - 1)),
 });
 // Survives GanttView remounting on every App render (scroll position, one-off migration).
-const ganttUI = { el: null, jobId: null, zoom: null, scrollLeft: null, migrated: new Set() };
+const ganttUI = { el: null, jobId: null, zoom: null, scrollLeft: null, migrated: new Set(),
+                  drag: null, suppressClick: false, toastTimer: null };
 const DOW_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const DEP_TYPES = [
   {v:"after",   label:"Starts after",        hint:"begins when that job finishes"},
@@ -1872,6 +1873,7 @@ export default function App() {
   const [editSched, setEditSched]     = useState(null);  // {job,row} being edited on the Gantt
   const [ganttJobId, setGanttJobId]   = useState(null);  // kept here so saving a bar doesn't reset the Gantt
   const [ganttZoom, setGanttZoom]     = useState(44);    // px per calendar day
+  const [ganttToast, setGanttToast]   = useState(null);  // {text, jobId, taskId, before} after a drag, for UNDO
   const [showHoseBuilder, setShowHoseBuilder] = useState(false);
   const [confirmHoseDel, setConfirmHoseDel]   = useState(null); // hose pending delete (tech view)
   const [editHose, setEditHose]               = useState(null); // hose being edited (tech view)
@@ -2010,6 +2012,43 @@ export default function App() {
       plannedWeek: weekStartISO,
     });
   };
+  // ── Gantt drag commits ──
+  // Dropping a bar pins it to that date. Soft rules ("starts after", "runs
+  // alongside") on that job are removed so it lands where it was dropped; hard
+  // "can't start until" gates stay. Jobs that follow it move with it.
+  const flashGantt = toast => {
+    clearTimeout(ganttUI.toastTimer);
+    setGanttToast(toast);
+    ganttUI.toastTimer = setTimeout(() => setGanttToast(null), 7000);
+  };
+  const moveBarTo = async (job, row, startISO) => {
+    const key    = eKey(job.id, row.taskId);
+    const before = schedOv[key] ? {...schedOv[key]} : null;
+    const keep   = (row.deps||[]).filter(d => d.type === "blocked");
+    const gone   = (row.deps||[]).filter(d => d.type !== "blocked");
+    await saveSchedRow(job.id, row.taskId, {startDate: startISO, fixedStart: null, deps: keep});
+    const dow = DOW_SHORT[parseISO(startISO).getDay()];
+    flashGantt({jobId: job.id, taskId: row.taskId, before,
+      text: `${row.taskId} → ${dow} ${fmtDMY(startISO)}` +
+            (gone.length ? ` · rule on ${gone.map(d=>d.id).join(", ")} removed` : "") +
+            (keep.length ? ` · still waits for ${keep.map(d=>d.id).join(", ")}` : "")});
+  };
+  const resizeBarTo = async (job, row, hours) => {
+    const key    = eKey(job.id, row.taskId);
+    const before = schedOv[key] ? {...schedOv[key]} : null;
+    const dur = Math.round(hours / GANTT_HRS_PER_DAY * 100) / 100;
+    await saveSchedRow(job.id, row.taskId, {dur: hours === row.est ? null : dur});
+    flashGantt({jobId: job.id, taskId: row.taskId, before,
+      text: `${row.taskId} → ${hours}h${hours === row.est ? " (back to sheet)" : ` (sheet ${row.est}h)`}`});
+  };
+  const undoGantt = async t => {
+    if (!t) return;
+    const ref_ = doc(db, "schedule", eKey(t.jobId, t.taskId));
+    if (t.before) { const {id, ...data} = t.before; await setDoc(ref_, data); }
+    else await deleteDoc(ref_);
+    clearTimeout(ganttUI.toastTimer); setGanttToast(null);
+  };
+
   const saveSchedRow = async (jid, taskId, patch) => {
     await setDoc(doc(db,"schedule", eKey(jid, taskId)),
       {jobId:jid, taskId, ...patch}, {merge:true});
@@ -4579,6 +4618,15 @@ export default function App() {
   // Tapping a bar opens the editor to set a start date, duration and rules.
   // The job column stays frozen while the dates scroll.
   const HRS_PER_DAY = GANTT_HRS_PER_DAY;
+  const GanttToast = () => ganttToast && (
+    <div style={{position:"fixed",left:"50%",transform:"translateX(-50%)",bottom:isDesktop?24:84,zIndex:115,
+                 background:CARD,border:`1px solid ${Y}`,borderRadius:10,padding:"10px 12px",display:"flex",alignItems:"center",gap:12,
+                 boxShadow:"0 6px 24px rgba(0,0,0,.5)",maxWidth:"calc(100vw - 24px)"}}>
+      <span style={{fontSize:12,color:TXT,lineHeight:1.4}}>{ganttToast.text}</span>
+      <button onClick={()=>undoGantt(ganttToast)}
+        style={{background:Y,border:"none",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:BG,letterSpacing:1,flexShrink:0}}>UNDO</button>
+    </div>
+  );
   const GanttView = () => {
     const job  = jobs.find(j => j.id === ganttJobId) || jobs[0];
     const zoom = ganttZoom, setZoom = setGanttZoom;
@@ -4663,6 +4711,111 @@ export default function App() {
       : `${DOW_SHORT[parseISO(w.from).getDay()]} ${fmtDMY(w.from)} → ${DOW_SHORT[parseISO(w.to).getDay()]} ${fmtDMY(w.to)}`;
     const weekendBg = "rgba(255,255,255,.035)";
 
+    // ── Click and drag ──
+    // Mouse: press and drag a bar to move it; drag its right edge to change hours.
+    // Touch: hold ~¼ second to pick a bar up (a quick swipe still scrolls).
+    // A press without movement is a tap and opens the editor as before.
+    // Positions are written straight to the DOM while dragging and saved on
+    // release — this view remounts whenever App re-renders, so React state
+    // wouldn't survive a live drag.
+    const startBarDrag = (e, r, mode) => {
+      if (e.button !== undefined && e.button !== 0) return;
+      const bar = mode === "resize" ? e.currentTarget.parentElement : e.currentTarget;
+      const row = bar.parentElement;
+      const scroller = ganttUI.el;
+      const touch = e.pointerType === "touch";
+      const t = times[r.taskId] || {start:0, end:0};
+      const st = {x0:e.clientX, y0:e.clientY, lastX:e.clientX, lastY:e.clientY,
+                  sl0: scroller?.scrollLeft || 0, active: !touch, moved:false, panning:false,
+                  left0: t.start*dayW, w0: Math.max((t.end-t.start)*dayW, 4),
+                  startDay0: Math.round(t.start), hrs0: Math.round(r.dur*HRS_PER_DAY),
+                  value: null, timer: null, badge: null, id: e.pointerId};
+      ganttUI.suppressClick = false;
+      ganttUI.drag = st;
+      const outside = bar.nextSibling;         // hours label shown beside narrow bars
+      if (touch) st.timer = setTimeout(() => {
+        st.active = true;
+        try { navigator.vibrate && navigator.vibrate(12); } catch {}
+        bar.style.boxShadow = `0 0 0 2px ${TXT}`;
+      }, 260);
+
+      const badge = (text, x) => {
+        if (!st.badge) {
+          st.badge = document.createElement("div");
+          Object.assign(st.badge.style, {position:"absolute", top:"6px", zIndex:6, pointerEvents:"none",
+            background:TXT, color:BG, borderRadius:"4px", padding:"2px 6px", fontSize:"10px",
+            fontFamily:MONO, whiteSpace:"nowrap"});
+          row.appendChild(st.badge);
+        }
+        st.badge.textContent = text;
+        st.badge.style.left = `${x}px`;
+      };
+      const move = ev => {
+        if (ev.pointerId !== st.id) return;
+        if (!st.active) {
+          // Touch before the hold kicks in: behave like a normal swipe-scroll.
+          if (touch) {
+            if (Math.abs(ev.clientX-st.x0) > 6 || Math.abs(ev.clientY-st.y0) > 6) { clearTimeout(st.timer); st.panning = true; }
+            if (st.panning) {
+              if (scroller) scroller.scrollLeft -= ev.clientX - st.lastX;
+              window.scrollBy(0, -(ev.clientY - st.lastY));
+            }
+            st.lastX = ev.clientX; st.lastY = ev.clientY;
+          }
+          return;
+        }
+        const dxRaw = ev.clientX - st.x0;
+        if (!st.moved && Math.abs(dxRaw) < 4) return;
+        if (!st.moved) { st.moved = true; bar.style.cursor = mode==="resize" ? "ew-resize" : "grabbing"; if (outside) outside.style.visibility = "hidden"; }
+        ev.preventDefault();
+        if (scroller) {                        // nudge the chart along near its edges
+          const rc = scroller.getBoundingClientRect();
+          if (ev.clientX > rc.right - 40) scroller.scrollLeft += 16;
+          else if (ev.clientX < rc.left + LBL + 40) scroller.scrollLeft -= 16;
+        }
+        const dx = dxRaw + ((scroller?.scrollLeft || 0) - st.sl0);
+        if (mode === "move") {
+          const day = Math.max(0, Math.round((st.left0 + dx) / dayW));
+          st.value = day;
+          bar.style.left = `${day*dayW}px`;
+          const iso = calAddDays(anchor, day);
+          badge(`${DOW_SHORT[parseISO(iso).getDay()]} ${fmtDM(iso)}`, day*dayW + st.w0 + 6);
+        } else {
+          const hrs = Math.max(1, Math.round((st.w0 + dx) / dayW * HRS_PER_DAY));
+          st.value = hrs;
+          const px = Math.max(hrs / HRS_PER_DAY * dayW, 4);
+          bar.style.width = `${px}px`;
+          const endISO = barDates(anchor, t.start, t.start + hrs/HRS_PER_DAY).to;
+          badge(`${hrs}h · to ${DOW_SHORT[parseISO(endISO).getDay()]} ${fmtDM(endISO)}`, st.left0 + px + 6);
+        }
+      };
+      const end = ev => {
+        if (ev.pointerId !== st.id) return;
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", end);
+        window.removeEventListener("pointercancel", end);
+        clearTimeout(st.timer);
+        bar.style.boxShadow = ""; bar.style.cursor = "";
+        if (st.badge) st.badge.remove();
+        ganttUI.drag = null;
+        if (st.panning) { ganttUI.suppressClick = true; return; }
+        if (!st.active || !st.moved) return;                   // plain tap → onClick opens the editor
+        ganttUI.suppressClick = true;
+        const revert = () => { bar.style.left = `${st.left0}px`; bar.style.width = `${st.w0}px`; if (outside) outside.style.visibility = ""; };
+        if (ev.type === "pointercancel" || st.value === null) return revert();
+        if (mode === "move") {
+          if (st.value === st.startDay0) return revert();       // dropped back on the same day
+          moveBarTo(job, r, calAddDays(anchor, st.value));
+        } else {
+          if (st.value === st.hrs0) return revert();
+          resizeBarTo(job, r, st.value);
+        }
+      };
+      window.addEventListener("pointermove", move, {passive:false});
+      window.addEventListener("pointerup", end);
+      window.addEventListener("pointercancel", end);
+    };
+
     return (
       <div>
         <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`}}>
@@ -4709,6 +4862,7 @@ export default function App() {
         </div>
 
         <div style={{padding: isDesktop?"16px 24px":"12px"}}>
+          <GanttToast/>
           {!job && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 0"}}>No jobs yet.</div>}
           {job && !job.started && (
             <div style={{background:"rgba(245,165,36,.1)",border:"1px solid #F5A524",borderRadius:11,padding:"12px 14px",marginBottom:14,fontSize:12,color:"#F5A524",lineHeight:1.5}}>
@@ -4765,7 +4919,7 @@ export default function App() {
           {job && rows.length>0 && (
             <div style={{border:`1px solid ${BDR}`,borderRadius:12,overflow:"hidden",background:CARD}}>
               <div ref={bindScroll} onScroll={e=>{ ganttUI.scrollLeft = e.currentTarget.scrollLeft; }}
-                style={{display:"flex",overflowX:"auto",position:"relative"}}>
+                style={{display:"flex",overflowX:"auto",position:"relative",userSelect:"none",WebkitUserSelect:"none"}}>
                 {/* Frozen job column */}
                 <div style={{position:"sticky",left:0,zIndex:3,background:CARD,borderRight:`2px solid ${BDR}`,flexShrink:0,width:LBL}}>
                   <div style={{height:44,borderBottom:`1px solid ${BDR}`,display:"flex",alignItems:"flex-end",padding:"0 12px 7px",background:CARD2}}>
@@ -4823,10 +4977,18 @@ export default function App() {
                       const label = `${fmtH(r.dur*HRS_PER_DAY)}${r.edited?" *":""}`;
                       return (
                         <div key={r.taskId} style={{height:ROW,borderBottom:`1px solid ${BDR}`,position:"relative"}}>
-                          <button onClick={()=>setEditSched({job, row:r})}
+                          <button onPointerDown={e=>startBarDrag(e, r, "move")}
+                            onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
+                            onContextMenu={e=>e.preventDefault()}
                             title={`${r.taskId} — ${task?.desc||""}\n${rangeTxt(w)}\n${fmtH(r.dur*HRS_PER_DAY)} (${r.dur} day${r.dur===1?"":"s"})${r.dur!==r.sheetDur?` · sheet ${fmtH(r.est)}`:""}${r.startDate?`\nPinned: not before ${fmtDMY(r.startDate)}`:""}${r.deps?.length?`\nRules: ${r.deps.map(d=>`${d.type} ${d.id}`).join(", ")}`:""}`}
-                            style={{position:"absolute",left,top:5,width,height:ROW-10,borderRadius:4,border:r.startDate?`1px solid ${TXT}`:"none",cursor:"pointer",background:colFor(r.taskId),opacity:statusOf(r.taskId)==="ongoing"?.55:.95,display:"flex",alignItems:"center",padding:"0 6px",overflow:"hidden",zIndex:3,boxSizing:"border-box"}}>
-                            {width>34 && <span style={{fontFamily:FF,fontSize:9,fontWeight:700,color:BG,whiteSpace:"nowrap"}}>{label}</span>}
+                            style={{position:"absolute",left,top:5,width,height:ROW-10,borderRadius:4,border:r.startDate?`1px solid ${TXT}`:"none",cursor:"grab",touchAction:"none",WebkitTouchCallout:"none",background:colFor(r.taskId),opacity:statusOf(r.taskId)==="ongoing"?.55:.95,display:"flex",alignItems:"center",padding:"0 6px",overflow:"hidden",zIndex:3,boxSizing:"border-box"}}>
+                            {width>34 && <span style={{fontFamily:FF,fontSize:9,fontWeight:700,color:BG,whiteSpace:"nowrap",pointerEvents:"none"}}>{label}</span>}
+                            {/* right edge: drag to change hours */}
+                            {width>14 && (
+                              <span onPointerDown={e=>{ e.stopPropagation(); startBarDrag(e, r, "resize"); }}
+                                style={{position:"absolute",right:0,top:0,bottom:0,width:9,cursor:"ew-resize",touchAction:"none",
+                                        borderLeft:"1px solid rgba(0,0,0,.25)",background:"rgba(0,0,0,.12)"}}/>
+                            )}
                           </button>
                           {width<=34 && (
                             <span style={{position:"absolute",left:left+width+4,top:9,fontFamily:FF,fontSize:9,color:MUTED,whiteSpace:"nowrap",pointerEvents:"none"}}>{label}</span>
@@ -4844,7 +5006,7 @@ export default function App() {
                     <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
                   </span>
                 ))}
-                <span style={{fontSize:10,color:MUTED}}>· 7 days a week, weekends shaded · 10.5h days (7:00–17:30) · outlined = pinned to a date · * changed from sheet · tap a bar to edit</span>
+                <span style={{fontSize:10,color:MUTED}}>· drag a bar to move it, drag its right edge to change hours (on a phone, hold first) · tap to edit · 7 days a week, weekends shaded · 10.5h days · outlined = pinned to a date · * changed from sheet</span>
               </div>
             </div>
           )}
