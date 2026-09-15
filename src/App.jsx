@@ -146,6 +146,8 @@ const computeSchedule = rows => {
   rows.forEach(r => startOf(r.taskId));
   return { times: out, cycles: [...cycles] };
 };
+// Gantt working day: 7:00–17:30. Sheet hours ÷ this = bar length in days.
+const GANTT_HRS_PER_DAY = 10.5;
 const DEP_TYPES = [
   {v:"after",   label:"Starts after",        hint:"begins when that job finishes"},
   {v:"with",    label:"Runs alongside",      hint:"can start when that job starts"},
@@ -367,16 +369,20 @@ const TimeRow = ({s,setS,f,setF,b,setB}) => (
 
 // ── Edit one bar on the Gantt: duration, fixed start, and dependencies ──
 // MODULE LEVEL — holds controlled text inputs.
-const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
+// `options` is every job on the sheet that can be the other side of a rule.
+const ScheduleEditor = ({job, row, onClose, options, onSave, onReset}) => {
   const [dur, setDur]     = useState(String(row.dur ?? ""));
   const [fixed, setFixed] = useState(row.fixedStart ?? "");
   const [deps, setDeps]   = useState(row.deps || []);
   const [picking, setPicking] = useState(false);
+  const [pickQ, setPickQ] = useState("");
   const [busy, setBusy]   = useState(false);
-  const task = tmpl.tasks.find(t => t.id === row.taskId);
-  const descOf = id => tmpl.tasks.find(t => t.id === id)?.desc || "";
-  const candidates = tmpl.schedule.map(s => s.taskId)
-    .filter(id => id !== row.taskId && !deps.some(d => d.id === id));
+  const task = options.find(t => t.id === row.taskId);
+  const descOf = id => options.find(t => t.id === id)?.desc || "";
+  const q = pickQ.trim().toLowerCase();
+  const candidates = options.map(t => t.id)
+    .filter(id => id !== row.taskId && !deps.some(d => d.id === id))
+    .filter(id => !q || id.toLowerCase().includes(q) || descOf(id).toLowerCase().includes(q));
 
   const save = async () => {
     setBusy(true);
@@ -399,14 +405,22 @@ const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
           <div style={{minWidth:0}}>
             <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{row.taskId}</div>
             <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.2}}>{task?.desc || "Task"}</div>
-            {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h estimated</div>}
+            {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h on the sheet = {Math.round(task.est/GANTT_HRS_PER_DAY*100)/100} days</div>}
           </div>
           <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer",flexShrink:0}}><X size={16} color={MUTED}/></button>
         </div>
 
         <div style={{marginBottom:16}}>
           <CardLabel>DURATION (WORKING DAYS)</CardLabel>
-          <input type="number" step="0.1" min="0" value={dur} onChange={e=>setDur(e.target.value)} style={fld}/>
+          <div style={{display:"flex",gap:8}}>
+            <input type="number" step="0.1" min="0" value={dur} onChange={e=>setDur(e.target.value)} style={{...fld,flex:1}}/>
+            {task && String(Math.round(task.est/GANTT_HRS_PER_DAY*100)/100) !== dur && (
+              <button onClick={()=>setDur(String(Math.round(task.est/GANTT_HRS_PER_DAY*100)/100))}
+                style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"0 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:Y,letterSpacing:.5,whiteSpace:"nowrap"}}>
+                USE SHEET
+              </button>
+            )}
+          </div>
         </div>
 
         <div style={{marginBottom:16}}>
@@ -420,6 +434,11 @@ const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
 
         <div style={{marginBottom:8}}>
           <CardLabel>RULES</CardLabel>
+          {row.droppedDeps>0 && (
+            <div style={{fontSize:11,color:"#F5A524",background:"rgba(245,165,36,.08)",border:"1px solid rgba(245,165,36,.4)",borderRadius:8,padding:"8px 10px",marginBottom:8,lineHeight:1.45}}>
+              {row.droppedDeps} saved rule{row.droppedDeps===1?"":"s"} pointed at a job number no longer on the sheet and {row.droppedDeps===1?"was":"were"} removed. Save to keep what's below.
+            </div>
+          )}
           {deps.length===0 && <div style={{fontSize:12,color:MUTED,padding:"8px 0 4px"}}>No rules — this can start at day {fixed||0}.</div>}
           {deps.map((d,i) => (
             <div key={d.id+i} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7}}>
@@ -449,16 +468,22 @@ const ScheduleEditor = ({job, row, onClose, tmpl, onSave, onReset}) => {
               <Plus size={13}/> ADD RULE
             </button>
           ) : (
-            <div style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px",marginTop:6,maxHeight:200,overflowY:"auto"}}>
+            <div style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px",marginTop:6}}>
               <div style={{fontSize:11,color:MUTED,marginBottom:7}}>Which job does this depend on?</div>
+              <input value={pickQ} onChange={e=>setPickQ(e.target.value)} placeholder="Search — e.g. 1.03 or engine"
+                autoCorrect="off" autoCapitalize="none" spellCheck={false}
+                style={{width:"100%",background:CARD,border:`1px solid ${BDR2}`,borderRadius:7,padding:"9px 11px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none",marginBottom:6}}/>
+              <div style={{maxHeight:220,overflowY:"auto"}}>
+              {candidates.length===0 && <div style={{fontSize:11,color:MUTED,padding:"8px 4px"}}>No matching jobs.</div>}
               {candidates.map(id => (
-                <button key={id} onClick={()=>{setDeps([...deps,{id,type:"after"}]); setPicking(false);}}
+                <button key={id} onClick={()=>{setDeps([...deps,{id,type:"after"}]); setPicking(false); setPickQ("");}}
                   style={{display:"flex",alignItems:"center",gap:8,width:"100%",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"8px 4px",cursor:"pointer",textAlign:"left"}}>
                   <span style={{fontFamily:MONO,fontSize:11,color:Y,flexShrink:0}}>{id}</span>
                   <span style={{fontSize:11,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{descOf(id)}</span>
                 </button>
               ))}
-              <button onClick={()=>setPicking(false)} style={{width:"100%",background:"none",border:"none",padding:"9px 0 2px",cursor:"pointer",fontSize:12,color:MUTED}}>Cancel</button>
+              </div>
+              <button onClick={()=>{setPicking(false); setPickQ("");}} style={{width:"100%",background:"none",border:"none",padding:"9px 0 2px",cursor:"pointer",fontSize:12,color:MUTED}}>Cancel</button>
             </div>
           )}
         </div>
@@ -1838,38 +1863,69 @@ export default function App() {
   // plus any custom tasks. Used by hose linking, job cards and entry splitting.
   const tasksForJob = jid => [...tasksOf(jid).filter(t => isIn(jid, t)), ...(customTasks[jid]||[])];
 
-  // Effective schedule rows for a job: template defaults merged with any saved
-  // overrides. Tasks the client's sheet never scheduled are included as
-  // unscheduled rows so they can be added to the plan later.
-  const schedRows = jid => {
-    const tmpl = tmplOf(jid);
-    const fromTemplate = tmpl.schedule.map(s => {
-      const ov = schedOv[eKey(jid, s.taskId)] || {};
-      return {
-        taskId: s.taskId,
-        dur: ov.dur ?? s.dur ?? 0,
-        fixedStart: ov.fixedStart ?? null,
-        // Seed dependencies from the sheet's own sequence when nothing is saved:
-        // each task follows the one before it unless the sheet says otherwise.
-        deps: ov.deps ?? defaultDeps(tmpl, s),
-        lane: ov.lane ?? s.lane ?? "Main Flow",
-        hidden: ov.hidden ?? false,
-      };
+  // ── Gantt rows, built straight from the job sheet ──
+  // Every job with estimated hours appears, in sheet order (sections 1→12, then
+  // job number). Bar length is the sheet's hours ÷ a 10.5h day. By default each
+  // job follows the one above it; any rules or durations saved in the editor
+  // override that. Saved rules pointing at job numbers no longer on the sheet
+  // are dropped — and if that leaves a job with none, it goes back to following
+  // the job above it rather than falling to day 0.
+  const sheetOrder = jid => {
+    const own    = tasksOf(jid).filter(t => isIn(jid, t));
+    const custom = customTasks[jid] || [];
+    const out = [];
+    secsOf(jid).forEach(sec => {
+      out.push(...own.filter(t => t.sId === sec.id));
+      out.push(...custom.filter(t => t.sId === sec.id));
     });
-    // Tasks the supervisor dropped into a week that the original sheet never
-    // scheduled — these carry their own fixedStart and duration.
-    const inTemplate = new Set(tmpl.schedule.map(s => s.taskId));
-    const added = Object.values(schedOv)
-      .filter(o => o.jobId === jid && !inTemplate.has(o.taskId) && !o.hidden)
-      .map(o => ({
-        taskId: o.taskId,
-        dur: o.dur ?? 1,
-        fixedStart: o.fixedStart ?? null,
-        deps: o.deps ?? [],
-        lane: o.lane ?? "Planned",
-        hidden: false,
-      }));
-    return [...fromTemplate, ...added].filter(r => !r.hidden);
+    const seen = new Set(out.map(t => t.id));
+    [...own, ...custom].forEach(t => { if (!seen.has(t.id)) out.push(t); });
+    return out;
+  };
+  const sheetDays = est => Math.round((Number(est)||0) / GANTT_HRS_PER_DAY * 100) / 100;
+  const schedRows = jid => {
+    const included = sheetOrder(jid).filter(t => {
+      const ov = schedOv[eKey(jid, t.id)] || {};
+      if (ov.hidden) return false;
+      return typeof ov.dur === "number" || (Number(t.est)||0) > 0;   // 0h jobs have nothing to plot
+    });
+    const valid = new Set(included.map(t => t.id));
+    let prev = null;
+    return included.map(t => {
+      const ov = schedOv[eKey(jid, t.id)] || {};
+      const saved = Array.isArray(ov.deps) ? ov.deps : null;
+      const kept  = saved ? saved.filter(d => d && valid.has(d.id) && d.id !== t.id) : null;
+      const fallback = prev ? [{id: prev, type: "after"}] : [];
+      const deps = saved === null ? fallback
+                 : (saved.length > 0 && kept.length === 0) ? fallback
+                 : kept;
+      const row = {
+        taskId: t.id, sId: t.sId, desc: t.desc, est: Number(t.est)||0,
+        sheetDur: sheetDays(t.est),
+        dur: typeof ov.dur === "number" ? ov.dur : sheetDays(t.est),
+        fixedStart: typeof ov.fixedStart === "number" ? ov.fixedStart : null,
+        deps,
+        droppedDeps: saved ? saved.length - kept.length : 0,
+        depsFromSheet: saved === null || (saved.length > 0 && kept.length === 0),
+        edited: !!schedOv[eKey(jid, t.id)],
+      };
+      prev = t.id;
+      return row;
+    });
+  };
+  // Saved Gantt entries for job numbers that aren't on the sheet any more.
+  const schedDocsFor = jid => Object.values(schedOv).filter(o =>
+    (o.jobId ?? String(o.id).split("_")[0]) === jid);
+  const staleSched = jid => {
+    const valid = new Set(sheetOrder(jid).map(t => t.id));
+    return schedDocsFor(jid).filter(o => !valid.has(o.taskId ?? String(o.id).split("_").slice(1).join("_")));
+  };
+  const deleteSchedDocs = async list => {
+    for (let i = 0; i < list.length; i += 400) {
+      const b = writeBatch(db);
+      list.slice(i, i+400).forEach(o => b.delete(doc(db, "schedule", o.id)));
+      await b.commit();
+    }
   };
 
   // Working days between a job's start and a calendar date (Mon–Fri only).
@@ -1898,12 +1954,6 @@ export default function App() {
       plannedWeek: weekStartISO,
     });
   };
-  // Derive a starting dependency from the template's own ordering.
-  const defaultDeps = (tmpl, s) => {
-    const prev = tmpl.schedule.filter(x => x.seq && s.seq && x.seq < s.seq)
-                              .sort((a,b)=>b.seq-a.seq)[0];
-    return prev ? [{id: prev.taskId, type: "after"}] : [];
-  };
   const saveSchedRow = async (jid, taskId, patch) => {
     await setDoc(doc(db,"schedule", eKey(jid, taskId)),
       {jobId:jid, taskId, ...patch}, {merge:true});
@@ -1916,30 +1966,59 @@ export default function App() {
   // These are the QUOTED figures the client agreed to (estimated hours × the
   // job's locked rate, plus the parts on the sheet). Actual logged hours live
   // separately in jStats and stay on the admin side.
+  // A blank qty means 1; a qty of 0 on the sheet means the part isn't going on.
+  const qtyOf = p => (p.qty === 0 || p.qty === "0") ? 0 : (Number(p.qty) || 1);
   const partsCostOf = (jid, taskId) => partsOf(jid, taskId)
-    .reduce((s,p) => s + (Number(p.price)||0) * (Number(p.qty)||1), 0);
+    .reduce((s,p) => s + (Number(p.price)||0) * qtyOf(p), 0);
+  // Section-level lines with no job number (freight, consumables, disposal…).
+  const sundriesOf  = (jid, sid) => (tmplOf(jid).sundries || []).filter(x => x.sId === sid);
+  const sundryCost  = (jid, sid) => sundriesOf(jid, sid)
+    .reduce((s,x) => s + (Number(x.price)||0) * qtyOf(x), 0);
   const taskCost = (jid, task) => {
     const rate   = jobs.find(j=>j.id===jid)?.lockedRate || hourlyRate;
     const labour = (Number(task.est)||0) * rate;
     const parts  = partsCostOf(jid, task.id);
     return {labour, parts, total: labour + parts};
   };
-  const sectionCost = (jid, sid) => {
+  // Jobs in a section plus the section's sundries — everything except handling.
+  const sectionBase = (jid, sid) => {
     const ts = [...tasksOf(jid).filter(t => t.sId===sid && isIn(jid,t)),
                 ...(customTasks[jid]||[]).filter(t => t.sId===sid)];
-    return ts.reduce((a,t) => {
+    const a = ts.reduce((a,t) => {
       const c = taskCost(jid, t);
-      a.labour += c.labour; a.parts += c.parts; a.total += c.total;
+      a.labour += c.labour; a.jobParts += c.parts;
       a.count++; if (getStatus(jid,t.id)==="completed") a.done++;
       return a;
-    }, {labour:0, parts:0, total:0, count:0, done:0});
+    }, {labour:0, jobParts:0, count:0, done:0});
+    a.sundries = sundryCost(jid, sid);
+    return a;
   };
+  // Parts handling (sheet job 12.07) is a percentage of every part on the job,
+  // sundries included, and is booked as labour in its own section.
+  const handlingOf = (jid, sid) => {
+    const h = tmplOf(jid).handling;
+    if (!h || h.sId !== sid) return 0;
+    const allParts = secsOf(jid).reduce((s,sec) => {
+      const b = sectionBase(jid, sec.id); return s + b.jobParts + b.sundries;
+    }, 0);
+    return allParts * (Number(h.pct) || 0);
+  };
+  const sectionCost = (jid, sid) => {
+    const b = sectionBase(jid, sid);
+    const handling = handlingOf(jid, sid);
+    const labour = b.labour + handling;
+    const parts  = b.jobParts + b.sundries;
+    return {labour, parts, total: labour + parts, handling, sundries: b.sundries,
+            count: b.count, done: b.done};
+  };
+  // All figures ex GST, matching the job sheet.
   const jobCost = jid => secsOf(jid).reduce((a,s) => {
     const c = sectionCost(jid, s.id);
     a.labour += c.labour; a.parts += c.parts; a.total += c.total;
+    a.handling += c.handling; a.sundries += c.sundries;
     a.count += c.count; a.done += c.done;
     return a;
-  }, {labour:0, parts:0, total:0, count:0, done:0});
+  }, {labour:0, parts:0, total:0, handling:0, sundries:0, count:0, done:0});
 
   const isIn    = (jid, t) => !t.opt || !getExcl(jid).has(t.id);
 
@@ -1958,7 +2037,7 @@ export default function App() {
   const getEnt  = (jid, tid) => entries[eKey(jid,tid)] || [];
   const getPh   = (jid, tid) => photos[eKey(jid,tid)] || [];
   const logged      = (jid, tid) => getEnt(jid,tid).reduce((s,e) => s+e.hours, 0);
-  const entryCost   = (jid, tid) => getEnt(jid,tid).reduce((s,e) => s + e.hours*(e.rate||getLR(jid))*1.1, 0);
+  const entryCost   = (jid, tid) => getEnt(jid,tid).reduce((s,e) => s + e.hours*(e.rate||getLR(jid)), 0);
 
   const getLR     = jid => jobs.find(j=>j.id===jid)?.lockedRate || 145;
   const getStatus = (jid, tid) => taskStatus[eKey(jid,tid)] || "ongoing";
@@ -1993,7 +2072,7 @@ export default function App() {
     return {
       est:        ts.reduce((s,t)=>s+t.est,0),
       actual:     act,
-      estCost:    ts.reduce((s,t)=>s+t.est*lr*1.1,0),
+      estCost:    ts.reduce((s,t)=>s+t.est*lr,0),
       actualCost: ts.reduce((s,t)=>s+entryCost(jid,t.id),0),
       total:      ts.length,
       photos:     ts.reduce((s,t)=>s+getPh(jid,t.id).length,0),
@@ -2009,7 +2088,7 @@ export default function App() {
     return {
       est:        ts.reduce((s,t)=>s+t.est,0),
       actual:     act,
-      estCost:    ts.reduce((s,t)=>s+t.est*lr*1.1,0),
+      estCost:    ts.reduce((s,t)=>s+t.est*lr,0),
       actualCost: ts.reduce((s,t)=>s+entryCost(jid,t.id),0),
       lr,
     };
@@ -2376,6 +2455,20 @@ export default function App() {
     } else {
       await deleteDoc(doc(db,"entries",entryId)).catch(()=>{});
     }
+  };
+  // Photos for job cards go to their own Storage folder, compressed like task photos.
+  // (Restored — it went missing in an earlier upload, so opening a job card crashed.)
+  const uploadCardPhotos = async files => {
+    const out = [];
+    for (const raw of files) {
+      let f = raw;
+      try { f = await compressImage(raw); } catch { f = raw; }
+      const safe = (f.name || "photo.jpg").replace(/[^a-zA-Z0-9._-]/g, "_");
+      const r = ref(storage, `jobcards/${Date.now()}_${safe}`);
+      const snap = await uploadBytes(r, f);
+      out.push({url: await getDownloadURL(snap.ref), path: snap.ref.fullPath});
+    }
+    return out;
   };
   const saveCard = async (data, id) => {
     if (id) {
@@ -3846,6 +3939,22 @@ export default function App() {
                 <span style={{fontSize:12,color:MUTED}}>Locked rate for this job</span>
                 <span style={{fontFamily:MONO,fontSize:14,color:Y}}>${j?.lockedRate||145}/hr +GST</span>
               </div>
+              {(() => {
+                const q = jobCost(selJob);
+                if (!q.total) return null;
+                const m = n => `$${Math.round(n).toLocaleString()}`;
+                return (
+                  <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${BDR2}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                      <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>QUOTED TOTAL · LABOUR + PARTS</span>
+                      <span style={{fontFamily:MONO,fontSize:17,color:Y}}>{m(q.total)}</span>
+                    </div>
+                    <div style={{fontSize:10,color:MUTED,marginTop:5,lineHeight:1.6}}>
+                      {m(q.labour)} labour{q.handling>0?` (incl ${m(q.handling)} parts handling)`:""} + {m(q.parts)} parts{q.sundries>0?` (incl ${m(q.sundries)} freight & consumables)`:""} · +GST
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
             <div style={{padding:"12px 14px"}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 60px",gap:6,padding:"0 6px 8px",borderBottom:`1px solid ${BDR}`}}>
@@ -4012,7 +4121,7 @@ export default function App() {
               style={{background:CARD,borderRadius:9,padding:"11px 13px",marginBottom:7,border:`1px solid ${BDR}`,display:"flex",justifyContent:"space-between",alignItems:"center",cursor:"pointer"}}>
               <div style={{flex:1}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:2}}><span style={{fontFamily:MONO,fontSize:17,color:Y}}>{e.hours}h</span><span style={{fontSize:12,color:MUTED}}>{e.date}</span></div>
-                <div style={{fontSize:11,color:MUTED,marginBottom:2}}>${e.rate||145}/hr · ${((e.rate||145)*e.hours*1.1).toFixed(2)} inc GST</div>
+                <div style={{fontSize:11,color:MUTED,marginBottom:2}}>${e.rate||145}/hr · ${((e.rate||145)*e.hours).toFixed(2)} +GST</div>
                 {e.notes&&<div style={{fontSize:12,color:MUTED,marginBottom:2}}>{e.notes}</div>}
                 <div style={{fontFamily:MONO,fontSize:10,color:BDR2}}>{e.worker}</div>
               </div>
@@ -4188,11 +4297,11 @@ export default function App() {
               <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:12,padding:"15px",marginBottom:16}}>
                 <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:8}}>QUOTED TOTAL</div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
-                  <span style={{fontFamily:MONO,fontSize:26,color:Y}}>{money(jc.total*1.1)}</span>
-                  <span style={{fontSize:11,color:MUTED}}>inc GST</span>
+                  <span style={{fontFamily:MONO,fontSize:26,color:Y}}>{money(jc.total)}</span>
+                  <span style={{fontSize:11,color:MUTED}}>+GST</span>
                 </div>
                 <div style={{fontSize:11,color:MUTED,marginTop:7,lineHeight:1.6}}>
-                  {money(jc.labour)} labour + {money(jc.parts)} parts, ex GST · {jc.count} jobs
+                  {money(jc.labour)} labour + {money(jc.parts)} parts · {jc.count} jobs · all figures +GST
                 </div>
               </div>
 
@@ -4207,11 +4316,11 @@ export default function App() {
                       style={{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",padding:"13px 14px",cursor:"pointer"}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
                         <span style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT}}>{sec.id}. {sec.name}</span>
-                        <span style={{fontFamily:MONO,fontSize:15,color:Y,whiteSpace:"nowrap"}}>{money(c.total*1.1)}</span>
+                        <span style={{fontFamily:MONO,fontSize:15,color:Y,whiteSpace:"nowrap"}}>{money(c.total)}</span>
                       </div>
                       <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
                         <span style={{fontSize:11,color:MUTED}}>{c.count} job{c.count===1?"":"s"} · {c.done} complete</span>
-                        <span style={{fontSize:10,color:MUTED}}>inc GST</span>
+                        <span style={{fontSize:10,color:MUTED}}>+GST</span>
                       </div>
                     </button>
 
@@ -4229,7 +4338,7 @@ export default function App() {
                                 <div style={{display:"flex",alignItems:"center",gap:9}}>
                                   <span style={{fontFamily:MONO,fontSize:11,color:done?GRN:MUTED,minWidth:38}}>{t.id}</span>
                                   <span style={{flex:1,fontSize:13,color:TXT,lineHeight:1.35}}>{t.desc}</span>
-                                  <span style={{fontFamily:MONO,fontSize:13,color:TXT,whiteSpace:"nowrap"}}>{money(tc.total*1.1)}</span>
+                                  <span style={{fontFamily:MONO,fontSize:13,color:TXT,whiteSpace:"nowrap"}}>{money(tc.total)}</span>
                                 </div>
                                 <div style={{display:"flex",gap:8,marginTop:4,paddingLeft:47}}>
                                   {done && <HChip label="COMPLETE" col={BG} bg={GRN}/>}
@@ -4254,6 +4363,38 @@ export default function App() {
                             </div>
                           );
                         })}
+                        {c.sundries>0 && (() => {
+                          const sOpen = openTask === `sundries-${sec.id}`;
+                          return (
+                            <div style={{borderBottom:`1px solid ${BDR}`}}>
+                              <button onClick={()=>setOpenTask(sOpen?null:`sundries-${sec.id}`)}
+                                style={{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",padding:"11px 14px",cursor:"pointer"}}>
+                                <div style={{display:"flex",alignItems:"center",gap:9}}>
+                                  <span style={{fontFamily:MONO,fontSize:11,color:MUTED,minWidth:38}}>—</span>
+                                  <span style={{flex:1,fontSize:13,color:TXT,lineHeight:1.35}}>Freight, consumables & disposal</span>
+                                  <span style={{fontFamily:MONO,fontSize:13,color:TXT,whiteSpace:"nowrap"}}>{money(c.sundries)}</span>
+                                </div>
+                              </button>
+                              {sOpen && (
+                                <div style={{padding:"0 14px 12px 47px"}}>
+                                  {sundriesOf(job.id, sec.id).map((x,i)=>(
+                                    <div key={i} style={{display:"flex",gap:9,fontSize:11,marginBottom:4,alignItems:"baseline"}}>
+                                      <span style={{color:TXT,flex:1,minWidth:0}}>{x.desc}</span>
+                                      <span style={{fontFamily:MONO,color:MUTED}}>×{x.qty}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                        {c.handling>0 && (
+                          <div style={{borderBottom:`1px solid ${BDR}`,padding:"11px 14px",display:"flex",alignItems:"center",gap:9}}>
+                            <span style={{fontFamily:MONO,fontSize:11,color:MUTED,minWidth:38}}>—</span>
+                            <span style={{flex:1,fontSize:13,color:TXT,lineHeight:1.35}}>{tmplOf(job.id).handling?.desc || "Parts handling"}</span>
+                            <span style={{fontFamily:MONO,fontSize:13,color:TXT,whiteSpace:"nowrap"}}>{money(c.handling)}</span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -4380,17 +4521,30 @@ export default function App() {
   // Day-scaled build timeline. A day is 7:00–17:30 (10.5 working hours). Bars
   // come from the scheduling engine; tapping one opens the editor to change its
   // day, duration and dependencies. Task column stays frozen while scrolling.
-  const HRS_PER_DAY = 10.5;   // 7:00 – 17:30
+  const HRS_PER_DAY = GANTT_HRS_PER_DAY;   // 7:00 – 17:30
   const GanttView = () => {
     const [ganttJob, setGanttJob] = useState(jobs[0]?.id || "");
     const [zoom, setZoom]         = useState(80);   // px per day
+    const [busy, setBusy]         = useState(false);
     const job = jobs.find(j => j.id === ganttJob);
 
     const rows = job ? schedRows(job.id) : [];
     const {times, cycles} = rows.length ? computeSchedule(rows) : {times:{}, cycles:[]};
     const span = Math.max(1, ...rows.map(r => times[r.taskId]?.end || 0));
     const tmpl = job ? tmplOf(job.id) : null;
-    const taskOf = id => tmpl?.tasks.find(t => t.id===id);
+    const taskOf = id => rows.find(r => r.taskId===id);
+    const stale  = job ? staleSched(job.id) : [];
+    const dropped = rows.filter(r => r.droppedDeps > 0);
+    const savedCount = job ? schedDocsFor(job.id).length : 0;
+    const resetAll = async () => {
+      if (!job) return;
+      if (!window.confirm(`Reset the whole Gantt for this machine back to the job sheet?\n\nThis clears ${savedCount} saved change${savedCount===1?"":"s"} (durations, start days and rules). Every job goes back to the sheet's hours, following the one above it.`)) return;
+      setBusy(true); await deleteSchedDocs(schedDocsFor(job.id)); setBusy(false);
+    };
+    const clearStale = async () => {
+      setBusy(true); await deleteSchedDocs(stale); setBusy(false);
+    };
+    const fmtH = h => `${Math.round(h*10)/10}h`;
     const statusOf = tid => getStatus(job.id, tid);
     const colFor = tid => { const s=statusOf(tid); return s==="completed"?GRN : s==="on_hold"?"#F5A524" : Y; };
 
@@ -4418,8 +4572,9 @@ export default function App() {
     const ROW = 30;
 
     // Ordered by scheduled start so the chart reads top-to-bottom in time.
+    const sheetIdx = Object.fromEntries(rows.map((r,i) => [r.taskId, i]));
     const ordered = [...rows].sort((a,b) => (times[a.taskId]?.start||0) - (times[b.taskId]?.start||0)
-                                          || a.taskId.localeCompare(b.taskId));
+                                          || sheetIdx[a.taskId] - sheetIdx[b.taskId]);
     const dayTicks = Array.from({length: Math.ceil(span)+1}, (_,i)=>i);
 
     return (
@@ -4448,6 +4603,12 @@ export default function App() {
               <button onClick={()=>setZoom(z=>Math.min(160,z+16))} style={{background:"none",border:"none",cursor:"pointer",color:TXT,fontSize:16,width:24}}>+</button>
             </div>
           </div>
+          {job && savedCount>0 && (
+            <button onClick={resetAll} disabled={busy}
+              style={{marginTop:8,width:"100%",background:"none",border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
+              {busy ? "WORKING…" : `RESET GANTT TO JOB SHEET · ${savedCount} SAVED CHANGE${savedCount===1?"":"S"}`}
+            </button>
+          )}
         </div>
 
         <div style={{padding: isDesktop?"16px 24px":"12px"}}>
@@ -4462,17 +4623,37 @@ export default function App() {
               Circular dependency involving {cycles.join(", ")} — those bars are pinned to day 0 until it's fixed.
             </div>
           )}
+          {(stale.length>0 || dropped.length>0) && (
+            <div style={{background:"rgba(245,165,36,.08)",border:"1px solid #F5A524",borderRadius:10,padding:"10px 12px",marginBottom:12,fontSize:11,color:"#F5A524",lineHeight:1.5}}>
+              {stale.length>0 && (
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:dropped.length?8:0}}>
+                  <span style={{flex:1}}>
+                    {stale.length} saved Gantt entr{stale.length===1?"y is":"ies are"} for job numbers no longer on the sheet
+                    ({stale.slice(0,6).map(o => o.taskId ?? String(o.id).split("_").slice(1).join("_")).join(", ")}{stale.length>6?"…":""}). They're hidden.
+                  </span>
+                  <button onClick={clearStale} disabled={busy}
+                    style={{background:"#F5A524",border:"none",borderRadius:7,padding:"7px 11px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:BG,flexShrink:0}}>CLEAR</button>
+                </div>
+              )}
+              {dropped.length>0 && (
+                <div>
+                  Rules on {dropped.map(r=>r.taskId).slice(0,8).join(", ")}{dropped.length>8?"…":""} pointed at old job numbers and were ignored.
+                  Tap those bars to check them, or reset the Gantt to the sheet.
+                </div>
+              )}
+            </div>
+          )}
 
           {job && rows.length===0 && (
             <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 20px",lineHeight:1.7}}>
               No tasks scheduled yet.<br/>
-              <span style={{fontSize:12}}>Tap any task below to give it a start day and duration — it'll appear on the chart.</span>
+              <span style={{fontSize:12}}>None of the jobs on this machine's sheet have hours. Tap one to give it a duration.</span>
               <div style={{marginTop:18,textAlign:"left",maxWidth:520,margin:"18px auto 0"}}>
                 <div style={{fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1.5,marginBottom:8}}>TASKS ON THIS MACHINE</div>
                 <div style={{maxHeight:340,overflowY:"auto",border:`1px solid ${BDR}`,borderRadius:9}}>
                   {(tmpl?.tasks||[]).filter(t=>isIn(job.id,t)).map(t => (
                     <button key={t.id}
-                      onClick={()=>setEditSched({job, row:{taskId:t.id, dur:Math.max(0.5,Math.round((t.est/HRS_PER_DAY)*2)/2), fixedStart:0, deps:[]}})}
+                      onClick={()=>setEditSched({job, row:{taskId:t.id, dur:Math.max(0.5,Math.round((t.est/HRS_PER_DAY)*2)/2), sheetDur:null, fixedStart:0, deps:[], depsFromSheet:false, droppedDeps:0}})}
                       style={{display:"flex",alignItems:"center",gap:9,width:"100%",textAlign:"left",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"9px 11px",cursor:"pointer"}}>
                       <span style={{fontFamily:MONO,fontSize:11,color:Y,minWidth:42,flexShrink:0}}>{t.id}</span>
                       <span style={{fontSize:12,color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</span>
@@ -4534,14 +4715,14 @@ export default function App() {
                       const t = times[r.taskId] || {start:0,end:0};
                       const left = t.start*dayW;
                       const w = Math.max((t.end-t.start)*dayW, 4);
-                      const edited = !!schedOv[eKey(job.id, r.taskId)];
+                      const edited = r.edited;
                       const task = taskOf(r.taskId);
                       return (
                         <div key={r.taskId} style={{height:ROW,borderBottom:`1px solid ${BDR}`,position:"relative"}}>
                           <button onClick={()=>setEditSched({job, row:r})}
-                            title={`${r.taskId} — ${task?.desc||""}\nDay ${t.start.toFixed(1)}–${t.end.toFixed(1)} (${r.dur}d)${dateAt(t.start)?`\n${fmtDate(dateAt(t.start))} → ${fmtDate(dateAt(t.end))}`:""}${r.deps?.length?`\nAfter: ${r.deps.map(d=>d.id).join(", ")}`:""}`}
+                            title={`${r.taskId} — ${task?.desc||""}\n${fmtH(r.dur*HRS_PER_DAY)} (${r.dur}d)${r.dur!==r.sheetDur?` · sheet ${fmtH(r.est)}`:""}\nDay ${t.start.toFixed(1)}–${t.end.toFixed(1)}${dateAt(t.start)?`\n${fmtDate(dateAt(t.start))} → ${fmtDate(dateAt(t.end))}`:""}${r.deps?.length?`\nRules: ${r.deps.map(d=>`${d.type} ${d.id}`).join(", ")}`:""}`}
                             style={{position:"absolute",left,top:5,width:w,height:ROW-10,borderRadius:4,border:"none",cursor:"pointer",background:colFor(r.taskId),opacity:statusOf(r.taskId)==="ongoing"?.5:.95,display:"flex",alignItems:"center",padding:"0 6px",overflow:"hidden"}}>
-                            <span style={{fontFamily:FF,fontSize:9,fontWeight:700,color:BG,whiteSpace:"nowrap"}}>{r.dur}d{edited?" *":""}</span>
+                            <span style={{fontFamily:FF,fontSize:9,fontWeight:700,color:BG,whiteSpace:"nowrap"}}>{fmtH(r.dur*HRS_PER_DAY)}{edited?" *":""}</span>
                           </button>
                         </div>
                       );
@@ -4556,7 +4737,7 @@ export default function App() {
                     <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
                   </span>
                 ))}
-                <span style={{fontSize:10,color:MUTED}}>· day = 7:00–17:30 · tap a bar to edit · * moved</span>
+                <span style={{fontSize:10,color:MUTED}}>· from the job sheet · day = 7:00–17:30 (10.5h) · tap a bar to edit · * changed from sheet</span>
               </div>
             </div>
           )}
@@ -4790,17 +4971,14 @@ export default function App() {
       );
     };
 
-    // ── Build schedule (Gantt) ──
-    // Positions come from the scheduling engine, not fixed offsets, so editing a
-    // duration or dependency recalculates everything downstream immediately.
+    // ── Build schedule (Gantt) — dashboard summary ──
+    // One bar per section, spanning its first job's start to its last job's
+    // finish on the full Gantt. Tap to open the full Gantt.
     const GanttChart = ({job}) => {
-      const tmpl  = tmplOf(job.id);
       const rows  = schedRows(job.id);
       if (!rows.length) return null;
       const {times, cycles} = computeSchedule(rows);
       const span  = Math.max(1, ...rows.map(r => times[r.taskId]?.end || 0));
-      const tasks = tmpl.tasks;
-      const descOf = id => tasks.find(t => t.id===id)?.desc || "";
 
       const workingDaysSince = iso => {
         if (!iso) return null;
@@ -4813,34 +4991,42 @@ export default function App() {
         return n;
       };
       const elapsed = workingDaysSince(job.started);
-      // Convert a working-day offset into a real calendar date for display.
       const dateAt = off => {
         if (!job.started) return null;
         const d = new Date(job.started); let left = Math.round(off);
         while (left > 0) { d.setDate(d.getDate()+1); const w=d.getDay(); if (w!==0&&w!==6) left--; }
         return d.toISOString().split("T")[0];
       };
-
-      const ROW=17, LBL=104, PAD=8, TOP=22;
-      const W=340, H=TOP + rows.length*ROW + 14;
-      const x = d => LBL + (d/span)*(W-LBL-PAD);
       const statusOf = tid => getStatus(job.id, tid);
-      const colFor = tid => { const s=statusOf(tid); return s==="completed"?GRN : s==="on_hold"?"#F5A524" : Y; };
-      const ticks=[]; for (let d=0; d<=span; d+=5) ticks.push(d);
+      const secs = secsOf(job.id).map(sec => {
+        const rs = rows.filter(r => r.sId === sec.id);
+        if (!rs.length) return null;
+        const start = Math.min(...rs.map(r => times[r.taskId]?.start || 0));
+        const end   = Math.max(...rs.map(r => times[r.taskId]?.end || 0));
+        const done  = rs.filter(r => statusOf(r.taskId)==="completed").length;
+        const hold  = rs.some(r => statusOf(r.taskId)==="on_hold");
+        return {sec, start, end, done, n: rs.length, hours: rs.reduce((s,r)=>s+r.dur*GANTT_HRS_PER_DAY,0), hold};
+      }).filter(Boolean);
+
+      const ROW=20, LBL=112, PAD=8, TOP=22;
+      const W=340, H=TOP + secs.length*ROW + 14;
+      const x = d => LBL + (d/span)*(W-LBL-PAD);
+      const step = span > 120 ? 20 : span > 50 ? 10 : 5;
+      const ticks=[]; for (let d=0; d<=span; d+=step) ticks.push(d);
       const done = rows.filter(r => statusOf(r.taskId)==="completed").length;
 
       return (
         <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 8px 6px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",padding:"0 6px 8px"}}>
-            <span style={{fontSize:11,color:MUTED}}>{done}/{rows.length} complete · tap a bar to edit</span>
+            <span style={{fontSize:11,color:MUTED}}>{done}/{rows.length} jobs complete · tap for full Gantt</span>
             <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{span.toFixed(1)} days{dateAt(span)?` · ends ${dateAt(span)}`:""}</span>
           </div>
           {cycles.length>0 && (
             <div style={{background:"rgba(255,76,76,.1)",border:`1px solid ${RED}`,borderRadius:8,padding:"8px 10px",margin:"0 6px 8px",fontSize:11,color:RED}}>
-              Circular dependency involving {cycles.join(", ")} — those tasks are pinned to day 0 until it's fixed.
+              Circular dependency involving {cycles.join(", ")} — open the Gantt to fix it.
             </div>
           )}
-          <div style={{overflowX:"auto"}}>
+          <div style={{overflowX:"auto",cursor:"pointer"}} onClick={goGantt}>
             <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",minWidth:320,height:"auto",display:"block"}}>
               {ticks.map(d => (
                 <g key={d}>
@@ -4852,32 +5038,27 @@ export default function App() {
                 <line x1={x(elapsed)} x2={x(elapsed)} y1={TOP-6} y2={H-10} stroke={RED} strokeWidth="1.2"/>
                 <text x={x(elapsed)} y={H-2} fill={RED} fontSize="7" textAnchor="middle" fontFamily="'Barlow',sans-serif">TODAY</text>
               </>)}
-              {rows.map((r,i) => {
-                const t = times[r.taskId] || {start:0,end:0};
+              {secs.map((s,i) => {
                 const y = TOP + i*ROW;
-                const bw = Math.max(x(t.end)-x(t.start), 2);
-                const edited = !!schedOv[eKey(job.id, r.taskId)];
+                const bw = Math.max(x(s.end)-x(s.start), 2);
+                const frac = s.n ? s.done/s.n : 0;
                 return (
-                  <g key={r.taskId} style={{cursor:"pointer"}} onClick={()=>setEditSched({job, row:r})}>
-                    <rect x={0} y={y} width={W} height={ROW-2} fill="transparent"/>
-                    <text x={2} y={y+9} fill={edited?Y:MUTED} fontSize="7" fontFamily="'DM Mono',monospace">{r.taskId}{edited?"*":""}</text>
-                    <text x={26} y={y+9} fill={TXT} fontSize="7" fontFamily="'Barlow',sans-serif">{descOf(r.taskId).slice(0,26)}</text>
-                    <rect x={x(t.start)} y={y+2} width={bw} height={ROW-6} rx="2"
-                      fill={colFor(r.taskId)} opacity={statusOf(r.taskId)==="ongoing"?.45:.95}>
-                      <title>{r.taskId} — {descOf(r.taskId)}{"\n"}Days {t.start.toFixed(1)}–{t.end.toFixed(1)} ({r.dur}d){dateAt(t.start)?`\n${dateAt(t.start)} → ${dateAt(t.end)}`:""}{r.deps.length?`\nDepends on: ${r.deps.map(d=>d.id).join(", ")}`:""}</title>
-                    </rect>
+                  <g key={s.sec.id}>
+                    <text x={2} y={y+11} fill={TXT} fontSize="7.5" fontFamily="'Barlow',sans-serif">{`${s.sec.id}. ${s.sec.name}`.slice(0,24)}</text>
+                    <rect x={x(s.start)} y={y+3} width={bw} height={ROW-8} rx="2" fill={s.hold?"#F5A524":Y} opacity=".35"/>
+                    <rect x={x(s.start)} y={y+3} width={bw*frac} height={ROW-8} rx="2" fill={GRN} opacity=".95"/>
+                    <title>{s.sec.id}. {s.sec.name}{"\n"}{s.done}/{s.n} jobs · {Math.round(s.hours)}h{"\n"}Days {s.start.toFixed(1)}–{s.end.toFixed(1)}{dateAt(s.start)?`\n${dateAt(s.start)} → ${dateAt(s.end)}`:""}</title>
                   </g>
                 );
               })}
             </svg>
           </div>
           <div style={{display:"flex",gap:12,justifyContent:"center",padding:"8px 0 2px",flexWrap:"wrap"}}>
-            {[["Complete",GRN],["In progress",Y],["On hold","#F5A524"]].map(([l,c])=>(
+            {[["Complete",GRN],["To do",Y],["Has jobs on hold","#F5A524"]].map(([l,c])=>(
               <span key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:MUTED}}>
-                <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
+                <span style={{width:9,height:9,borderRadius:2,background:c,opacity:c===GRN?1:.5}}/>{l}
               </span>
             ))}
-            <span style={{fontSize:10,color:MUTED}}>* edited</span>
           </div>
         </div>
       );
@@ -4978,7 +5159,7 @@ export default function App() {
               <Stat label="LOGGED"      value={`${totals.actual.toFixed(1)}h`}
                     col={totals.actual>totals.est?RED:TXT}
                     sub={totals.est>0?`${(totals.actual/totals.est*100).toFixed(0)}% of estimate`:""}/>
-              <Stat label="LABOUR VALUE" value={money(totals.actualCost)} col={Y} sub="inc GST"/>
+              <Stat label="LABOUR VALUE" value={money(totals.actualCost)} col={Y} sub="+GST"/>
               <Stat label="VARIANCE"     value={`${totals.actual-totals.est>0?"+":""}${(totals.actual-totals.est).toFixed(1)}h`}
                     col={totals.actual>totals.est?RED:GRN}
                     sub={totals.actual>totals.est?"over estimate":"under estimate"}/>
@@ -5037,12 +5218,12 @@ export default function App() {
                 : (
                   <div style={{background:CARD,border:`1px dashed ${BDR2}`,borderRadius:11,padding:"22px 18px",textAlign:"center"}}>
                     <div style={{fontSize:13,color:MUTED,lineHeight:1.6,marginBottom:14}}>
-                      Nothing scheduled for this machine yet.<br/>
-                      Add jobs to a week in the plan and they'll appear here.
+                      No jobs on this machine's sheet have hours yet.<br/>
+                      Once they do, the build schedule appears here.
                     </div>
                     <button onClick={goGantt}
                       style={{background:Y,border:"none",borderRadius:9,padding:"11px 20px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:BG,letterSpacing:1}}>
-                      OPEN WEEK PLAN
+                      OPEN GANTT
                     </button>
                   </div>
                 )}
@@ -5233,8 +5414,18 @@ export default function App() {
       )}
       {editSched && (
         <ScheduleEditor {...editSched}
-          tmpl={tmplOf(editSched.job.id)}
-          onSave={patch => saveSchedRow(editSched.job.id, editSched.row.taskId, patch)}
+          options={sheetOrder(editSched.job.id).map(t => ({id:t.id, desc:t.desc, est:Number(t.est)||0}))}
+          onSave={patch => {
+            // Only store what actually differs from the sheet, so bars keep
+            // tracking the sheet's hours and order when it's revised.
+            const r = editSched.row;
+            const sameDeps = JSON.stringify(patch.deps) === JSON.stringify(r.deps || []);
+            return saveSchedRow(editSched.job.id, r.taskId, {
+              ...patch,
+              dur:  typeof r.sheetDur === "number" && patch.dur === r.sheetDur ? null : patch.dur,
+              deps: sameDeps && r.depsFromSheet ? null : patch.deps,
+            });
+          }}
           onReset={() => resetSchedRow(editSched.job.id, editSched.row.taskId)}
           onClose={()=>setEditSched(null)}/>
       )}
