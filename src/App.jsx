@@ -194,7 +194,7 @@ const barDates = (anchorISO, start, end) => ({
   to:   calAddDays(anchorISO, Math.max(Math.floor(start), Math.ceil(end - 1e-6) - 1)),
 });
 // Survives GanttView remounting on every App render (scroll position, one-off migration).
-const ganttUI = { el: null, jobId: null, zoom: null, scrollLeft: null, scrollTop: 0, migrated: new Set(),
+const ganttUI = { el: null, jobId: null, zoom: null, scrollLeft: null, scrollTop: 0, migrated: new Set(), query: "",
                   drag: null, suppressClick: false, toastTimer: null };
 const DOW_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const DEP_TYPES = [
@@ -2134,9 +2134,11 @@ export default function App() {
   // Moving a job means it now follows the job above it: its own pinned date and
   // soft rules are cleared; "can't start until" gates and changed hours stay.
   const moveInLadder = async (job, row, beforeId, aboveId, fromPos, toPos) => {
+    // The chart is sorted by start date, so "dropped under X" means "follows X":
+    // slot it into the sequence straight after X (or first, if dropped at the top).
     const ids = ladderOrder(job.id).map(t => t.id).filter(id => id !== row.taskId);
-    const at = beforeId ? ids.indexOf(beforeId) : ids.length;
-    ids.splice(at < 0 ? ids.length : at, 0, row.taskId);
+    const at = aboveId ? ids.indexOf(aboveId) + 1 : 0;
+    ids.splice(at, 0, row.taskId);
     const orderBefore = Array.isArray(job.ganttOrder) ? [...job.ganttOrder] : null;
     const key    = eKey(job.id, row.taskId);
     const before = schedOv[key] ? {...schedOv[key]} : null;
@@ -4824,8 +4826,8 @@ export default function App() {
                  background:CARD,border:`1px solid ${Y}`,borderRadius:10,padding:"10px 12px",display:"flex",alignItems:"center",gap:12,
                  boxShadow:"0 6px 24px rgba(0,0,0,.5)",maxWidth:"calc(100vw - 24px)"}}>
       <span style={{fontSize:12,color:TXT,lineHeight:1.4}}>{ganttToast.text}</span>
-      <button onClick={()=>undoGantt(ganttToast)}
-        style={{background:Y,border:"none",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:BG,letterSpacing:1,flexShrink:0}}>UNDO</button>
+      {!ganttToast.noUndo && <button onClick={()=>undoGantt(ganttToast)}
+        style={{background:Y,border:"none",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:BG,letterSpacing:1,flexShrink:0}}>UNDO</button>}
     </div>
   );
   const GanttView = () => {
@@ -4956,14 +4958,54 @@ export default function App() {
     };
 
     // Ordered by scheduled start so the chart reads top-to-bottom in time.
-    // Rows run in ladder order — the order the jobs are lined up to happen.
-    const ordered = rows;
+    // Rows are sorted left to right: whatever starts first sits at the top, so a
+    // job planned early (e.g. dragged to week one) climbs up the chart. Jobs
+    // starting at the same moment keep their ladder order.
+    const ladderIdx = Object.fromEntries(rows.map((r,i) => [r.taskId, i]));
+    const ordered = [...rows].sort((a,b) => {
+      const d = (times[a.taskId]?.start||0) - (times[b.taskId]?.start||0);
+      return Math.abs(d) > 1e-6 ? d : ladderIdx[a.taskId] - ladderIdx[b.taskId];
+    });
+
+    // ── Search ──
+    // Filters the chart live as you type by hiding rows straight in the page —
+    // no re-render, so the box keeps focus (this view remounts on every save).
+    const secNameOf = sid => secsOf(job.id).find(s => s.id === sid)?.name || "";
+    const searchText = r => `${r.taskId} ${r.desc||""} ${secNameOf(r.sId)}`.toLowerCase();
+    const q0 = ganttUI.query.trim().toLowerCase();
+    const hit0 = r => !q0 || searchText(r).includes(q0);
+    const nHits0 = ordered.filter(hit0).length;
+    const applySearch = value => {
+      ganttUI.query = value;
+      const q = value.trim().toLowerCase();
+      const box = ganttUI.el;
+      let n = 0, firstId = null;
+      if (box) box.querySelectorAll("[data-gantt-row]").forEach(el => {
+        const hit = !q || (el.dataset.search || "").includes(q);
+        el.style.display = hit ? "" : "none";
+        if (hit && el.tagName === "BUTTON") { n++; if (!firstId) firstId = el.dataset.ganttRow; }
+      });
+      const c = document.querySelector("[data-gantt-count]");
+      if (c) c.textContent = q ? `${n} of ${ordered.length}` : "";
+      const x = document.querySelector("[data-gantt-clear]");
+      if (x) x.style.display = q ? "flex" : "none";
+      if (box && q && firstId) {                       // jump to the first match
+        const bar = box.querySelector(`div[data-gantt-row="${CSS.escape(firstId)}"]`);
+        box.scrollTop = 0;
+        box.scrollLeft = Math.max(0, (Number(bar?.dataset.left) || 0) - 80);
+      }
+    };
 
     // ── Move a job up/down the ladder ──
     // Grab the grip on the left of a job and drag it up or down. A line shows
     // where it'll drop; the chart scrolls when you reach the top or bottom edge.
     const startRowDrag = (e, r) => {
       if (e.button !== undefined && e.button !== 0) return;
+      if (ganttUI.query.trim()) {                     // positions don't line up while rows are hidden
+        e.preventDefault(); e.stopPropagation();
+        flashGantt({text: "Clear the search to move jobs up or down", jobId: job.id, taskId: r.taskId, before: undefined, noUndo: true});
+        return;
+      }
       e.preventDefault(); e.stopPropagation();
       const scroller = ganttUI.el; if (!scroller) return;
       const label = e.currentTarget.closest("[data-ladder-row]");
@@ -5184,6 +5226,26 @@ export default function App() {
                 style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:RED,letterSpacing:1,flexShrink:0}}>TODAY</button>
             </div>
           )}
+          {job && rows.length>0 && (
+            <div style={{position:"relative",marginTop:8}}>
+              <input type="search" defaultValue={ganttUI.query} key={job.id}
+                placeholder="Search jobs — e.g. 8.09, a/c, cab"
+                autoCorrect="off" autoCapitalize="none" spellCheck={false} enterKeyHint="search"
+                ref={el => { if (el && ganttUI.searchFocus && document.activeElement !== el) { el.focus(); const v = el.value; el.value = ""; el.value = v; } }}
+                onFocus={()=>{ ganttUI.searchFocus = true; }} onBlur={()=>{ ganttUI.searchFocus = false; }}
+                onInput={e=>applySearch(e.currentTarget.value)}
+                onKeyDown={e=>{ if (e.key==="Escape") { e.currentTarget.value = ""; applySearch(""); } if (e.key==="Enter") e.currentTarget.blur(); }}
+                style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 110px 9px 12px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none"}}/>
+              <span data-gantt-count style={{position:"absolute",right:44,top:"50%",transform:"translateY(-50%)",fontFamily:MONO,fontSize:11,color:Y,pointerEvents:"none"}}>
+                {q0 ? `${nHits0} of ${ordered.length}` : ""}
+              </span>
+              <button data-gantt-clear aria-label="Clear search"
+                onClick={e=>{ const inp = e.currentTarget.parentElement.querySelector("input"); inp.value = ""; applySearch(""); }}
+                style={{position:"absolute",right:6,top:"50%",transform:"translateY(-50%)",background:BDR2,border:"none",borderRadius:6,width:28,height:28,display:q0?"flex":"none",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>
+                <X size={14} color={MUTED}/>
+              </button>
+            </div>
+          )}
           {job && savedCount>0 && (
             <button onClick={resetAll} disabled={busy}
               style={{marginTop:8,width:"100%",background:"none",border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
@@ -5261,9 +5323,9 @@ export default function App() {
                   {ordered.map(r => {
                     const t = taskOf(r.taskId);
                     return (
-                      <button key={r.taskId} data-ladder-row
+                      <button key={r.taskId} data-ladder-row data-gantt-row={r.taskId} data-search={searchText(r)}
                         onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
-                        style={{display:"flex",alignItems:"center",gap:6,width:"100%",height:ROW,boxSizing:"border-box",background:"none",border:"none",borderBottom:`1px solid ${BDR}`,padding:"0 10px 0 0",cursor:"pointer",textAlign:"left"}}>
+                        style={{display:hit0(r)?"flex":"none",alignItems:"center",gap:6,width:"100%",height:ROW,boxSizing:"border-box",background:"none",border:"none",borderBottom:`1px solid ${BDR}`,padding:"0 10px 0 0",cursor:"pointer",textAlign:"left"}}>
                         {/* grip: drag up/down to change the job's place in the ladder */}
                         <span title="Drag to move this job up or down" onPointerDown={e=>startRowDrag(e, r)}
                           onClick={e=>e.stopPropagation()}
@@ -5302,7 +5364,8 @@ export default function App() {
                       const task = taskOf(r.taskId);
                       const label = `${fmtH(r.hours)}${r.techs>1?` ×${r.techs}`:""}${r.edited?" *":""}`;
                       return (
-                        <div key={r.taskId} style={{height:ROW,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,position:"relative"}}>
+                        <div key={r.taskId} data-gantt-row={r.taskId} data-search={searchText(r)} data-left={Math.round(left)}
+                          style={{display:hit0(r)?"":"none",height:ROW,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,position:"relative"}}>
                           <button onPointerDown={e=>startBarDrag(e, r, "move")}
                             onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
                             onContextMenu={e=>e.preventDefault()}
