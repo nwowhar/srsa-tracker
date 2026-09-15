@@ -2119,6 +2119,16 @@ export default function App() {
   const toggleClientPhoto = async p => {
     await setDoc(doc(db,"photos", p.id), {clientVisible: !p.clientVisible}, {merge:true});
   };
+  // Share (or unshare) every photo on a task at once — curating forty photos one
+  // tap at a time is nobody's idea of a good afternoon.
+  const shareAllPhotos = async (jid, tid, visible) => {
+    const list = getPh(jid, tid);
+    for (let i=0; i<list.length; i+=400) {
+      const b = writeBatch(db);
+      list.slice(i,i+400).forEach(p => b.set(doc(db,"photos",p.id), {clientVisible: visible}, {merge:true}));
+      await b.commit();
+    }
+  };
 
   const setStatus = async (jid, tid, val) => {
     await setDoc(doc(db,"taskStatus",`${jid}_${tid}`), {jobId:jid, taskId:tid, status:val});
@@ -3972,7 +3982,19 @@ export default function App() {
 
         <div style={{padding:"14px 14px 28px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-            <div style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2}}>PHOTOS {ph.length>0&&`(${ph.length})`}</div>
+            <div style={{display:"flex",alignItems:"center",gap:9,flex:1,minWidth:0}}>
+              <span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2}}>PHOTOS {ph.length>0&&`(${ph.length})`}</span>
+              {ph.length>0 && (() => {
+                const sharedN = ph.filter(p=>p.clientVisible).length;
+                const allShared = sharedN === ph.length;
+                return (
+                  <button onClick={()=>shareAllPhotos(selJob, selTask, !allShared)}
+                    style={{background:allShared?"rgba(232,176,0,.14)":CARD2,border:`1px solid ${allShared?Y:BDR2}`,borderRadius:6,padding:"4px 9px",cursor:"pointer",fontFamily:FF,fontSize:9,fontWeight:800,letterSpacing:.5,color:allShared?Y:MUTED,whiteSpace:"nowrap"}}>
+                    {allShared ? `ALL ${ph.length} SHARED` : `SHARE ALL${sharedN?` (${sharedN}/${ph.length})`:""}`}
+                  </button>
+                );
+              })()}
+            </div>
             <div style={{display:"flex",gap:6}}>
               <button onClick={()=>adminCamRef.current?.click()} style={{display:"flex",alignItems:"center",gap:4,background:Y,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>
                 <Camera size={12} color={BG}/><span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:BG}}>CAMERA</span>
@@ -4045,6 +4067,7 @@ export default function App() {
     const [tab, setTab]         = useState("costings");   // costings | progress
     const [openSec, setOpenSec] = useState(null);
     const [openTask, setOpenTask] = useState(null);
+    const [lightbox, setLightbox] = useState(null);
     const job = visible.find(j => j.id === openJob) || visible[0];
 
     if (!job) return (
@@ -4063,16 +4086,30 @@ export default function App() {
     const tasksIn = sid => [...tasksOf(job.id).filter(t => t.sId===sid && isIn(job.id,t)),
                             ...(customTasks[job.id]||[]).filter(t => t.sId===sid)]
                            .sort((a,b)=>a.id.localeCompare(b.id));
-    // Only photos an admin has ticked for the client.
+    // Only photos an admin has ticked for the client, grouped by section so the
+    // gallery reads as a story of the rebuild rather than a wall of thumbnails.
     const shared = [];
     Object.entries(photos).forEach(([k,arr]) => {
       if (!k.startsWith(job.id+"_")) return;
-      arr.forEach(p => { if (p.clientVisible) shared.push(p); });
+      const taskId = k.slice(job.id.length+1);
+      arr.forEach(p => { if (p.clientVisible) shared.push({...p, taskId}); });
     });
+    const sharedBySection = (() => {
+      const all = [...tasksOf(job.id), ...(customTasks[job.id]||[])];
+      const g = new Map();
+      shared.forEach(p => {
+        const t = all.find(x => x.id === p.taskId);
+        const sec = secsOf(job.id).find(s => s.id === t?.sId);
+        const key = sec ? `${sec.id}. ${sec.name}` : "Other";
+        if (!g.has(key)) g.set(key, []);
+        g.get(key).push({...p, taskDesc: t?.desc || p.taskId});
+      });
+      return [...g.entries()].sort((a,b)=>parseInt(a[0])-parseInt(b[0]));
+    })();
 
     return (
       <div style={{minHeight:"100dvh",background:BG,display:"flex",justifyContent:"center"}}>
-        <div style={{width:"100%",maxWidth:560,paddingBottom:40}}>
+        <div style={{width:"100%",maxWidth: isDesktop?1000:560,paddingBottom:40}}>
           <div style={{background:CARD,borderBottom:`1px solid ${BDR}`,padding:"16px 18px",display:"flex",alignItems:"center",gap:12}}>
             <div style={{maxWidth:96}}><img src={LOGO} alt="SRSA" style={{width:"100%",display:"block"}}/></div>
             <div style={{flex:1,minWidth:0}}>
@@ -4251,18 +4288,41 @@ export default function App() {
                 );
               })}
 
-              <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2,margin:"22px 0 10px"}}>PHOTOS</div>
+              <div style={{display:"flex",alignItems:"center",gap:8,margin:"24px 0 12px"}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>PHOTOS</span>
+                <div style={{flex:1,height:1,background:BDR}}/>
+                {shared.length>0 && <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{shared.length}</span>}
+              </div>
               {shared.length===0 ? (
                 <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"24px 20px",lineHeight:1.6}}>
                   No photos shared yet — SRSA will add them as the rebuild goes along.
                 </div>
-              ) : (
-                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(104px,1fr))",gap:8}}>
-                  {shared.map((p,i)=>(
-                    <a key={i} href={p.url} target="_blank" rel="noreferrer">
-                      <img src={p.url} alt="" style={{width:"100%",aspectRatio:"1",objectFit:"cover",borderRadius:9,border:`1px solid ${BDR2}`,display:"block"}}/>
-                    </a>
-                  ))}
+              ) : sharedBySection.map(([secName, list]) => (
+                <div key={secName} style={{marginBottom:18}}>
+                  <div style={{fontFamily:FF,fontSize:12,fontWeight:700,color:TXT,marginBottom:8}}>{secName}</div>
+                  <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(${isDesktop?160:104}px,1fr))`,gap:9}}>
+                    {list.map((p,i)=>(
+                      <button key={i} onClick={()=>setLightbox(p)}
+                        style={{padding:0,border:"none",background:"none",cursor:"pointer",textAlign:"left"}}>
+                        <img src={p.url} alt="" loading="lazy"
+                          style={{width:"100%",aspectRatio:"1",objectFit:"cover",borderRadius:9,border:`1px solid ${BDR2}`,display:"block"}}/>
+                        <div style={{fontSize:10,color:MUTED,marginTop:4,lineHeight:1.3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                          {p.taskDesc}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+
+              {lightbox && (
+                <div onClick={()=>setLightbox(null)}
+                  style={{position:"fixed",inset:0,background:"rgba(0,0,0,.93)",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:20,cursor:"zoom-out"}}>
+                  <img src={lightbox.url} alt="" style={{maxWidth:"100%",maxHeight:"82vh",objectFit:"contain",borderRadius:8}}/>
+                  <div style={{marginTop:14,textAlign:"center"}}>
+                    <div style={{fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>{lightbox.taskDesc}</div>
+                    <div style={{fontSize:11,color:MUTED,marginTop:3}}>{lightbox.ts||""}</div>
+                  </div>
                 </div>
               )}
             </div>
