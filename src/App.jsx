@@ -116,7 +116,8 @@ const compressImage = file => new Promise(resolve => {
 });
 
 // ── Schedule engine ────────────────────────────────────────────────
-// Rows: {taskId, dur, fixedStart, deps:[{id,type}]}
+// Rows: {taskId, dur, fixedStart, deps:[{id,type}]} — dur and fixedStart are
+// calendar days (weekends count); fixedStart is days after the job start date.
 //   type "after"   — must start when the other task FINISHES (sequential)
 //   type "with"    — may start when the other task STARTS (runs in parallel)
 //   type "blocked" — cannot start until the other task FINISHES (hard gate)
@@ -148,6 +149,53 @@ const computeSchedule = rows => {
 };
 // Gantt working day: 7:00–17:30. Sheet hours ÷ this = bar length in days.
 const GANTT_HRS_PER_DAY = 10.5;
+
+// ── Gantt calendar ──
+// The Gantt runs on real calendar dates and every day is a working day,
+// weekends included. Bars sit at a (fractional) day offset from the job's start
+// date; these helpers turn offsets into dates and back. All dates are local
+// YYYY-MM-DD strings, never UTC, so Perth mornings don't slip a day.
+const localISO = (d = new Date()) =>
+  `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+const parseISO = iso => {
+  if (!iso) return null;
+  const d = new Date(String(iso).slice(0,10) + "T00:00:00");
+  return isNaN(d) ? null : d;
+};
+const calAddDays = (iso, n) => {
+  const d = parseISO(iso); if (!d) return null;
+  d.setDate(d.getDate() + Math.floor(n));
+  return localISO(d);
+};
+const daysBetween = (aISO, bISO) => {
+  const a = parseISO(aISO), b = parseISO(bISO); if (!a || !b) return 0;
+  return Math.round((Date.UTC(b.getFullYear(),b.getMonth(),b.getDate()) -
+                     Date.UTC(a.getFullYear(),a.getMonth(),a.getDate())) / 864e5);
+};
+// Start dates saved before the Gantt went calendar-based were Mon–Fri day
+// counts from the job start. Used once to convert them to real dates.
+const legacyWorkdayDate = (startISO, off) => {
+  const d = parseISO(startISO); if (!d) return null;
+  let left = Math.round(off);
+  while (left > 0) { d.setDate(d.getDate()+1); const w = d.getDay(); if (w!==0 && w!==6) left--; }
+  return localISO(d);
+};
+const fmtDMY = iso => {
+  const d = parseISO(iso);
+  return d ? `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getFullYear()).slice(2)}` : "";
+};
+const fmtDM = iso => { const d = parseISO(iso); return d ? `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}` : ""; };
+// The day a job's Gantt counts from: its start date, or today if none is set.
+const ganttAnchor = job => (job?.started && parseISO(job.started)) ? String(job.started).slice(0,10) : localISO();
+// First and last calendar date a bar touches. A bar ending exactly at midnight
+// finishes the day before.
+const barDates = (anchorISO, start, end) => ({
+  from: calAddDays(anchorISO, start),
+  to:   calAddDays(anchorISO, Math.max(Math.floor(start), Math.ceil(end - 1e-6) - 1)),
+});
+// Survives GanttView remounting on every App render (scroll position, one-off migration).
+const ganttUI = { el: null, jobId: null, zoom: null, scrollLeft: null, migrated: new Set() };
+const DOW_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const DEP_TYPES = [
   {v:"after",   label:"Starts after",        hint:"begins when that job finishes"},
   {v:"with",    label:"Runs alongside",      hint:"can start when that job starts"},
@@ -370,9 +418,9 @@ const TimeRow = ({s,setS,f,setF,b,setB}) => (
 // ── Edit one bar on the Gantt: duration, fixed start, and dependencies ──
 // MODULE LEVEL — holds controlled text inputs.
 // `options` is every job on the sheet that can be the other side of a rule.
-const ScheduleEditor = ({job, row, onClose, options, onSave, onReset}) => {
+const ScheduleEditor = ({job, row, onClose, options, onSave, onReset, anchor, when}) => {
   const [dur, setDur]     = useState(String(row.dur ?? ""));
-  const [fixed, setFixed] = useState(row.fixedStart ?? "");
+  const [startDate, setStartDate] = useState(row.startDate || "");
   const [deps, setDeps]   = useState(row.deps || []);
   const [picking, setPicking] = useState(false);
   const [pickQ, setPickQ] = useState("");
@@ -388,7 +436,8 @@ const ScheduleEditor = ({job, row, onClose, options, onSave, onReset}) => {
     setBusy(true);
     await onSave({
       dur: parseFloat(dur) || 0,
-      fixedStart: fixed === "" ? null : parseFloat(fixed),
+      startDate: startDate || null,
+      fixedStart: null,          // superseded by startDate
       deps,
     });
     setBusy(false); onClose();
@@ -406,6 +455,12 @@ const ScheduleEditor = ({job, row, onClose, options, onSave, onReset}) => {
             <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{row.taskId}</div>
             <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.2}}>{task?.desc || "Task"}</div>
             {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h on the sheet = {Math.round(task.est/GANTT_HRS_PER_DAY*100)/100} days</div>}
+            {when?.from && (
+              <div style={{fontSize:12,color:TXT,marginTop:5,fontFamily:MONO}}>
+                {when.from===when.to ? `${DOW_SHORT[parseISO(when.from).getDay()]} ${fmtDMY(when.from)}`
+                  : `${DOW_SHORT[parseISO(when.from).getDay()]} ${fmtDMY(when.from)} → ${DOW_SHORT[parseISO(when.to).getDay()]} ${fmtDMY(when.to)}`}
+              </div>
+            )}
           </div>
           <button onClick={onClose} style={{background:BDR2,border:"none",borderRadius:8,padding:6,cursor:"pointer",flexShrink:0}}><X size={16} color={MUTED}/></button>
         </div>
@@ -424,12 +479,21 @@ const ScheduleEditor = ({job, row, onClose, options, onSave, onReset}) => {
         </div>
 
         <div style={{marginBottom:16}}>
-          <CardLabel>EARLIEST START (DAYS FROM PROJECT START)</CardLabel>
-          <input type="number" step="0.5" min="0" value={fixed} onChange={e=>setFixed(e.target.value)}
-            placeholder="auto — follows the rules below" style={{...fld,fontSize:14}}/>
-          <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.4}}>
-            Leave blank to let the rules decide. Set a number to hold it back until at least that day.
+          <CardLabel>EARLIEST START DATE</CardLabel>
+          <div style={{display:"flex",gap:8}}>
+            <input type="date" value={startDate} min={anchor||undefined} onChange={e=>setStartDate(e.target.value)}
+              style={{...fld,fontSize:14,flex:1,colorScheme:"dark"}}/>
+            {startDate && (
+              <button onClick={()=>setStartDate("")}
+                style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"0 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:.5}}>CLEAR</button>
+            )}
           </div>
+          <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.4}}>
+            Leave blank to let the rules decide. Set a date to hold this job back until at least that day — weekends count.
+          </div>
+          {startDate && anchor && startDate < anchor && (
+            <div style={{fontSize:11,color:"#F5A524",marginTop:4}}>That's before the project start ({fmtDMY(anchor)}) — it'll sit on the start date.</div>
+          )}
         </div>
 
         <div style={{marginBottom:8}}>
@@ -439,7 +503,7 @@ const ScheduleEditor = ({job, row, onClose, options, onSave, onReset}) => {
               {row.droppedDeps} saved rule{row.droppedDeps===1?"":"s"} pointed at a job number no longer on the sheet and {row.droppedDeps===1?"was":"were"} removed. Save to keep what's below.
             </div>
           )}
-          {deps.length===0 && <div style={{fontSize:12,color:MUTED,padding:"8px 0 4px"}}>No rules — this can start at day {fixed||0}.</div>}
+          {deps.length===0 && <div style={{fontSize:12,color:MUTED,padding:"8px 0 4px"}}>No rules — starts {startDate ? fmtDMY(startDate) : "on the project start date"}.</div>}
           {deps.map((d,i) => (
             <div key={d.id+i} style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7}}>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
@@ -1806,6 +1870,8 @@ export default function App() {
   const [showCard, setShowCard]       = useState(false); // new card form open
   const [editCard, setEditCard]       = useState(null);  // card being edited
   const [editSched, setEditSched]     = useState(null);  // {job,row} being edited on the Gantt
+  const [ganttJobId, setGanttJobId]   = useState(null);  // kept here so saving a bar doesn't reset the Gantt
+  const [ganttZoom, setGanttZoom]     = useState(44);    // px per calendar day
   const [showHoseBuilder, setShowHoseBuilder] = useState(false);
   const [confirmHoseDel, setConfirmHoseDel]   = useState(null); // hose pending delete (tech view)
   const [editHose, setEditHose]               = useState(null); // hose being edited (tech view)
@@ -1884,6 +1950,8 @@ export default function App() {
   };
   const sheetDays = est => Math.round((Number(est)||0) / GANTT_HRS_PER_DAY * 100) / 100;
   const schedRows = jid => {
+    const job    = jobs.find(j => j.id === jid);
+    const anchor = ganttAnchor(job);
     const included = sheetOrder(jid).filter(t => {
       const ov = schedOv[eKey(jid, t.id)] || {};
       if (ov.hidden) return false;
@@ -1903,12 +1971,15 @@ export default function App() {
         taskId: t.id, sId: t.sId, desc: t.desc, est: Number(t.est)||0,
         sheetDur: sheetDays(t.est),
         dur: typeof ov.dur === "number" ? ov.dur : sheetDays(t.est),
-        fixedStart: typeof ov.fixedStart === "number" ? ov.fixedStart : null,
+        // Pinned start: a saved date, or a pre-calendar Mon–Fri offset converted to one.
+        startDate: ov.startDate || (typeof ov.fixedStart === "number" ? legacyWorkdayDate(anchor, ov.fixedStart) : null),
+        fixedStart: null,
         deps,
         droppedDeps: saved ? saved.length - kept.length : 0,
         depsFromSheet: saved === null || (saved.length > 0 && kept.length === 0),
         edited: !!schedOv[eKey(jid, t.id)],
       };
+      if (row.startDate) row.fixedStart = Math.max(0, daysBetween(anchor, row.startDate));
       prev = t.id;
       return row;
     });
@@ -1928,27 +1999,12 @@ export default function App() {
     }
   };
 
-  // Working days between a job's start and a calendar date (Mon–Fri only).
-  // This is what turns "put it in the week of the 21st" into a Gantt offset.
-  const workingOffset = (startISO, targetISO) => {
-    if (!startISO || !targetISO) return 0;
-    const a = new Date(startISO + "T00:00:00"), b = new Date(targetISO + "T00:00:00");
-    if (isNaN(a) || isNaN(b)) return 0;
-    if (b <= a) return 0;
-    let n = 0;
-    for (const d = new Date(a); d < b; d.setDate(d.getDate()+1)) {
-      const w = d.getDay();
-      if (w !== 0 && w !== 6) n++;
-    }
-    return n;
-  };
   // Put a task into a given week with an estimated number of days. Clearing any
   // dependencies is deliberate — an explicitly planned week wins over the
   // sheet's original ordering.
   const planTaskIntoWeek = async (jid, taskId, weekStartISO, days) => {
-    const job = jobs.find(j => j.id === jid);
     await saveSchedRow(jid, taskId, {
-      fixedStart: workingOffset(job?.started, weekStartISO),
+      startDate: weekStartISO, fixedStart: null,
       dur: Number(days) || 1,
       deps: [],
       plannedWeek: weekStartISO,
@@ -4518,16 +4574,17 @@ export default function App() {
 
 
   // ── Admin: Gantt ─────────────────────────────────────────────────
-  // Day-scaled build timeline. A day is 7:00–17:30 (10.5 working hours). Bars
-  // come from the scheduling engine; tapping one opens the editor to change its
-  // day, duration and dependencies. Task column stays frozen while scrolling.
-  const HRS_PER_DAY = GANTT_HRS_PER_DAY;   // 7:00 – 17:30
+  // Calendar Gantt. Bars are laid out on real dates from the job's start date,
+  // and every day is a working day — weekends included — of 10.5h (7:00–17:30).
+  // Tapping a bar opens the editor to set a start date, duration and rules.
+  // The job column stays frozen while the dates scroll.
+  const HRS_PER_DAY = GANTT_HRS_PER_DAY;
   const GanttView = () => {
-    const [ganttJob, setGanttJob] = useState(jobs[0]?.id || "");
-    const [zoom, setZoom]         = useState(80);   // px per day
-    const [busy, setBusy]         = useState(false);
-    const job = jobs.find(j => j.id === ganttJob);
+    const job  = jobs.find(j => j.id === ganttJobId) || jobs[0];
+    const zoom = ganttZoom, setZoom = setGanttZoom;
+    const [busy, setBusy] = useState(false);
 
+    const anchor = ganttAnchor(job);
     const rows = job ? schedRows(job.id) : [];
     const {times, cycles} = rows.length ? computeSchedule(rows) : {times:{}, cycles:[]};
     const span = Math.max(1, ...rows.map(r => times[r.taskId]?.end || 0));
@@ -4538,44 +4595,73 @@ export default function App() {
     const savedCount = job ? schedDocsFor(job.id).length : 0;
     const resetAll = async () => {
       if (!job) return;
-      if (!window.confirm(`Reset the whole Gantt for this machine back to the job sheet?\n\nThis clears ${savedCount} saved change${savedCount===1?"":"s"} (durations, start days and rules). Every job goes back to the sheet's hours, following the one above it.`)) return;
+      if (!window.confirm(`Reset the whole Gantt for this machine back to the job sheet?\n\nThis clears ${savedCount} saved change${savedCount===1?"":"s"} (start dates, durations and rules). Every job goes back to the sheet's hours, following the one above it.`)) return;
       setBusy(true); await deleteSchedDocs(schedDocsFor(job.id)); setBusy(false);
     };
     const clearStale = async () => {
       setBusy(true); await deleteSchedDocs(stale); setBusy(false);
     };
+    const saveJobStart = async v => {
+      if (!job || !v || v === job.started || !parseISO(v)) return;
+      await setDoc(doc(db,"jobs",job.id), {started: v}, {merge:true});
+    };
     const fmtH = h => `${Math.round(h*10)/10}h`;
     const statusOf = tid => getStatus(job.id, tid);
     const colFor = tid => { const s=statusOf(tid); return s==="completed"?GRN : s==="on_hold"?"#F5A524" : Y; };
 
-    // Working-day offset → calendar date (skips weekends) from the job start.
-    const dateAt = off => {
-      if (!job?.started) return null;
-      const d = new Date(job.started+"T00:00:00"); let left = Math.round(off);
-      while (left > 0) { d.setDate(d.getDate()+1); const w=d.getDay(); if (w!==0&&w!==6) left--; }
-      return d;
-    };
-    const fmtDate = d => d ? `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}` : "";
-    const workingDaysSince = () => {
-      if (!job?.started) return null;
-      const from=new Date(job.started+"T00:00:00"), to=new Date();
-      if (to<from) return null;
-      let n=0; for (const d=new Date(from); d<to; d.setDate(d.getDate()+1)){const w=d.getDay(); if(w!==0&&w!==6)n++;}
-      return n;
-    };
-    const elapsed = workingDaysSince();
+    // Start dates saved before the Gantt used real dates were Mon–Fri day counts.
+    // Convert them to dates once so moving the project start doesn't shift them.
+    useEffect(() => {
+      if (!job?.started || ganttUI.migrated.has(job.id)) return;
+      const legacy = schedDocsFor(job.id).filter(o => typeof o.fixedStart === "number" && !o.startDate);
+      if (!legacy.length) return;
+      ganttUI.migrated.add(job.id);
+      const b = writeBatch(db);
+      legacy.slice(0, 400).forEach(o => b.set(doc(db,"schedule",o.id),
+        {startDate: legacyWorkdayDate(job.started, o.fixedStart), fixedStart: null}, {merge:true}));
+      b.commit().catch(() => ganttUI.migrated.delete(job.id));
+    }, [job?.id]);
+
+    const todayISO = localISO();
+    const elapsed  = daysBetween(anchor, todayISO);          // negative if the job hasn't started
+    const endISO   = rows.length ? barDates(anchor, 0, span).to : anchor;
     const done = rows.filter(r => statusOf(r.taskId)==="completed").length;
 
-    const LBL = 190;                 // frozen task-name column width
-    const dayW = zoom;               // px per day
-    const chartW = Math.ceil(span) * dayW;
+    const LBL = 226;                 // frozen job column width
+    const dayW = zoom;               // px per calendar day
+    const nDays = Math.max(Math.ceil(span) + 3, elapsed >= 0 ? elapsed + 2 : 0);
+    const chartW = nDays * dayW;
     const ROW = 30;
+    const days = Array.from({length: nDays}, (_,i) => {
+      const iso = calAddDays(anchor, i), d = parseISO(iso);
+      return {i, iso, dow: d.getDay(), date: d.getDate(), month: d.getMonth(), year: d.getFullYear()};
+    });
+    const MON = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+
+    // Keep the horizontal scroll where it was across re-renders; open on today.
+    const scrollToToday = el => { if (el) el.scrollLeft = Math.max(0, (Math.max(0,elapsed)) * dayW - 80); };
+    const bindScroll = el => {
+      if (!el) return;
+      const first = ganttUI.el !== el;
+      ganttUI.el = el;
+      if (!first) return;
+      if (ganttUI.jobId !== job?.id || ganttUI.scrollLeft === null) {
+        ganttUI.jobId = job?.id; ganttUI.zoom = zoom; scrollToToday(el);
+      } else {
+        el.scrollLeft = ganttUI.zoom && ganttUI.zoom !== zoom ? ganttUI.scrollLeft * zoom / ganttUI.zoom : ganttUI.scrollLeft;
+        ganttUI.zoom = zoom;
+      }
+      ganttUI.scrollLeft = el.scrollLeft;
+    };
 
     // Ordered by scheduled start so the chart reads top-to-bottom in time.
     const sheetIdx = Object.fromEntries(rows.map((r,i) => [r.taskId, i]));
     const ordered = [...rows].sort((a,b) => (times[a.taskId]?.start||0) - (times[b.taskId]?.start||0)
                                           || sheetIdx[a.taskId] - sheetIdx[b.taskId]);
-    const dayTicks = Array.from({length: Math.ceil(span)+1}, (_,i)=>i);
+    const whenOf = r => { const t = times[r.taskId] || {start:0,end:0}; return barDates(anchor, t.start, t.end); };
+    const rangeTxt = w => w.from===w.to ? `${DOW_SHORT[parseISO(w.from).getDay()]} ${fmtDMY(w.from)}`
+      : `${DOW_SHORT[parseISO(w.from).getDay()]} ${fmtDMY(w.from)} → ${DOW_SHORT[parseISO(w.to).getDay()]} ${fmtDMY(w.to)}`;
+    const weekendBg = "rgba(255,255,255,.035)";
 
     return (
       <div>
@@ -4584,25 +4670,36 @@ export default function App() {
             <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
               <ChevronLeft size={18} color={TXT}/>
             </button>
-            <div style={{flex:1}}>
+            <div style={{flex:1,minWidth:0}}>
               <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>GANTT</div>
               <div style={{fontSize:11,color:MUTED}}>
-                {job ? `${done}/${rows.length} complete · ${span.toFixed(1)} days` : "no job selected"}
-                {job?.started && ` · ends ${fmtDate(dateAt(span))}`}
+                {job ? `${done}/${rows.length} complete · ${fmtDMY(anchor)} → ${fmtDMY(endISO)} · ${daysBetween(anchor,endISO)+1} days` : "no job selected"}
               </div>
             </div>
           </div>
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <select value={ganttJob} onChange={e=>setGanttJob(e.target.value)}
+            <select value={job?.id||""} onChange={e=>{ setGanttJobId(e.target.value); ganttUI.scrollLeft = null; }}
               style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",appearance:"none",minWidth:0}}>
               {jobs.map(j => <option key={j.id} value={j.id}>{getTemplate(j.templateId).name} — {j.client}</option>)}
             </select>
             <div style={{display:"flex",alignItems:"center",gap:4,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"4px 6px"}}>
-              <button onClick={()=>setZoom(z=>Math.max(28,z-16))} style={{background:"none",border:"none",cursor:"pointer",color:TXT,fontSize:16,width:24}}>−</button>
+              <button onClick={()=>setZoom(z=>Math.max(20,z-8))} style={{background:"none",border:"none",cursor:"pointer",color:TXT,fontSize:16,width:24}}>−</button>
               <span style={{fontSize:10,color:MUTED,width:34,textAlign:"center"}}>zoom</span>
-              <button onClick={()=>setZoom(z=>Math.min(160,z+16))} style={{background:"none",border:"none",cursor:"pointer",color:TXT,fontSize:16,width:24}}>+</button>
+              <button onClick={()=>setZoom(z=>Math.min(140,z+8))} style={{background:"none",border:"none",cursor:"pointer",color:TXT,fontSize:16,width:24}}>+</button>
             </div>
           </div>
+          {job && (
+            <div style={{display:"flex",gap:8,alignItems:"center",marginTop:8}}>
+              <span style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1,flexShrink:0}}>PROJECT START</span>
+              {/* Uncontrolled + commit on blur/Enter: this view remounts on every save. */}
+              <input type="date" key={job.id+(job.started||"")} defaultValue={job.started||""}
+                onBlur={e=>saveJobStart(e.target.value)}
+                onKeyDown={e=>{ if (e.key==="Enter") e.currentTarget.blur(); }}
+                style={{flex:1,minWidth:0,background:CARD2,border:`1px solid ${job.started?BDR2:"#F5A524"}`,borderRadius:8,padding:"8px 10px",color:TXT,fontSize:13,outline:"none",colorScheme:"dark",fontFamily:MONO}}/>
+              <button onClick={()=>scrollToToday(ganttUI.el)}
+                style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:RED,letterSpacing:1,flexShrink:0}}>TODAY</button>
+            </div>
+          )}
           {job && savedCount>0 && (
             <button onClick={resetAll} disabled={busy}
               style={{marginTop:8,width:"100%",background:"none",border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
@@ -4615,7 +4712,7 @@ export default function App() {
           {!job && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 0"}}>No jobs yet.</div>}
           {job && !job.started && (
             <div style={{background:"rgba(245,165,36,.1)",border:"1px solid #F5A524",borderRadius:11,padding:"12px 14px",marginBottom:14,fontSize:12,color:"#F5A524",lineHeight:1.5}}>
-              Set a start date on this job so the timeline can show real dates.
+              No project start date on this job, so the dates below count from today. Set PROJECT START above.
             </div>
           )}
           {cycles.length>0 && (
@@ -4653,7 +4750,7 @@ export default function App() {
                 <div style={{maxHeight:340,overflowY:"auto",border:`1px solid ${BDR}`,borderRadius:9}}>
                   {(tmpl?.tasks||[]).filter(t=>isIn(job.id,t)).map(t => (
                     <button key={t.id}
-                      onClick={()=>setEditSched({job, row:{taskId:t.id, dur:Math.max(0.5,Math.round((t.est/HRS_PER_DAY)*2)/2), sheetDur:null, fixedStart:0, deps:[], depsFromSheet:false, droppedDeps:0}})}
+                      onClick={()=>setEditSched({job, row:{taskId:t.id, dur:Math.max(0.5,Math.round((t.est/HRS_PER_DAY)*2)/2), sheetDur:null, startDate:null, fixedStart:null, deps:[], depsFromSheet:false, droppedDeps:0}})}
                       style={{display:"flex",alignItems:"center",gap:9,width:"100%",textAlign:"left",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"9px 11px",cursor:"pointer"}}>
                       <span style={{fontFamily:MONO,fontSize:11,color:Y,minWidth:42,flexShrink:0}}>{t.id}</span>
                       <span style={{fontSize:12,color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</span>
@@ -4667,11 +4764,13 @@ export default function App() {
 
           {job && rows.length>0 && (
             <div style={{border:`1px solid ${BDR}`,borderRadius:12,overflow:"hidden",background:CARD}}>
-              <div style={{display:"flex",overflowX:"auto",position:"relative"}}>
-                {/* Frozen task-name column */}
+              <div ref={bindScroll} onScroll={e=>{ ganttUI.scrollLeft = e.currentTarget.scrollLeft; }}
+                style={{display:"flex",overflowX:"auto",position:"relative"}}>
+                {/* Frozen job column */}
                 <div style={{position:"sticky",left:0,zIndex:3,background:CARD,borderRight:`2px solid ${BDR}`,flexShrink:0,width:LBL}}>
-                  <div style={{height:34,borderBottom:`1px solid ${BDR}`,display:"flex",alignItems:"center",padding:"0 12px",background:CARD2}}>
-                    <span style={{fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1}}>TASK</span>
+                  <div style={{height:44,borderBottom:`1px solid ${BDR}`,display:"flex",alignItems:"flex-end",padding:"0 12px 7px",background:CARD2}}>
+                    <span style={{fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1}}>JOB</span>
+                    <span style={{marginLeft:"auto",fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1}}>START</span>
                   </div>
                   {ordered.map(r => {
                     const t = taskOf(r.taskId);
@@ -4680,50 +4779,58 @@ export default function App() {
                         style={{display:"flex",alignItems:"center",gap:7,width:"100%",height:ROW,borderBottom:`1px solid ${BDR}`,background:"none",border:"none",borderBottomStyle:"solid",padding:"0 10px",cursor:"pointer",textAlign:"left"}}>
                         <span style={{fontFamily:MONO,fontSize:10,color:colFor(r.taskId),minWidth:38,flexShrink:0}}>{r.taskId}</span>
                         <span style={{fontSize:11,color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t?.desc||r.taskId}</span>
+                        <span style={{fontFamily:MONO,fontSize:9,color:r.startDate?Y:MUTED,flexShrink:0}}>{fmtDM(whenOf(r).from)}</span>
                       </button>
                     );
                   })}
                 </div>
 
-                {/* Scrolling timeline */}
+                {/* Scrolling calendar */}
                 <div style={{position:"relative",width:chartW,flexShrink:0}}>
-                  {/* header: day numbers + dates */}
-                  <div style={{height:34,borderBottom:`1px solid ${BDR}`,position:"relative",background:CARD2}}>
-                    {dayTicks.map(d => {
-                      const dt = dateAt(d);
-                      return (
-                        <div key={d} style={{position:"absolute",left:d*dayW,top:0,width:dayW,height:"100%",borderLeft:`1px solid ${BDR}`,display:"flex",flexDirection:"column",justifyContent:"center",alignItems:"center"}}>
-                          <span style={{fontFamily:MONO,fontSize:9,color:MUTED}}>d{d}</span>
-                          {dt && <span style={{fontSize:8,color:MUTED,opacity:.7}}>{fmtDate(dt)}</span>}
-                        </div>
-                      );
-                    })}
+                  {/* header: month, weekday letter, date */}
+                  <div style={{height:44,borderBottom:`1px solid ${BDR}`,position:"relative",background:CARD2}}>
+                    {days.map(d => (
+                      <div key={d.i} style={{position:"absolute",left:d.i*dayW,top:0,width:dayW,height:"100%",
+                        borderLeft:`1px solid ${d.dow===1?BDR2:BDR}`,background:(d.dow===0||d.dow===6)?weekendBg:"transparent",
+                        display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:4,boxSizing:"border-box"}}>
+                        {(d.i===0 || d.date===1) && (
+                          <span style={{position:"absolute",top:3,left:3,fontFamily:FF,fontSize:9,fontWeight:800,color:Y,letterSpacing:1,whiteSpace:"nowrap"}}>
+                            {MON[d.month]} {String(d.year).slice(2)}
+                          </span>
+                        )}
+                        <span style={{fontSize:8,color:(d.dow===0||d.dow===6)?Y:MUTED,opacity:.8}}>{"SMTWTFS"[d.dow]}</span>
+                        <span style={{fontFamily:MONO,fontSize:dayW<28?8:10,color:d.iso===todayISO?RED:TXT}}>{d.date}</span>
+                      </div>
+                    ))}
                   </div>
                   {/* body */}
                   <div style={{position:"relative"}}>
-                    {/* vertical day gridlines */}
-                    {dayTicks.map(d => (
-                      <div key={d} style={{position:"absolute",left:d*dayW,top:0,bottom:0,width:1,background:BDR}}/>
+                    {/* weekend shading + day lines (Mondays darker) */}
+                    {days.map(d => (
+                      <div key={d.i} style={{position:"absolute",left:d.i*dayW,top:0,bottom:0,width:dayW,
+                        borderLeft:`1px solid ${d.dow===1?BDR2:BDR}`,background:(d.dow===0||d.dow===6)?weekendBg:"transparent",boxSizing:"border-box"}}/>
                     ))}
                     {/* today marker */}
-                    {elapsed!==null && elapsed<=span && (
-                      <div style={{position:"absolute",left:elapsed*dayW,top:0,bottom:0,width:2,background:RED,zIndex:2}}>
-                        <span style={{position:"absolute",top:-1,left:3,fontSize:8,color:RED,fontFamily:"'Barlow',sans-serif",fontWeight:700}}>TODAY</span>
-                      </div>
+                    {elapsed>=0 && elapsed<nDays && (
+                      <div style={{position:"absolute",left:elapsed*dayW,top:0,bottom:0,width:dayW,background:"rgba(255,76,76,.07)",borderLeft:`2px solid ${RED}`,zIndex:2,pointerEvents:"none"}}/>
                     )}
                     {ordered.map(r => {
                       const t = times[r.taskId] || {start:0,end:0};
+                      const w = whenOf(r);
                       const left = t.start*dayW;
-                      const w = Math.max((t.end-t.start)*dayW, 4);
-                      const edited = r.edited;
+                      const width = Math.max((t.end-t.start)*dayW, 4);
                       const task = taskOf(r.taskId);
+                      const label = `${fmtH(r.dur*HRS_PER_DAY)}${r.edited?" *":""}`;
                       return (
                         <div key={r.taskId} style={{height:ROW,borderBottom:`1px solid ${BDR}`,position:"relative"}}>
                           <button onClick={()=>setEditSched({job, row:r})}
-                            title={`${r.taskId} — ${task?.desc||""}\n${fmtH(r.dur*HRS_PER_DAY)} (${r.dur}d)${r.dur!==r.sheetDur?` · sheet ${fmtH(r.est)}`:""}\nDay ${t.start.toFixed(1)}–${t.end.toFixed(1)}${dateAt(t.start)?`\n${fmtDate(dateAt(t.start))} → ${fmtDate(dateAt(t.end))}`:""}${r.deps?.length?`\nRules: ${r.deps.map(d=>`${d.type} ${d.id}`).join(", ")}`:""}`}
-                            style={{position:"absolute",left,top:5,width:w,height:ROW-10,borderRadius:4,border:"none",cursor:"pointer",background:colFor(r.taskId),opacity:statusOf(r.taskId)==="ongoing"?.5:.95,display:"flex",alignItems:"center",padding:"0 6px",overflow:"hidden"}}>
-                            <span style={{fontFamily:FF,fontSize:9,fontWeight:700,color:BG,whiteSpace:"nowrap"}}>{fmtH(r.dur*HRS_PER_DAY)}{edited?" *":""}</span>
+                            title={`${r.taskId} — ${task?.desc||""}\n${rangeTxt(w)}\n${fmtH(r.dur*HRS_PER_DAY)} (${r.dur} day${r.dur===1?"":"s"})${r.dur!==r.sheetDur?` · sheet ${fmtH(r.est)}`:""}${r.startDate?`\nPinned: not before ${fmtDMY(r.startDate)}`:""}${r.deps?.length?`\nRules: ${r.deps.map(d=>`${d.type} ${d.id}`).join(", ")}`:""}`}
+                            style={{position:"absolute",left,top:5,width,height:ROW-10,borderRadius:4,border:r.startDate?`1px solid ${TXT}`:"none",cursor:"pointer",background:colFor(r.taskId),opacity:statusOf(r.taskId)==="ongoing"?.55:.95,display:"flex",alignItems:"center",padding:"0 6px",overflow:"hidden",zIndex:3,boxSizing:"border-box"}}>
+                            {width>34 && <span style={{fontFamily:FF,fontSize:9,fontWeight:700,color:BG,whiteSpace:"nowrap"}}>{label}</span>}
                           </button>
+                          {width<=34 && (
+                            <span style={{position:"absolute",left:left+width+4,top:9,fontFamily:FF,fontSize:9,color:MUTED,whiteSpace:"nowrap",pointerEvents:"none"}}>{label}</span>
+                          )}
                         </div>
                       );
                     })}
@@ -4731,13 +4838,13 @@ export default function App() {
                 </div>
               </div>
 
-              <div style={{display:"flex",gap:14,justifyContent:"center",padding:"10px 0",flexWrap:"wrap",borderTop:`1px solid ${BDR}`}}>
+              <div style={{display:"flex",gap:14,justifyContent:"center",padding:"10px 8px",flexWrap:"wrap",borderTop:`1px solid ${BDR}`}}>
                 {[["Complete",GRN],["In progress",Y],["On hold","#F5A524"]].map(([l,c])=>(
                   <span key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:MUTED}}>
                     <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
                   </span>
                 ))}
-                <span style={{fontSize:10,color:MUTED}}>· from the job sheet · day = 7:00–17:30 (10.5h) · tap a bar to edit · * changed from sheet</span>
+                <span style={{fontSize:10,color:MUTED}}>· 7 days a week, weekends shaded · 10.5h days (7:00–17:30) · outlined = pinned to a date · * changed from sheet · tap a bar to edit</span>
               </div>
             </div>
           )}
@@ -4980,23 +5087,11 @@ export default function App() {
       const {times, cycles} = computeSchedule(rows);
       const span  = Math.max(1, ...rows.map(r => times[r.taskId]?.end || 0));
 
-      const workingDaysSince = iso => {
-        if (!iso) return null;
-        const from = new Date(iso), to = new Date();
-        if (isNaN(from) || to < from) return null;
-        let n = 0;
-        for (let d = new Date(from); d <= to; d.setDate(d.getDate()+1)) {
-          const dow = d.getDay(); if (dow !== 0 && dow !== 6) n++;
-        }
-        return n;
-      };
-      const elapsed = workingDaysSince(job.started);
-      const dateAt = off => {
-        if (!job.started) return null;
-        const d = new Date(job.started); let left = Math.round(off);
-        while (left > 0) { d.setDate(d.getDate()+1); const w=d.getDay(); if (w!==0&&w!==6) left--; }
-        return d.toISOString().split("T")[0];
-      };
+      // Calendar days from the job start, weekends included — same as the full Gantt.
+      const anchor  = ganttAnchor(job);
+      const e0      = daysBetween(anchor, localISO());
+      const elapsed = e0 >= 0 ? e0 : null;
+      const endISO  = barDates(anchor, 0, span).to;
       const statusOf = tid => getStatus(job.id, tid);
       const secs = secsOf(job.id).map(sec => {
         const rs = rows.filter(r => r.sId === sec.id);
@@ -5011,7 +5106,7 @@ export default function App() {
       const ROW=20, LBL=112, PAD=8, TOP=22;
       const W=340, H=TOP + secs.length*ROW + 14;
       const x = d => LBL + (d/span)*(W-LBL-PAD);
-      const step = span > 120 ? 20 : span > 50 ? 10 : 5;
+      const step = span > 150 ? 28 : span > 60 ? 14 : 7;
       const ticks=[]; for (let d=0; d<=span; d+=step) ticks.push(d);
       const done = rows.filter(r => statusOf(r.taskId)==="completed").length;
 
@@ -5019,7 +5114,7 @@ export default function App() {
         <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 8px 6px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",padding:"0 6px 8px"}}>
             <span style={{fontSize:11,color:MUTED}}>{done}/{rows.length} jobs complete · tap for full Gantt</span>
-            <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{span.toFixed(1)} days{dateAt(span)?` · ends ${dateAt(span)}`:""}</span>
+            <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{fmtDMY(anchor)} → {fmtDMY(endISO)}</span>
           </div>
           {cycles.length>0 && (
             <div style={{background:"rgba(255,76,76,.1)",border:`1px solid ${RED}`,borderRadius:8,padding:"8px 10px",margin:"0 6px 8px",fontSize:11,color:RED}}>
@@ -5031,7 +5126,7 @@ export default function App() {
               {ticks.map(d => (
                 <g key={d}>
                   <line x1={x(d)} x2={x(d)} y1={TOP-6} y2={H-10} stroke={BDR} strokeWidth=".7"/>
-                  <text x={x(d)} y={TOP-10} fill={MUTED} fontSize="7" textAnchor="middle" fontFamily="'DM Mono',monospace">d{d}</text>
+                  <text x={x(d)} y={TOP-10} fill={MUTED} fontSize="7" textAnchor="middle" fontFamily="'DM Mono',monospace">{fmtDM(calAddDays(anchor, d))}</text>
                 </g>
               ))}
               {elapsed !== null && elapsed <= span && (<>
@@ -5047,7 +5142,7 @@ export default function App() {
                     <text x={2} y={y+11} fill={TXT} fontSize="7.5" fontFamily="'Barlow',sans-serif">{`${s.sec.id}. ${s.sec.name}`.slice(0,24)}</text>
                     <rect x={x(s.start)} y={y+3} width={bw} height={ROW-8} rx="2" fill={s.hold?"#F5A524":Y} opacity=".35"/>
                     <rect x={x(s.start)} y={y+3} width={bw*frac} height={ROW-8} rx="2" fill={GRN} opacity=".95"/>
-                    <title>{s.sec.id}. {s.sec.name}{"\n"}{s.done}/{s.n} jobs · {Math.round(s.hours)}h{"\n"}Days {s.start.toFixed(1)}–{s.end.toFixed(1)}{dateAt(s.start)?`\n${dateAt(s.start)} → ${dateAt(s.end)}`:""}</title>
+                    <title>{s.sec.id}. {s.sec.name}{"\n"}{s.done}/{s.n} jobs · {Math.round(s.hours)}h{"\n"}{(({from,to}) => `${fmtDMY(from)} → ${fmtDMY(to)}`)(barDates(anchor, s.start, s.end))}</title>
                   </g>
                 );
               })}
@@ -5212,7 +5307,7 @@ export default function App() {
 
           {scopeJobs.map(j => (
             <Section key={j.id} title={scopeJobs.length>1 ? `SCHEDULE — ${j.client}` : "BUILD SCHEDULE"}
-                     right={j.started?`started ${j.started}`:""}>
+                     right={j.started?`started ${fmtDMY(j.started)}`:""}>
               {schedRows(j.id).length > 0
                 ? <GanttChart job={j}/>
                 : (
@@ -5414,6 +5509,13 @@ export default function App() {
       )}
       {editSched && (
         <ScheduleEditor {...editSched}
+          anchor={ganttAnchor(jobs.find(j=>j.id===editSched.job.id) || editSched.job)}
+          when={(() => {
+            const rs = schedRows(editSched.job.id);
+            if (!rs.some(r => r.taskId === editSched.row.taskId)) return null;
+            const t = computeSchedule(rs).times[editSched.row.taskId];
+            return t ? barDates(ganttAnchor(jobs.find(j=>j.id===editSched.job.id)), t.start, t.end) : null;
+          })()}
           options={sheetOrder(editSched.job.id).map(t => ({id:t.id, desc:t.desc, est:Number(t.est)||0}))}
           onSave={patch => {
             // Only store what actually differs from the sheet, so bars keep
