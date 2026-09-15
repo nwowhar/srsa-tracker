@@ -2115,20 +2115,6 @@ export default function App() {
     await deleteDoc(doc(db,"jobs",id));
     setConfirmDel(null); goHome();
   };
-  // Flag a photo as visible to the customer's portal.
-  const toggleClientPhoto = async p => {
-    await setDoc(doc(db,"photos", p.id), {clientVisible: !p.clientVisible}, {merge:true});
-  };
-  // Share (or unshare) every photo on a task at once — curating forty photos one
-  // tap at a time is nobody's idea of a good afternoon.
-  const shareAllPhotos = async (jid, tid, visible) => {
-    const list = getPh(jid, tid);
-    for (let i=0; i<list.length; i+=400) {
-      const b = writeBatch(db);
-      list.slice(i,i+400).forEach(p => b.set(doc(db,"photos",p.id), {clientVisible: visible}, {merge:true}));
-      await b.commit();
-    }
-  };
 
   const setStatus = async (jid, tid, val) => {
     await setDoc(doc(db,"taskStatus",`${jid}_${tid}`), {jobId:jid, taskId:tid, status:val});
@@ -3984,16 +3970,12 @@ export default function App() {
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <div style={{display:"flex",alignItems:"center",gap:9,flex:1,minWidth:0}}>
               <span style={{fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:2}}>PHOTOS {ph.length>0&&`(${ph.length})`}</span>
-              {ph.length>0 && (() => {
-                const sharedN = ph.filter(p=>p.clientVisible).length;
-                const allShared = sharedN === ph.length;
-                return (
-                  <button onClick={()=>shareAllPhotos(selJob, selTask, !allShared)}
-                    style={{background:allShared?"rgba(232,176,0,.14)":CARD2,border:`1px solid ${allShared?Y:BDR2}`,borderRadius:6,padding:"4px 9px",cursor:"pointer",fontFamily:FF,fontSize:9,fontWeight:800,letterSpacing:.5,color:allShared?Y:MUTED,whiteSpace:"nowrap"}}>
-                    {allShared ? `ALL ${ph.length} SHARED` : `SHARE ALL${sharedN?` (${sharedN}/${ph.length})`:""}`}
-                  </button>
-                );
-              })()}
+              {ph.length>0 && (
+                <span title="Photos on this job are visible in the customer's portal — delete anything that shouldn't be"
+                  style={{fontFamily:FF,fontSize:9,fontWeight:700,letterSpacing:.5,color:MUTED,whiteSpace:"nowrap",border:`1px solid ${BDR2}`,borderRadius:6,padding:"4px 8px"}}>
+                  CUSTOMER CAN SEE THESE
+                </span>
+              )}
             </div>
             <div style={{display:"flex",gap:6}}>
               <button onClick={()=>adminCamRef.current?.click()} style={{display:"flex",alignItems:"center",gap:4,background:Y,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer"}}>
@@ -4037,14 +4019,6 @@ export default function App() {
                         {isSel&&<span style={{color:BG,fontSize:12,fontWeight:800,lineHeight:1}}>✓</span>}
                       </div>
                     }
-                    {/* Choose which photos the customer sees in their portal. */}
-                    {!selectMode && (
-                      <button title={p.clientVisible?"Visible to the customer":"Hidden from the customer"}
-                        onClick={ev=>{ ev.stopPropagation(); toggleClientPhoto(p); }}
-                        style={{position:"absolute",bottom:5,right:5,background:p.clientVisible?Y:"rgba(0,0,0,.65)",border:`1px solid ${p.clientVisible?Y:"rgba(255,255,255,.35)"}`,borderRadius:6,padding:"3px 7px",cursor:"pointer",fontFamily:FF,fontSize:9,fontWeight:800,letterSpacing:.5,color:p.clientVisible?BG:"#fff"}}>
-                        {p.clientVisible ? "SHARED" : "SHARE"}
-                      </button>
-                    )}
                   </div>
                 );
               })}
@@ -4086,13 +4060,13 @@ export default function App() {
     const tasksIn = sid => [...tasksOf(job.id).filter(t => t.sId===sid && isIn(job.id,t)),
                             ...(customTasks[job.id]||[]).filter(t => t.sId===sid)]
                            .sort((a,b)=>a.id.localeCompare(b.id));
-    // Only photos an admin has ticked for the client, grouped by section so the
-    // gallery reads as a story of the rebuild rather than a wall of thumbnails.
+    // Every photo on the job, grouped by section so the gallery reads as a story
+    // of the rebuild. Anything that shouldn't be here gets deleted in admin.
     const shared = [];
     Object.entries(photos).forEach(([k,arr]) => {
       if (!k.startsWith(job.id+"_")) return;
       const taskId = k.slice(job.id.length+1);
-      arr.forEach(p => { if (p.clientVisible) shared.push({...p, taskId}); });
+      arr.forEach(p => shared.push({...p, taskId}));
     });
     const sharedBySection = (() => {
       const all = [...tasksOf(job.id), ...(customTasks[job.id]||[])];
@@ -4295,7 +4269,7 @@ export default function App() {
               </div>
               {shared.length===0 ? (
                 <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"24px 20px",lineHeight:1.6}}>
-                  No photos shared yet — SRSA will add them as the rebuild goes along.
+                  No photos yet — they'll appear here as the rebuild goes along.
                 </div>
               ) : sharedBySection.map(([secName, list]) => (
                 <div key={secName} style={{marginBottom:18}}>
