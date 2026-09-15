@@ -1950,11 +1950,32 @@ export default function App() {
     [...own, ...custom].forEach(t => { if (!seen.has(t.id)) out.push(t); });
     return out;
   };
+  // The Gantt "ladder": the order jobs run down the chart. Starts as sheet order;
+  // dragging a job up or down saves the new order on the job (ganttOrder). Jobs
+  // that appear on the sheet later slot in after the job they follow on the sheet.
+  const ladderOrder = jid => {
+    const sheet = sheetOrder(jid);
+    const saved = jobs.find(j => j.id === jid)?.ganttOrder;
+    if (!Array.isArray(saved) || !saved.length) return sheet;
+    const byId = new Map(sheet.map(t => [t.id, t]));
+    const out = saved.filter(id => byId.has(id)).map(id => byId.get(id));
+    const placed = new Set(out.map(t => t.id));
+    sheet.forEach((t, i) => {
+      if (placed.has(t.id)) return;
+      let at = 0;                                   // after the nearest earlier sheet job already placed
+      for (let k = i - 1; k >= 0; k--) {
+        const idx = out.findIndex(x => x.id === sheet[k].id);
+        if (idx >= 0) { at = idx + 1; break; }
+      }
+      out.splice(at, 0, t); placed.add(t.id);
+    });
+    return out;
+  };
   const sheetDays = est => Math.round((Number(est)||0) / GANTT_HRS_PER_DAY * 100) / 100;
   const schedRows = jid => {
     const job    = jobs.find(j => j.id === jid);
     const anchor = ganttAnchor(job);
-    const included = sheetOrder(jid).filter(t => {
+    const included = ladderOrder(jid).filter(t => {
       const ov = schedOv[eKey(jid, t.id)] || {};
       if (ov.hidden) return false;
       return typeof ov.dur === "number" || (Number(t.est)||0) > 0;   // 0h jobs have nothing to plot
@@ -2041,11 +2062,36 @@ export default function App() {
     flashGantt({jobId: job.id, taskId: row.taskId, before,
       text: `${row.taskId} → ${hours}h${hours === row.est ? " (back to sheet)" : ` (sheet ${row.est}h)`}`});
   };
+  // Move a job up or down the ladder so it sits before `beforeId` (null = bottom).
+  // Moving a job means it now follows the job above it: its own pinned date and
+  // soft rules are cleared; "can't start until" gates and changed hours stay.
+  const moveInLadder = async (job, row, beforeId, aboveId, fromPos, toPos) => {
+    const ids = ladderOrder(job.id).map(t => t.id).filter(id => id !== row.taskId);
+    const at = beforeId ? ids.indexOf(beforeId) : ids.length;
+    ids.splice(at < 0 ? ids.length : at, 0, row.taskId);
+    const orderBefore = Array.isArray(job.ganttOrder) ? [...job.ganttOrder] : null;
+    const key    = eKey(job.id, row.taskId);
+    const before = schedOv[key] ? {...schedOv[key]} : null;
+    await setDoc(doc(db, "jobs", job.id), {ganttOrder: ids}, {merge:true});
+    const gates = (row.deps||[]).filter(d => d.type === "blocked");
+    const hadOwn = !!row.startDate || (!row.depsFromSheet && (row.deps||[]).some(d => d.type !== "blocked"));
+    if (hadOwn) {
+      await saveSchedRow(job.id, row.taskId, {startDate: null, fixedStart: null,
+        deps: gates.length ? [...gates, ...(aboveId ? [{id: aboveId, type: "after"}] : [])] : null});
+    }
+    const n = Math.abs(toPos - fromPos);
+    flashGantt({jobId: job.id, taskId: row.taskId, before: hadOwn ? before : undefined, orderBefore, orderJob: true,
+      text: `${row.taskId} moved ${toPos < fromPos ? "up" : "down"} ${n} → ${aboveId ? `now follows ${aboveId}` : "now first"}` +
+            (hadOwn ? " · its own date/rules cleared" : "")});
+  };
   const undoGantt = async t => {
     if (!t) return;
-    const ref_ = doc(db, "schedule", eKey(t.jobId, t.taskId));
-    if (t.before) { const {id, ...data} = t.before; await setDoc(ref_, data); }
-    else await deleteDoc(ref_);
+    if (t.orderJob) await setDoc(doc(db, "jobs", t.jobId), {ganttOrder: t.orderBefore}, {merge:true});
+    if (t.before !== undefined) {                 // undefined = schedule doc wasn't touched
+      const ref_ = doc(db, "schedule", eKey(t.jobId, t.taskId));
+      if (t.before) { const {id, ...data} = t.before; await setDoc(ref_, data); }
+      else await deleteDoc(ref_);
+    }
     clearTimeout(ganttUI.toastTimer); setGanttToast(null);
   };
 
@@ -4640,11 +4686,15 @@ export default function App() {
     const taskOf = id => rows.find(r => r.taskId===id);
     const stale  = job ? staleSched(job.id) : [];
     const dropped = rows.filter(r => r.droppedDeps > 0);
-    const savedCount = job ? schedDocsFor(job.id).length : 0;
+    const hasOrder = Array.isArray(job?.ganttOrder) && job.ganttOrder.length > 0;
+    const savedCount = job ? schedDocsFor(job.id).length + (hasOrder ? 1 : 0) : 0;
     const resetAll = async () => {
       if (!job) return;
-      if (!window.confirm(`Reset the whole Gantt for this machine back to the job sheet?\n\nThis clears ${savedCount} saved change${savedCount===1?"":"s"} (start dates, durations and rules). Every job goes back to the sheet's hours, following the one above it.`)) return;
-      setBusy(true); await deleteSchedDocs(schedDocsFor(job.id)); setBusy(false);
+      if (!window.confirm(`Reset the whole Gantt for this machine back to the job sheet?\n\nThis clears ${savedCount} saved change${savedCount===1?"":"s"} (job order, start dates, durations and rules). Every job goes back to sheet order and the sheet's hours, following the one above it.`)) return;
+      setBusy(true);
+      await deleteSchedDocs(schedDocsFor(job.id));
+      if (hasOrder) await setDoc(doc(db,"jobs",job.id), {ganttOrder: null}, {merge:true});
+      setBusy(false);
     };
     const clearStale = async () => {
       setBusy(true); await deleteSchedDocs(stale); setBusy(false);
@@ -4723,9 +4773,83 @@ export default function App() {
     };
 
     // Ordered by scheduled start so the chart reads top-to-bottom in time.
-    const sheetIdx = Object.fromEntries(rows.map((r,i) => [r.taskId, i]));
-    const ordered = [...rows].sort((a,b) => (times[a.taskId]?.start||0) - (times[b.taskId]?.start||0)
-                                          || sheetIdx[a.taskId] - sheetIdx[b.taskId]);
+    // Rows run in ladder order — the order the jobs are lined up to happen.
+    const ordered = rows;
+
+    // ── Move a job up/down the ladder ──
+    // Grab the grip on the left of a job and drag it up or down. A line shows
+    // where it'll drop; the chart scrolls when you reach the top or bottom edge.
+    const startRowDrag = (e, r) => {
+      if (e.button !== undefined && e.button !== 0) return;
+      e.preventDefault(); e.stopPropagation();
+      const scroller = ganttUI.el; if (!scroller) return;
+      const label = e.currentTarget.closest("[data-ladder-row]");
+      const fromPos = ordered.findIndex(x => x.taskId === r.taskId);
+      const st = {id: e.pointerId, y0: e.clientY, y: e.clientY, moved: false, pos: fromPos, raf: 0};
+      ganttUI.suppressClick = false;
+      const line = document.createElement("div");
+      Object.assign(line.style, {position:"absolute", left:"0px", height:"3px", background:Y, zIndex:12,
+        width:`${LBL + chartW}px`, pointerEvents:"none", display:"none", boxShadow:`0 0 6px ${Y}`});
+      scroller.appendChild(line);
+      const tag = document.createElement("div");
+      Object.assign(tag.style, {position:"absolute", left:"30px", zIndex:13, pointerEvents:"none", display:"none",
+        background:Y, color:BG, borderRadius:"5px", padding:"3px 8px", fontFamily:MONO, fontSize:"11px", whiteSpace:"nowrap",
+        boxShadow:"0 4px 14px rgba(0,0,0,.5)"});
+      tag.textContent = `${r.taskId} ${(r.desc||"").slice(0,26)}`;
+      scroller.appendChild(tag);
+
+      const place = () => {
+        const rc = scroller.getBoundingClientRect();
+        const y = st.y - rc.top + scroller.scrollTop - 44;            // px down the rows
+        const pos = Math.max(0, Math.min(ordered.length, Math.round(y / ROW)));
+        st.pos = pos;
+        line.style.top = `${44 + pos*ROW - 2}px`;
+        tag.style.top = `${Math.max(46, y + 44 - 12)}px`;
+      };
+      const tick = () => {                                              // edge auto-scroll, even when holding still
+        if (!st.moved) return;
+        const rc = scroller.getBoundingClientRect();
+        if (st.y < rc.top + 44 + 30) scroller.scrollTop -= 14;
+        else if (st.y > rc.bottom - 30) scroller.scrollTop += 14;
+        place();
+        st.raf = requestAnimationFrame(tick);
+      };
+      const move = ev => {
+        if (ev.pointerId !== st.id) return;
+        st.y = ev.clientY;
+        if (!st.moved && Math.abs(st.y - st.y0) < 4) return;
+        ev.preventDefault();
+        if (!st.moved) {
+          st.moved = true;
+          line.style.display = "block"; tag.style.display = "block";
+          if (label) label.style.opacity = ".35";
+          st.raf = requestAnimationFrame(tick);
+        }
+        place();
+      };
+      const end = ev => {
+        if (ev.pointerId !== st.id) return;
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", end);
+        window.removeEventListener("pointercancel", end);
+        cancelAnimationFrame(st.raf);
+        line.remove(); tag.remove();
+        if (label) label.style.opacity = "";
+        if (!st.moved) return;
+        ganttUI.suppressClick = true; setTimeout(() => { ganttUI.suppressClick = false; }, 0);
+        if (ev.type === "pointercancel") return;
+        const to = st.pos;                                              // insertion slot 0..n
+        if (to === fromPos || to === fromPos + 1) return;                // dropped where it was
+        const rest = ordered.filter(x => x.taskId !== r.taskId);
+        const slot = to > fromPos ? to - 1 : to;                        // index among the others
+        const beforeId = rest[slot]?.taskId || null;
+        const aboveId  = rest[slot - 1]?.taskId || null;
+        moveInLadder(job, r, beforeId, aboveId, fromPos, slot);
+      };
+      window.addEventListener("pointermove", move, {passive:false});
+      window.addEventListener("pointerup", end);
+      window.addEventListener("pointercancel", end);
+    };
     const whenOf = r => { const t = times[r.taskId] || {start:0,end:0}; return barDates(anchor, t.start, t.end); };
     const rangeTxt = w => w.from===w.to ? `${DOW_SHORT[parseISO(w.from).getDay()]} ${fmtDMY(w.from)}`
       : `${DOW_SHORT[parseISO(w.from).getDay()]} ${fmtDMY(w.from)} → ${DOW_SHORT[parseISO(w.to).getDay()]} ${fmtDMY(w.to)}`;
@@ -4822,9 +4946,9 @@ export default function App() {
         bar.style.boxShadow = ""; bar.style.cursor = "";
         if (st.badge) st.badge.remove();
         ganttUI.drag = null;
-        if (st.panning) { ganttUI.suppressClick = true; return; }
+        if (st.panning) { ganttUI.suppressClick = true; setTimeout(() => { ganttUI.suppressClick = false; }, 0); return; }
         if (!st.active || !st.moved) return;                   // plain tap → onClick opens the editor
-        ganttUI.suppressClick = true;
+        ganttUI.suppressClick = true; setTimeout(() => { ganttUI.suppressClick = false; }, 0);
         const revert = () => { bar.style.left = `${st.left0}px`; bar.style.width = `${st.w0}px`; if (outside) outside.style.visibility = ""; };
         if (ev.type === "pointercancel" || st.value === null) return revert();
         if (mode === "move") {
@@ -4954,8 +5078,13 @@ export default function App() {
                   {ordered.map(r => {
                     const t = taskOf(r.taskId);
                     return (
-                      <button key={r.taskId} onClick={()=>setEditSched({job, row:r})}
-                        style={{display:"flex",alignItems:"center",gap:7,width:"100%",height:ROW,boxSizing:"border-box",background:"none",border:"none",borderBottom:`1px solid ${BDR}`,padding:"0 10px",cursor:"pointer",textAlign:"left"}}>
+                      <button key={r.taskId} data-ladder-row
+                        onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
+                        style={{display:"flex",alignItems:"center",gap:6,width:"100%",height:ROW,boxSizing:"border-box",background:"none",border:"none",borderBottom:`1px solid ${BDR}`,padding:"0 10px 0 0",cursor:"pointer",textAlign:"left"}}>
+                        {/* grip: drag up/down to change the job's place in the ladder */}
+                        <span title="Drag to move this job up or down" onPointerDown={e=>startRowDrag(e, r)}
+                          onClick={e=>e.stopPropagation()}
+                          style={{alignSelf:"stretch",width:20,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",cursor:"grab",touchAction:"none",color:MUTED,fontSize:12,letterSpacing:-1,lineHeight:1}}>⋮⋮</span>
                         <span style={{fontFamily:MONO,fontSize:10,color:colFor(r.taskId),minWidth:38,flexShrink:0}}>{r.taskId}</span>
                         <span style={{fontSize:11,color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t?.desc||r.taskId}</span>
                         <span style={{fontFamily:MONO,fontSize:9,color:r.startDate?Y:MUTED,flexShrink:0}}>{fmtDM(whenOf(r).from)}</span>
@@ -5031,7 +5160,7 @@ export default function App() {
                     <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
                   </span>
                 ))}
-                <span style={{fontSize:10,color:MUTED}}>· Ctrl or Shift + scroll (or scroll over the dates) to go sideways · drag a bar to move it, drag its right edge to change hours (on a phone, hold first) · tap to edit · 7 days a week, weekends shaded · 10.5h days · outlined = pinned to a date · * changed from sheet</span>
+                <span style={{fontSize:10,color:MUTED}}>· drag ⋮⋮ to move a job up or down the ladder · Ctrl or Shift + scroll (or scroll over the dates) to go sideways · drag a bar to move it, drag its right edge to change hours (on a phone, hold first) · tap to edit · 7 days a week, weekends shaded · 10.5h days · outlined = pinned to a date · * changed from sheet</span>
               </div>
             </div>
           )}
@@ -5709,7 +5838,7 @@ export default function App() {
             const t = computeSchedule(rs).times[editSched.row.taskId];
             return t ? barDates(ganttAnchor(jobs.find(j=>j.id===editSched.job.id)), t.start, t.end) : null;
           })()}
-          options={sheetOrder(editSched.job.id).map(t => ({id:t.id, desc:t.desc, est:Number(t.est)||0}))}
+          options={ladderOrder(editSched.job.id).map(t => ({id:t.id, desc:t.desc, est:Number(t.est)||0}))}
           onSave={patch => {
             // Only store what actually differs from the sheet, so bars keep
             // tracking the sheet's hours and order when it's revised.
