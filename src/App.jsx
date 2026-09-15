@@ -1831,8 +1831,9 @@ export default function App() {
       snap.docs.forEach(d => {
         const data = d.data();
         if (!ct[data.jobId]) ct[data.jobId] = [];
-        // Use the stored numeric id (e.g. "8.06") if present, else fall back to Firestore doc id
-        ct[data.jobId].push({...data, id: data.id || d.id});
+        // Use the stored numeric id (e.g. "8.06") if present, else fall back to Firestore doc id.
+        // docId is the real document — needed to delete it.
+        ct[data.jobId].push({...data, id: data.id || d.id, docId: d.id});
       });
       setCustomTasks(ct);
     }));
@@ -2270,9 +2271,31 @@ export default function App() {
     });
     setShowCtModal(false); setCtParentId(null); setCtForm({desc:"",est:"",cost:"",opt:false});
   };
+  // Delete an added task (and any sub-tasks under it). The old version deleted
+  // by the task number ("8.25"), which isn't the Firestore document id, so
+  // nothing was removed — it now deletes the actual documents.
   const delCT = async (jid, tid) => {
-    const subs = (customTasks[jid]||[]).filter(t => t.parentId===tid).map(t => t.id);
-    await Promise.all([tid, ...subs].map(id => deleteDoc(doc(db,"customTasks",id))));
+    const mine = customTasks[jid] || [];
+    const ids = new Set([tid]);
+    let grew = true;                                   // sub-tasks, and sub-tasks of those
+    while (grew) {
+      grew = false;
+      mine.forEach(t => { if (t.parentId && ids.has(t.parentId) && !ids.has(t.id)) { ids.add(t.id); grew = true; } });
+    }
+    const victims = mine.filter(t => ids.has(t.id));
+    if (!victims.length) return false;
+    const hrs  = victims.reduce((s,t) => s + logged(jid, t.id), 0);
+    const pics = victims.reduce((s,t) => s + getPh(jid, t.id).length, 0);
+    const main = victims.find(t => t.id === tid) || victims[0];
+    const msg = `Delete "${main.desc}"${victims.length>1 ? ` and ${victims.length-1} sub-task${victims.length===2?"":"s"}` : ""}?` +
+      (hrs || pics ? `\n\nIt has ${[hrs ? `${Math.round(hrs*10)/10}h logged` : null, pics ? `${pics} photo${pics===1?"":"s"}` : null].filter(Boolean).join(" and ")} — ` +
+                     `those stay saved and will show under "job numbers no longer on the sheet" so you can move them.` : "");
+    if (!window.confirm(msg)) return false;
+    const b = writeBatch(db);
+    victims.forEach(t => b.delete(doc(db, "customTasks", t.docId || t.id)));
+    victims.forEach(t => b.delete(doc(db, "schedule", eKey(jid, t.id))));   // its Gantt settings, if any
+    await b.commit();
+    return true;
   };
   const sStats = (jid, sid) => {
     const lr      = getLR(jid);
@@ -4336,8 +4359,9 @@ export default function App() {
                   <div style={{fontFamily:MONO,fontSize:14,color:over?RED:l>0?TXT:MUTED}}>{l>0?`${l}h`:"—"}</div>
                   {t.est>0&&<div style={{fontSize:10,color:MUTED}}>{t.est}h est</div>}
                 </div>
-                {isCT&&<button onClick={ev=>{ev.stopPropagation();delCT(selJob,t.id);}} style={{background:"rgba(255,76,76,.1)",border:"none",borderRadius:5,padding:"3px 6px",cursor:"pointer"}}>
-                  <Trash2 size={10} color={RED}/>
+                {isCT&&<button onClick={ev=>{ev.stopPropagation();delCT(selJob,t.id);}} aria-label="Delete this added task"
+                  style={{background:"rgba(255,76,76,.1)",border:"1px solid rgba(255,76,76,.3)",borderRadius:7,padding:"6px 9px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                  <Trash2 size={13} color={RED}/><span style={{fontFamily:FF,fontSize:10,fontWeight:800,color:RED,letterSpacing:.5}}>DELETE</span>
                 </button>}
               </div>
             </div>
@@ -4506,6 +4530,12 @@ export default function App() {
             </div>
           )}
           {confirmPhoDel&&<ConfirmPhotoDel jid={selJob} tid={selTask}/>}
+          {isCT && (
+            <button onClick={async ()=>{ if (await delCT(selJob, selTask)) back(); }}
+              style={{width:"100%",marginTop:18,background:"rgba(255,76,76,.08)",border:"1px solid rgba(255,76,76,.25)",borderRadius:10,padding:14,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:RED,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+              <Trash2 size={15}/> DELETE THIS ADDED TASK
+            </button>
+          )}
         </div>
       </div>
     );
