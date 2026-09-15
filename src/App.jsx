@@ -194,7 +194,7 @@ const barDates = (anchorISO, start, end) => ({
   to:   calAddDays(anchorISO, Math.max(Math.floor(start), Math.ceil(end - 1e-6) - 1)),
 });
 // Survives GanttView remounting on every App render (scroll position, one-off migration).
-const ganttUI = { el: null, jobId: null, zoom: null, scrollLeft: null, migrated: new Set(),
+const ganttUI = { el: null, jobId: null, zoom: null, scrollLeft: null, scrollTop: 0, migrated: new Set(),
                   drag: null, suppressClick: false, toastTimer: null };
 const DOW_SHORT = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 const DEP_TYPES = [
@@ -4688,15 +4688,35 @@ export default function App() {
 
     // Keep the horizontal scroll where it was across re-renders; open on today.
     const scrollToToday = el => { if (el) el.scrollLeft = Math.max(0, (Math.max(0,elapsed)) * dayW - 80); };
+    // The chart is its own scroll box sized to fit the screen, so the sideways
+    // scrollbar is always on screen and the dates stay pinned along the top.
+    const contentH = 44 + rows.length * ROW + 14;
+    const fitHeight = el => {
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      const reserve = isDesktop ? 20 : 84;                 // mobile bottom nav
+      el.style.height = `${Math.min(contentH, Math.max(360, window.innerHeight - top - reserve))}px`;
+    };
+    // Wheel: Ctrl / Shift / Alt + scroll, or plain scroll over the dates, goes left↔right.
+    const onWheel = el => ev => {
+      const overDates = ev.target?.closest && ev.target.closest("[data-gantt-dates]");
+      if (!(ev.ctrlKey || ev.shiftKey || ev.altKey || overDates)) return;
+      const d = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+      if (!d) return;
+      ev.preventDefault();                                  // stops Ctrl+scroll zooming the page
+      el.scrollLeft += d * (ev.deltaMode === 1 ? 20 : ev.deltaMode === 2 ? el.clientWidth : 1);
+    };
     const bindScroll = el => {
       if (!el) return;
       const first = ganttUI.el !== el;
       ganttUI.el = el;
       if (!first) return;
+      fitHeight(el);
+      el.addEventListener("wheel", onWheel(el), {passive:false});
       if (ganttUI.jobId !== job?.id || ganttUI.scrollLeft === null) {
-        ganttUI.jobId = job?.id; ganttUI.zoom = zoom; scrollToToday(el);
+        ganttUI.jobId = job?.id; ganttUI.zoom = zoom; ganttUI.scrollTop = 0; scrollToToday(el);
       } else {
         el.scrollLeft = ganttUI.zoom && ganttUI.zoom !== zoom ? ganttUI.scrollLeft * zoom / ganttUI.zoom : ganttUI.scrollLeft;
+        el.scrollTop = ganttUI.scrollTop || 0;
         ganttUI.zoom = zoom;
       }
       ganttUI.scrollLeft = el.scrollLeft;
@@ -4757,8 +4777,12 @@ export default function App() {
           if (touch) {
             if (Math.abs(ev.clientX-st.x0) > 6 || Math.abs(ev.clientY-st.y0) > 6) { clearTimeout(st.timer); st.panning = true; }
             if (st.panning) {
-              if (scroller) scroller.scrollLeft -= ev.clientX - st.lastX;
-              window.scrollBy(0, -(ev.clientY - st.lastY));
+              if (scroller) {
+                scroller.scrollLeft -= ev.clientX - st.lastX;
+                const before = scroller.scrollTop;
+                scroller.scrollTop -= ev.clientY - st.lastY;
+                if (scroller.scrollTop === before) window.scrollBy(0, -(ev.clientY - st.lastY));   // box at its end → page
+              }
             }
             st.lastX = ev.clientX; st.lastY = ev.clientY;
           }
@@ -4918,11 +4942,12 @@ export default function App() {
 
           {job && rows.length>0 && (
             <div style={{border:`1px solid ${BDR}`,borderRadius:12,overflow:"hidden",background:CARD}}>
-              <div ref={bindScroll} onScroll={e=>{ ganttUI.scrollLeft = e.currentTarget.scrollLeft; }}
-                style={{display:"flex",overflowX:"auto",position:"relative",userSelect:"none",WebkitUserSelect:"none"}}>
+              <div ref={bindScroll} className="gantt-scroll"
+                onScroll={e=>{ ganttUI.scrollLeft = e.currentTarget.scrollLeft; ganttUI.scrollTop = e.currentTarget.scrollTop; }}
+                style={{display:"flex",overflow:"auto",position:"relative",userSelect:"none",WebkitUserSelect:"none",overscrollBehavior:"contain"}}>
                 {/* Frozen job column */}
-                <div style={{position:"sticky",left:0,zIndex:3,background:CARD,borderRight:`2px solid ${BDR}`,flexShrink:0,width:LBL}}>
-                  <div style={{height:44,borderBottom:`1px solid ${BDR}`,display:"flex",alignItems:"flex-end",padding:"0 12px 7px",background:CARD2}}>
+                <div style={{position:"sticky",left:0,zIndex:10,background:CARD,borderRight:`2px solid ${BDR}`,flexShrink:0,width:LBL,height:"max-content"}}>
+                  <div style={{position:"sticky",top:0,zIndex:11,height:44,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,display:"flex",alignItems:"flex-end",padding:"0 12px 7px",background:CARD2}}>
                     <span style={{fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1}}>JOB</span>
                     <span style={{marginLeft:"auto",fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1}}>START</span>
                   </div>
@@ -4930,7 +4955,7 @@ export default function App() {
                     const t = taskOf(r.taskId);
                     return (
                       <button key={r.taskId} onClick={()=>setEditSched({job, row:r})}
-                        style={{display:"flex",alignItems:"center",gap:7,width:"100%",height:ROW,borderBottom:`1px solid ${BDR}`,background:"none",border:"none",borderBottomStyle:"solid",padding:"0 10px",cursor:"pointer",textAlign:"left"}}>
+                        style={{display:"flex",alignItems:"center",gap:7,width:"100%",height:ROW,boxSizing:"border-box",background:"none",border:"none",borderBottom:`1px solid ${BDR}`,padding:"0 10px",cursor:"pointer",textAlign:"left"}}>
                         <span style={{fontFamily:MONO,fontSize:10,color:colFor(r.taskId),minWidth:38,flexShrink:0}}>{r.taskId}</span>
                         <span style={{fontSize:11,color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t?.desc||r.taskId}</span>
                         <span style={{fontFamily:MONO,fontSize:9,color:r.startDate?Y:MUTED,flexShrink:0}}>{fmtDM(whenOf(r).from)}</span>
@@ -4940,9 +4965,9 @@ export default function App() {
                 </div>
 
                 {/* Scrolling calendar */}
-                <div style={{position:"relative",width:chartW,flexShrink:0}}>
-                  {/* header: month, weekday letter, date */}
-                  <div style={{height:44,borderBottom:`1px solid ${BDR}`,position:"relative",background:CARD2}}>
+                <div style={{position:"relative",width:chartW,flexShrink:0,height:"max-content"}}>
+                  {/* header: month, weekday letter, date — pinned to the top; scroll here to go sideways */}
+                  <div data-gantt-dates style={{height:44,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:8,background:CARD2,cursor:"ew-resize"}}>
                     {days.map(d => (
                       <div key={d.i} style={{position:"absolute",left:d.i*dayW,top:0,width:dayW,height:"100%",
                         borderLeft:`1px solid ${d.dow===1?BDR2:BDR}`,background:(d.dow===0||d.dow===6)?weekendBg:"transparent",
@@ -4976,7 +5001,7 @@ export default function App() {
                       const task = taskOf(r.taskId);
                       const label = `${fmtH(r.dur*HRS_PER_DAY)}${r.edited?" *":""}`;
                       return (
-                        <div key={r.taskId} style={{height:ROW,borderBottom:`1px solid ${BDR}`,position:"relative"}}>
+                        <div key={r.taskId} style={{height:ROW,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,position:"relative"}}>
                           <button onPointerDown={e=>startBarDrag(e, r, "move")}
                             onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
                             onContextMenu={e=>e.preventDefault()}
@@ -5006,7 +5031,7 @@ export default function App() {
                     <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
                   </span>
                 ))}
-                <span style={{fontSize:10,color:MUTED}}>· drag a bar to move it, drag its right edge to change hours (on a phone, hold first) · tap to edit · 7 days a week, weekends shaded · 10.5h days · outlined = pinned to a date · * changed from sheet</span>
+                <span style={{fontSize:10,color:MUTED}}>· Ctrl or Shift + scroll (or scroll over the dates) to go sideways · drag a bar to move it, drag its right edge to change hours (on a phone, hold first) · tap to edit · 7 days a week, weekends shaded · 10.5h days · outlined = pinned to a date · * changed from sheet</span>
               </div>
             </div>
           )}
@@ -5586,6 +5611,12 @@ export default function App() {
     <ErrorBoundary><div style={{background:BG,minHeight:"100dvh",fontFamily:"'Barlow',sans-serif",color:TXT,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-start"}}>
       <style>{`
         .app-shell { width:100%; max-width:480px; display:flex; flex-direction:column; min-height:100dvh; position:relative; }
+        .gantt-scroll { scrollbar-width:auto; scrollbar-color:#4A4F5E #17191F; }
+        .gantt-scroll::-webkit-scrollbar { width:12px; height:12px; }
+        .gantt-scroll::-webkit-scrollbar-track { background:#17191F; }
+        .gantt-scroll::-webkit-scrollbar-thumb { background:#4A4F5E; border-radius:6px; border:2px solid #17191F; }
+        .gantt-scroll::-webkit-scrollbar-thumb:hover { background:#6A7082; }
+        .gantt-scroll::-webkit-scrollbar-corner { background:#17191F; }
         @media(min-width:900px){
           .app-shell { max-width:420px; box-shadow:0 0 60px rgba(0,0,0,.5); border-left:1px solid #272A35; border-right:1px solid #272A35; }
         }
