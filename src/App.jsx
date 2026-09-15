@@ -420,7 +420,8 @@ const TimeRow = ({s,setS,f,setF,b,setB}) => (
 // MODULE LEVEL — holds controlled text inputs.
 // `options` is every job on the sheet that can be the other side of a rule.
 const ScheduleEditor = ({job, row, onClose, options, onSave, onReset, anchor, when}) => {
-  const [dur, setDur]     = useState(String(row.dur ?? ""));
+  const [hours, setHours] = useState(String(row.hours ?? Math.round((row.dur||0)*GANTT_HRS_PER_DAY*10)/10));
+  const [techs, setTechs] = useState(row.techs || 1);
   const [startDate, setStartDate] = useState(row.startDate || "");
   const [deps, setDeps]   = useState(row.deps || []);
   const [picking, setPicking] = useState(false);
@@ -435,8 +436,10 @@ const ScheduleEditor = ({job, row, onClose, options, onSave, onReset, anchor, wh
 
   const save = async () => {
     setBusy(true);
+    const h = Math.max(0, parseFloat(hours) || 0);
     await onSave({
-      dur: parseFloat(dur) || 0,
+      dur: Math.round(h / GANTT_HRS_PER_DAY * 100) / 100,     // labour, in 10.5h days
+      techs,
       startDate: startDate || null,
       fixedStart: null,          // superseded by startDate
       deps,
@@ -455,7 +458,7 @@ const ScheduleEditor = ({job, row, onClose, options, onSave, onReset, anchor, wh
           <div style={{minWidth:0}}>
             <div style={{fontFamily:MONO,fontSize:13,color:Y}}>{row.taskId}</div>
             <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,lineHeight:1.2}}>{task?.desc || "Task"}</div>
-            {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h on the sheet = {Math.round(task.est/GANTT_HRS_PER_DAY*100)/100} days</div>}
+            {task && <div style={{fontSize:11,color:MUTED,marginTop:3}}>{task.est}h on the sheet</div>}
             {when?.from && (
               <div style={{fontSize:12,color:TXT,marginTop:5,fontFamily:MONO}}>
                 {when.from===when.to ? `${DOW_SHORT[parseISO(when.from).getDay()]} ${fmtDMY(when.from)}`
@@ -467,16 +470,40 @@ const ScheduleEditor = ({job, row, onClose, options, onSave, onReset, anchor, wh
         </div>
 
         <div style={{marginBottom:16}}>
-          <CardLabel>DURATION (WORKING DAYS)</CardLabel>
+          <CardLabel>LABOUR HOURS</CardLabel>
           <div style={{display:"flex",gap:8}}>
-            <input type="number" step="0.1" min="0" value={dur} onChange={e=>setDur(e.target.value)} style={{...fld,flex:1}}/>
-            {task && String(Math.round(task.est/GANTT_HRS_PER_DAY*100)/100) !== dur && (
-              <button onClick={()=>setDur(String(Math.round(task.est/GANTT_HRS_PER_DAY*100)/100))}
+            <input type="number" step="0.5" min="0" inputMode="decimal" value={hours} onChange={e=>setHours(e.target.value)} style={{...fld,flex:1}}/>
+            {task && String(task.est) !== String(parseFloat(hours)) && (
+              <button onClick={()=>setHours(String(task.est))}
                 style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"0 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:Y,letterSpacing:.5,whiteSpace:"nowrap"}}>
                 USE SHEET
               </button>
             )}
           </div>
+        </div>
+
+        <div style={{marginBottom:16}}>
+          <CardLabel>TECHNICIANS ON THIS JOB</CardLabel>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <button onClick={()=>setTechs(n=>Math.max(1,n-1))} disabled={techs<=1}
+              style={{width:44,height:44,borderRadius:9,border:`1px solid ${BDR2}`,background:CARD2,color:techs<=1?BDR2:TXT,fontSize:22,cursor:"pointer",flexShrink:0}}>−</button>
+            <div style={{flex:1,textAlign:"center"}}>
+              <div style={{fontFamily:MONO,fontSize:22,color:Y,lineHeight:1.1}}>{techs}</div>
+              <div style={{fontSize:10,color:MUTED}}>{techs===1?"technician":"technicians"}</div>
+            </div>
+            <button onClick={()=>setTechs(n=>Math.min(9,n+1))} disabled={techs>=9}
+              style={{width:44,height:44,borderRadius:9,border:`1px solid ${BDR2}`,background:CARD2,color:TXT,fontSize:22,cursor:"pointer",flexShrink:0}}>+</button>
+          </div>
+          {(() => {
+            const h = Math.max(0, parseFloat(hours) || 0);
+            const onChart = Math.round(h / techs * 10) / 10;
+            return (
+              <div style={{fontSize:12,color:TXT,marginTop:8,background:CARD2,border:`1px solid ${BDR}`,borderRadius:8,padding:"8px 11px",lineHeight:1.5}}>
+                {h}h of work{techs>1 ? <> ÷ {techs} techs = <b style={{color:Y}}>{onChart}h</b> on the chart</> : <> = <b style={{color:Y}}>{onChart}h</b> on the chart</>}
+                <span style={{color:MUTED}}> ({Math.round(onChart / GANTT_HRS_PER_DAY * 100) / 100} days)</span>
+              </div>
+            );
+          })()}
         </div>
 
         <div style={{marginBottom:16}}>
@@ -1859,7 +1886,8 @@ export default function App() {
   const [hourlyRate, setHourlyRate]   = useState(145);     // global default rate $/hr
   const [showRateModal, setShowRateModal] = useState(false);
   const [rateInput, setRateInput]     = useState("145");
-  const [jobTab, setJobTab]           = useState("progress"); // "progress" | "costings"
+  const [jobTab, setJobTab]           = useState("progress"); // "progress" | "costings" | "photos"
+  const [clientPhotoFilter, setClientPhotoFilter] = useState("all"); // CLIENT PHOTOS tab: all | shown | hidden
   const [customTasks, setCustomTasks] = useState({});   // jid -> [{id,sId,parentId,desc,est,cost,opt}]
   const [hoses, setHoses]             = useState([]);    // hose records (Hoses feature)
   const [schedOv, setSchedOv]         = useState({});    // `${jobId}_${taskId}` -> schedule override
@@ -1915,6 +1943,41 @@ export default function App() {
   const [confirmDel, setConfirmDel] = useState(null);
   const fileRef = useRef(null);
   const openLightbox = (photos, photo) => { setLightboxList(photos); setLightbox(photo); };
+
+  // ── Photos the customer sees ──
+  // Until a supervisor picks, the customer portal shows every photo on the job.
+  // The first show/hide on the CLIENT PHOTOS tab switches the job to "picked"
+  // (photosCurated) — from then on the portal shows only photos ticked
+  // clientVisible, and new photos stay hidden until someone ticks them.
+  const jobPhotos = jid => {
+    const out = [];
+    Object.entries(photos).forEach(([k, arr]) => {
+      if (!k.startsWith(jid + "_")) return;
+      const taskId = k.slice(jid.length + 1);
+      arr.forEach(p => out.push({...p, taskId}));
+    });
+    return out;
+  };
+  const clientSees = (job, p) => job?.photosCurated ? !!p.clientVisible : true;
+  const writePhotoFlags = async pairs => {                // [[photo, visible], …]
+    for (let i = 0; i < pairs.length; i += 400) {
+      const b = writeBatch(db);
+      pairs.slice(i, i+400).forEach(([ph, v]) => b.set(doc(db,"photos",ph.id), {clientVisible: v}, {merge:true}));
+      await b.commit();
+    }
+  };
+  const setClientPhotos = async (job, list, visible) => {
+    if (!job) return;
+    if (!job.photosCurated) {
+      // Keep everything else as the customer sees it now (all shown).
+      const ids = new Set(list.map(x => x.id));
+      await writePhotoFlags(jobPhotos(job.id).map(ph => [ph, ids.has(ph.id) ? visible : true]));
+      await setDoc(doc(db,"jobs",job.id), {photosCurated: true}, {merge:true});
+    } else {
+      await writePhotoFlags(list.map(ph => [ph, visible]));
+    }
+  };
+  const toggleClientPhoto = (job, ph) => setClientPhotos(job, [ph], !clientSees(job, ph));
   // Task lookup spanning every machine template. Job-scoped code should prefer
   // tasksOf(jobId); this is for contexts where only a task id is available.
   const taskMap = useMemo(() => Object.fromEntries(
@@ -1993,7 +2056,10 @@ export default function App() {
       const row = {
         taskId: t.id, sId: t.sId, desc: t.desc, est: Number(t.est)||0,
         sheetDur: sheetDays(t.est),
-        dur: typeof ov.dur === "number" ? ov.dur : sheetDays(t.est),
+        // Labour hours (sheet or changed) split across the technicians on it:
+        // labourDur is the work in 10.5h days, dur is how long it takes on the chart.
+        techs: Math.max(1, Math.min(9, Math.round(Number(ov.techs) || 1))),
+        labourDur: typeof ov.dur === "number" ? ov.dur : sheetDays(t.est),
         // Pinned start: a saved date, or a pre-calendar Mon–Fri offset converted to one.
         startDate: ov.startDate || (typeof ov.fixedStart === "number" ? legacyWorkdayDate(anchor, ov.fixedStart) : null),
         fixedStart: null,
@@ -2002,6 +2068,8 @@ export default function App() {
         depsFromSheet: saved === null || (saved.length > 0 && kept.length === 0),
         edited: !!schedOv[eKey(jid, t.id)],
       };
+      row.hours = Math.round(row.labourDur * GANTT_HRS_PER_DAY * 10) / 10;
+      row.dur   = Math.round(row.labourDur / row.techs * 1000) / 1000;
       if (row.startDate) row.fixedStart = Math.max(0, daysBetween(anchor, row.startDate));
       prev = t.id;
       return row;
@@ -2060,7 +2128,7 @@ export default function App() {
     const dur = Math.round(hours / GANTT_HRS_PER_DAY * 100) / 100;
     await saveSchedRow(job.id, row.taskId, {dur: hours === row.est ? null : dur});
     flashGantt({jobId: job.id, taskId: row.taskId, before,
-      text: `${row.taskId} → ${hours}h${hours === row.est ? " (back to sheet)" : ` (sheet ${row.est}h)`}`});
+      text: `${row.taskId} → ${hours}h${(row.techs||1)>1 ? ` ÷ ${row.techs} techs` : ""}${hours === row.est ? " (back to sheet)" : ` (sheet ${row.est}h)`}`});
   };
   // Move a job up or down the ladder so it sits before `beforeId` (null = bottom).
   // Moving a job means it now follows the job above it: its own pinned date and
@@ -3996,10 +4064,10 @@ export default function App() {
           </button>}/>
         <div style={{background:CARD,borderBottom:`1px solid ${BDR}`}}>
           <div style={{display:"flex"}}>
-            {["progress","costings"].map(t=>(
+            {[["progress","PROGRESS"],["costings","COSTINGS"],["photos","CLIENT PHOTOS"]].map(([t,l])=>(
               <button key={t} onClick={()=>setJobTab(t)}
-                style={{flex:1,padding:"13px 0",background:"none",border:"none",borderBottom:`2px solid ${tab===t?Y:"transparent"}`,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:tab===t?Y:MUTED,letterSpacing:1,transition:"all .15s"}}>
-                {t.toUpperCase()}
+                style={{flex:1,padding:"13px 0",background:"none",border:"none",borderBottom:`2px solid ${tab===t?Y:"transparent"}`,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:tab===t?Y:MUTED,letterSpacing:1,transition:"all .15s",whiteSpace:"nowrap"}}>
+                {l}
               </button>
             ))}
           </div>
@@ -4008,6 +4076,98 @@ export default function App() {
           search={q => searchTasks(selJob, q)}
           statusOf={tid => getStatus(selJob, tid)}
           onPick={task => go("task",{sec:task.sId, task:task.id})}>
+
+        {tab==="photos" && j && (() => {
+          // Every photo on the job in one place, newest first, grouped by section
+          // and job. Tap a photo to show or hide it on the customer portal.
+          const who = j.client || "the customer";
+          const all = jobPhotos(j.id).sort((a,b) => String(b.date||"").localeCompare(String(a.date||"")) || String(b.id).localeCompare(String(a.id)));
+          const shown = all.filter(ph => clientSees(j, ph));
+          const list = all.filter(ph => clientPhotoFilter==="all" ? true : clientPhotoFilter==="shown" ? clientSees(j, ph) : !clientSees(j, ph));
+          const tasks = [...tasksOf(j.id), ...(customTasks[j.id]||[])];
+          const groups = new Map();                       // section → Map(task → photos)
+          list.forEach(ph => {
+            const t = tasks.find(x => x.id === ph.taskId);
+            const sec = secsOf(j.id).find(s => s.id === t?.sId);
+            const sKey = sec ? sec.id : 999;
+            if (!groups.has(sKey)) groups.set(sKey, {sec, tasks: new Map()});
+            const g = groups.get(sKey);
+            if (!g.tasks.has(ph.taskId)) g.tasks.set(ph.taskId, {t, photos: []});
+            g.tasks.get(ph.taskId).photos.push(ph);
+          });
+          const secList = [...groups.entries()].sort((a,b) => a[0]-b[0]).map(([,g]) => g);
+          const chip = (v, label, n) => (
+            <button key={v} onClick={()=>setClientPhotoFilter(v)}
+              style={{flex:1,background:clientPhotoFilter===v?Y:CARD2,border:`1px solid ${clientPhotoFilter===v?Y:BDR2}`,borderRadius:8,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,letterSpacing:.5,color:clientPhotoFilter===v?BG:MUTED}}>
+              {label} ({n})
+            </button>
+          );
+          const smallBtn = {background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"6px 10px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:.5,color:TXT,whiteSpace:"nowrap"};
+          return (
+            <div>
+              <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                  <span style={{fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1.5}}>WHAT {who.toUpperCase()} SEES</span>
+                  <span style={{fontFamily:MONO,fontSize:20,color:Y}}>{shown.length}<span style={{fontSize:12,color:MUTED}}> of {all.length} photos</span></span>
+                </div>
+                <div style={{fontSize:11,color:MUTED,marginTop:6,lineHeight:1.5}}>
+                  {j.photosCurated
+                    ? <>Tap a photo to show or hide it on {who}'s portal. <b style={{color:TXT}}>New photos stay hidden until you tick them.</b></>
+                    : <>Right now {who} sees <b style={{color:TXT}}>every</b> photo. Tap any photo to hide it — after that, new photos stay hidden until you tick them.</>}
+                </div>
+                <div style={{display:"flex",gap:8,marginTop:10}}>
+                  <button onClick={()=>setClientPhotos(j, all, true)} disabled={!all.length} style={{...smallBtn,flex:1,color:GRN,padding:"9px 0"}}>SHOW ALL</button>
+                  <button onClick={()=>{ if (window.confirm(`Hide all ${all.length} photos from ${who}?`)) setClientPhotos(j, all, false); }} disabled={!all.length} style={{...smallBtn,flex:1,color:RED,padding:"9px 0"}}>HIDE ALL</button>
+                </div>
+                <div style={{display:"flex",gap:6,marginTop:8}}>
+                  {chip("all","ALL",all.length)}{chip("shown","SHOWN",shown.length)}{chip("hidden","HIDDEN",all.length-shown.length)}
+                </div>
+              </div>
+
+              <div style={{padding:"12px 14px 30px"}}>
+                {!all.length && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 20px"}}>No photos on this job yet.</div>}
+                {all.length>0 && !list.length && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 20px"}}>Nothing in this filter.</div>}
+                {secList.map(g => {
+                  const secPhotos = [...g.tasks.values()].flatMap(x => x.photos);
+                  const secShown = secPhotos.filter(ph => clientSees(j, ph)).length;
+                  return (
+                    <div key={g.sec?.id ?? "other"} style={{marginBottom:20}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                        <span style={{fontFamily:FF,fontSize:14,fontWeight:800,color:TXT,flex:1,minWidth:0}}>{g.sec ? `${g.sec.id}. ${g.sec.name}` : "Other"}</span>
+                        <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{secShown}/{secPhotos.length}</span>
+                        <button onClick={()=>setClientPhotos(j, secPhotos, secShown < secPhotos.length)} style={smallBtn}>
+                          {secShown < secPhotos.length ? "SHOW SECTION" : "HIDE SECTION"}
+                        </button>
+                      </div>
+                      {[...g.tasks.entries()].map(([tid, x]) => (
+                        <div key={tid} style={{marginBottom:10}}>
+                          <div style={{fontSize:11,color:MUTED,marginBottom:5,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            <span style={{fontFamily:MONO,color:Y}}>{tid}</span> {x.t?.desc || ""}
+                          </div>
+                          <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill,minmax(${isDesktop?130:96}px,1fr))`,gap:7}}>
+                            {x.photos.map(ph => {
+                              const on = clientSees(j, ph);
+                              return (
+                                <button key={ph.id} onClick={()=>toggleClientPhoto(j, ph)}
+                                  style={{position:"relative",padding:0,border:`2px solid ${on?Y:BDR}`,borderRadius:9,overflow:"hidden",background:CARD2,cursor:"pointer",aspectRatio:"1"}}>
+                                  <img src={ph.url} alt="" loading="lazy" style={{width:"100%",height:"100%",objectFit:"cover",display:"block",opacity:on?1:.4}}/>
+                                  <span style={{position:"absolute",top:5,right:5,width:22,height:22,borderRadius:"50%",background:on?Y:"rgba(0,0,0,.6)",border:`2px solid ${on?Y:"rgba(255,255,255,.7)"}`,display:"flex",alignItems:"center",justifyContent:"center",color:BG,fontSize:13,fontWeight:800,lineHeight:1}}>{on?"✓":""}</span>
+                                  {!on && <span style={{position:"absolute",bottom:5,right:5,background:"rgba(0,0,0,.7)",borderRadius:5,padding:"2px 6px",fontFamily:FF,fontSize:9,fontWeight:800,color:"#fff",letterSpacing:.5}}>HIDDEN</span>}
+                                  <span onClick={e=>{ e.stopPropagation(); openLightbox(x.photos, ph); }} title="View full size"
+                                    style={{position:"absolute",bottom:5,left:5,background:"rgba(0,0,0,.65)",borderRadius:5,padding:"2px 6px",fontSize:11,color:"#fff",lineHeight:1.2}}>⤢</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {tab==="progress" && (
           <div>
@@ -4379,14 +4539,9 @@ export default function App() {
     const tasksIn = sid => [...tasksOf(job.id).filter(t => t.sId===sid && isIn(job.id,t)),
                             ...(customTasks[job.id]||[]).filter(t => t.sId===sid)]
                            .sort((a,b)=>a.id.localeCompare(b.id));
-    // Every photo on the job, grouped by section so the gallery reads as a story
-    // of the rebuild. Anything that shouldn't be here gets deleted in admin.
-    const shared = [];
-    Object.entries(photos).forEach(([k,arr]) => {
-      if (!k.startsWith(job.id+"_")) return;
-      const taskId = k.slice(job.id.length+1);
-      arr.forEach(p => shared.push({...p, taskId}));
-    });
+    // Photos the supervisor has picked on the CLIENT PHOTOS tab (every photo,
+    // until they pick), grouped by section so the gallery reads as a story.
+    const shared = jobPhotos(job.id).filter(p => clientSees(job, p));
     const sharedBySection = (() => {
       const all = [...tasksOf(job.id), ...(customTasks[job.id]||[])];
       const g = new Map();
@@ -4735,12 +4890,40 @@ export default function App() {
       return {i, iso, dow: d.getDay(), date: d.getDate(), month: d.getMonth(), year: d.getFullYear()};
     });
     const MON = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+    const DATE_B = 34;                // height of the bottom date strip
+    // Date axis: 44px tall at the top (month / weekday / date), 34px along the bottom.
+    const dateStrip = where => {
+      const top = where === "top";
+      return (
+        <div data-gantt-dates style={{height: top ? 44 : DATE_B, boxSizing:"border-box",
+          ...(top ? {borderBottom:`1px solid ${BDR}`, top:0} : {borderTop:`1px solid ${BDR}`, bottom:0}),
+          position:"sticky", zIndex:8, background:CARD2, cursor:"ew-resize"}}>
+          {days.map(d => {
+            const wkend = d.dow===0 || d.dow===6;
+            return (
+              <div key={d.i} style={{position:"absolute",left:d.i*dayW,top:0,width:dayW,height:"100%",
+                borderLeft:`1px solid ${d.dow===1?BDR2:BDR}`,background:wkend?weekendBg:"transparent",
+                display:"flex",flexDirection:"column",justifyContent: top ? "flex-end" : "center",alignItems:"center",
+                paddingBottom: top ? 4 : 0, boxSizing:"border-box"}}>
+                {(d.i===0 || d.date===1) && (
+                  <span style={{position:"absolute",...(top?{top:3}:{bottom:2}),left:3,fontFamily:FF,fontSize:top?9:8,fontWeight:800,color:Y,letterSpacing:1,whiteSpace:"nowrap"}}>
+                    {MON[d.month]}{top ? ` ${String(d.year).slice(2)}` : ""}
+                  </span>
+                )}
+                <span style={{fontSize:8,color:wkend?Y:MUTED,opacity:.8,lineHeight:1}}>{"SMTWTFS"[d.dow]}</span>
+                <span style={{fontFamily:MONO,fontSize:dayW<28?8:10,color:d.iso===todayISO?RED:TXT,lineHeight:1.2}}>{d.date}</span>
+              </div>
+            );
+          })}
+        </div>
+      );
+    };
 
     // Keep the horizontal scroll where it was across re-renders; open on today.
     const scrollToToday = el => { if (el) el.scrollLeft = Math.max(0, (Math.max(0,elapsed)) * dayW - 80); };
     // The chart is its own scroll box sized to fit the screen, so the sideways
     // scrollbar is always on screen and the dates stay pinned along the top.
-    const contentH = 44 + rows.length * ROW + 14;
+    const contentH = 44 + rows.length * ROW + 34 + 14;
     const fitHeight = el => {
       const top = el.getBoundingClientRect().top + window.scrollY;
       const reserve = isDesktop ? 20 : 84;                 // mobile bottom nav
@@ -4872,7 +5055,7 @@ export default function App() {
       const st = {x0:e.clientX, y0:e.clientY, lastX:e.clientX, lastY:e.clientY,
                   sl0: scroller?.scrollLeft || 0, active: !touch, moved:false, panning:false,
                   left0: t.start*dayW, w0: Math.max((t.end-t.start)*dayW, 4),
-                  startDay0: Math.round(t.start), hrs0: Math.round(r.dur*HRS_PER_DAY),
+                  startDay0: Math.round(t.start), hrs0: Math.round(r.hours), techs: r.techs || 1,
                   value: null, timer: null, badge: null, id: e.pointerId};
       ganttUI.suppressClick = false;
       ganttUI.drag = st;
@@ -4929,12 +5112,12 @@ export default function App() {
           const iso = calAddDays(anchor, day);
           badge(`${DOW_SHORT[parseISO(iso).getDay()]} ${fmtDM(iso)}`, day*dayW + st.w0 + 6);
         } else {
-          const hrs = Math.max(1, Math.round((st.w0 + dx) / dayW * HRS_PER_DAY));
+          const hrs = Math.max(1, Math.round((st.w0 + dx) / dayW * HRS_PER_DAY * st.techs));   // labour hours
           st.value = hrs;
-          const px = Math.max(hrs / HRS_PER_DAY * dayW, 4);
+          const px = Math.max(hrs / st.techs / HRS_PER_DAY * dayW, 4);
           bar.style.width = `${px}px`;
-          const endISO = barDates(anchor, t.start, t.start + hrs/HRS_PER_DAY).to;
-          badge(`${hrs}h · to ${DOW_SHORT[parseISO(endISO).getDay()]} ${fmtDM(endISO)}`, st.left0 + px + 6);
+          const endISO = barDates(anchor, t.start, t.start + hrs/st.techs/HRS_PER_DAY).to;
+          badge(`${hrs}h${st.techs>1?` ÷ ${st.techs}`:""} · to ${DOW_SHORT[parseISO(endISO).getDay()]} ${fmtDM(endISO)}`, st.left0 + px + 6);
         }
       };
       const end = ev => {
@@ -5052,7 +5235,7 @@ export default function App() {
                 <div style={{maxHeight:340,overflowY:"auto",border:`1px solid ${BDR}`,borderRadius:9}}>
                   {(tmpl?.tasks||[]).filter(t=>isIn(job.id,t)).map(t => (
                     <button key={t.id}
-                      onClick={()=>setEditSched({job, row:{taskId:t.id, dur:Math.max(0.5,Math.round((t.est/HRS_PER_DAY)*2)/2), sheetDur:null, startDate:null, fixedStart:null, deps:[], depsFromSheet:false, droppedDeps:0}})}
+                      onClick={()=>setEditSched({job, row:{taskId:t.id, dur:Math.max(0.5,Math.round((t.est/HRS_PER_DAY)*2)/2), hours:Number(t.est)||5, techs:1, sheetDur:null, startDate:null, fixedStart:null, deps:[], depsFromSheet:false, droppedDeps:0}})}
                       style={{display:"flex",alignItems:"center",gap:9,width:"100%",textAlign:"left",background:"transparent",border:"none",borderBottom:`1px solid ${BDR}`,padding:"9px 11px",cursor:"pointer"}}>
                       <span style={{fontFamily:MONO,fontSize:11,color:Y,minWidth:42,flexShrink:0}}>{t.id}</span>
                       <span style={{fontSize:12,color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</span>
@@ -5091,26 +5274,15 @@ export default function App() {
                       </button>
                     );
                   })}
+                  <div style={{position:"sticky",bottom:0,zIndex:11,height:DATE_B,boxSizing:"border-box",borderTop:`1px solid ${BDR}`,display:"flex",alignItems:"center",padding:"0 12px",background:CARD2}}>
+                    <span style={{fontFamily:FF,fontSize:10,fontWeight:800,color:MUTED,letterSpacing:1}}>{ordered.length} JOBS</span>
+                  </div>
                 </div>
 
                 {/* Scrolling calendar */}
                 <div style={{position:"relative",width:chartW,flexShrink:0,height:"max-content"}}>
-                  {/* header: month, weekday letter, date — pinned to the top; scroll here to go sideways */}
-                  <div data-gantt-dates style={{height:44,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:8,background:CARD2,cursor:"ew-resize"}}>
-                    {days.map(d => (
-                      <div key={d.i} style={{position:"absolute",left:d.i*dayW,top:0,width:dayW,height:"100%",
-                        borderLeft:`1px solid ${d.dow===1?BDR2:BDR}`,background:(d.dow===0||d.dow===6)?weekendBg:"transparent",
-                        display:"flex",flexDirection:"column",justifyContent:"flex-end",alignItems:"center",paddingBottom:4,boxSizing:"border-box"}}>
-                        {(d.i===0 || d.date===1) && (
-                          <span style={{position:"absolute",top:3,left:3,fontFamily:FF,fontSize:9,fontWeight:800,color:Y,letterSpacing:1,whiteSpace:"nowrap"}}>
-                            {MON[d.month]} {String(d.year).slice(2)}
-                          </span>
-                        )}
-                        <span style={{fontSize:8,color:(d.dow===0||d.dow===6)?Y:MUTED,opacity:.8}}>{"SMTWTFS"[d.dow]}</span>
-                        <span style={{fontFamily:MONO,fontSize:dayW<28?8:10,color:d.iso===todayISO?RED:TXT}}>{d.date}</span>
-                      </div>
-                    ))}
-                  </div>
+                  {/* dates pinned to the top; scroll here to go sideways */}
+                  {dateStrip("top")}
                   {/* body */}
                   <div style={{position:"relative"}}>
                     {/* weekend shading + day lines (Mondays darker) */}
@@ -5128,13 +5300,13 @@ export default function App() {
                       const left = t.start*dayW;
                       const width = Math.max((t.end-t.start)*dayW, 4);
                       const task = taskOf(r.taskId);
-                      const label = `${fmtH(r.dur*HRS_PER_DAY)}${r.edited?" *":""}`;
+                      const label = `${fmtH(r.hours)}${r.techs>1?` ×${r.techs}`:""}${r.edited?" *":""}`;
                       return (
                         <div key={r.taskId} style={{height:ROW,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,position:"relative"}}>
                           <button onPointerDown={e=>startBarDrag(e, r, "move")}
                             onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
                             onContextMenu={e=>e.preventDefault()}
-                            title={`${r.taskId} — ${task?.desc||""}\n${rangeTxt(w)}\n${fmtH(r.dur*HRS_PER_DAY)} (${r.dur} day${r.dur===1?"":"s"})${r.dur!==r.sheetDur?` · sheet ${fmtH(r.est)}`:""}${r.startDate?`\nPinned: not before ${fmtDMY(r.startDate)}`:""}${r.deps?.length?`\nRules: ${r.deps.map(d=>`${d.type} ${d.id}`).join(", ")}`:""}`}
+                            title={`${r.taskId} — ${task?.desc||""}\n${rangeTxt(w)}\n${fmtH(r.hours)} of work${r.techs>1?` · ${r.techs} techs = ${fmtH(r.hours/r.techs)} on the chart`:""}${r.labourDur!==r.sheetDur?` · sheet ${fmtH(r.est)}`:""}${r.startDate?`\nPinned: not before ${fmtDMY(r.startDate)}`:""}${r.deps?.length?`\nRules: ${r.deps.map(d=>`${d.type} ${d.id}`).join(", ")}`:""}`}
                             style={{position:"absolute",left,top:5,width,height:ROW-10,borderRadius:4,border:r.startDate?`1px solid ${TXT}`:"none",cursor:"grab",touchAction:"none",WebkitTouchCallout:"none",background:colFor(r.taskId),opacity:statusOf(r.taskId)==="ongoing"?.55:.95,display:"flex",alignItems:"center",padding:"0 6px",overflow:"hidden",zIndex:3,boxSizing:"border-box"}}>
                             {width>34 && <span style={{fontFamily:FF,fontSize:9,fontWeight:700,color:BG,whiteSpace:"nowrap",pointerEvents:"none"}}>{label}</span>}
                             {/* right edge: drag to change hours */}
@@ -5151,6 +5323,8 @@ export default function App() {
                       );
                     })}
                   </div>
+                  {/* …and pinned to the bottom, so they're there when working near the end of the ladder */}
+                  {dateStrip("bottom")}
                 </div>
               </div>
 
@@ -5160,7 +5334,7 @@ export default function App() {
                     <span style={{width:9,height:9,borderRadius:2,background:c}}/>{l}
                   </span>
                 ))}
-                <span style={{fontSize:10,color:MUTED}}>· drag ⋮⋮ to move a job up or down the ladder · Ctrl or Shift + scroll (or scroll over the dates) to go sideways · drag a bar to move it, drag its right edge to change hours (on a phone, hold first) · tap to edit · 7 days a week, weekends shaded · 10.5h days · outlined = pinned to a date · * changed from sheet</span>
+                <span style={{fontSize:10,color:MUTED}}>· ×2 = two technicians · drag ⋮⋮ to move a job up or down the ladder · Ctrl or Shift + scroll (or scroll over the dates) to go sideways · drag a bar to move it, drag its right edge to change hours (on a phone, hold first) · tap to edit · 7 days a week, weekends shaded · 10.5h days · outlined = pinned to a date · * changed from sheet</span>
               </div>
             </div>
           )}
@@ -5416,7 +5590,7 @@ export default function App() {
         const end   = Math.max(...rs.map(r => times[r.taskId]?.end || 0));
         const done  = rs.filter(r => statusOf(r.taskId)==="completed").length;
         const hold  = rs.some(r => statusOf(r.taskId)==="on_hold");
-        return {sec, start, end, done, n: rs.length, hours: rs.reduce((s,r)=>s+r.dur*GANTT_HRS_PER_DAY,0), hold};
+        return {sec, start, end, done, n: rs.length, hours: rs.reduce((s,r)=>s+r.hours,0), hold};
       }).filter(Boolean);
 
       const ROW=20, LBL=112, PAD=8, TOP=22;
@@ -5847,6 +6021,7 @@ export default function App() {
             return saveSchedRow(editSched.job.id, r.taskId, {
               ...patch,
               dur:  typeof r.sheetDur === "number" && patch.dur === r.sheetDur ? null : patch.dur,
+              techs: patch.techs > 1 ? patch.techs : null,
               deps: sameDeps && r.depsFromSheet ? null : patch.deps,
             });
           }}
