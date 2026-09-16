@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable, Users, LogIn } from "lucide-react";
+import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable, Users, LogIn, Package } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc, writeBatch } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
@@ -232,7 +232,7 @@ const pFld = {width: "100%", background: CARD2, border: `1px solid ${BDR2}`, bor
 
 // The PARTS tab on a job. `lines` come from the quote (template parts + sundries),
 // plus extras added from invoices and tracking for lines no longer on the sheet.
-const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit, onAddExtra}) => {
+const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit, onAddExtra, stockOf = () => null, onFromStock = () => {}}) => {
   const [q, setQ]       = useState(partsUI.q);
   const [filter, setF]  = useState(partsUI.filter);
   const [inv, setInv]   = useState(partsUI.invoice);
@@ -352,6 +352,7 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
               </div>
               {g.lines.map(l => {
                 const st = PART_STATES[l.status] || PART_STATES.none;
+                const stock = l.pn ? stockOf(l) : null;
                 const changed = l.status === "invoiced" && l.kind !== "extra" && Math.abs(l.variance) >= 0.005;
                 return (
                   <div key={l.docId} style={{background: CARD, border: `1px solid ${changed ? "rgba(255,76,76,.35)" : BDR}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6}}>
@@ -386,6 +387,9 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
                     </div>
                     {l.kind !== "orphan" && l.status !== "invoiced" && (
                       <div style={{display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap"}}>
+                        {l.kind !== "extra" && stock && stock.stats.onHand > 0 && (
+                          <button onClick={() => onFromStock(l, stock)} style={{...pBtn(BG), background: GRN, borderColor: GRN}}>FROM STOCK ({qtyTxt(stock.stats.onHand)})</button>
+                        )}
                         {l.kind !== "extra" && l.status === "none" && (
                           <button onClick={() => onOrdered(l)} style={pBtn(AMBER)}>MARK ORDERED</button>
                         )}
@@ -581,6 +585,401 @@ const CreamEditor = ({task, planned, loggedHrs, current, rate, onSave, onClose})
             {busy ? "SAVING…" : h > 0 ? `SAVE ${h}h CREAM` : "SAVE"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════════════
+// STOCK (admin only)
+// Items: one per part number (doc id from the normalised number, so "RE-123"
+// and "re123" are the same part). Movements: in (received), out (issued to a
+// job) and adjust (stocktake). Stock on hand is always worked out from the
+// movements, so it can't drift out of step.
+// ══════════════════════════════════════════════════════════════════════
+const stockUI = { q: "", filter: "all" };
+const pnKeyOf = s => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+const qtyTxt = n => { const v = Math.round((Number(n) || 0) * 100) / 100; return String(v); };
+
+const StockPanel = ({rows, totals, onOpen, onNew, onReceive, onIssue, onCount}) => {
+  const [q, setQ]      = useState(stockUI.q);
+  const [filter, setF] = useState(stockUI.filter);
+  const setQuery  = v => { stockUI.q = v; setQ(v); };
+  const setFilter = v => { stockUI.filter = v; setF(v); };
+  const qq = q.trim().toLowerCase(), qk = pnKeyOf(q);
+  const FILTERS = [
+    ["all",  "ALL",          () => true],
+    ["low",  "LOW / REORDER", r => r.stats.onHand > 0 && r.item.minQty > 0 && r.stats.onHand <= r.item.minQty],
+    ["out",  "OUT OF STOCK", r => r.stats.onHand <= 0],
+    ["in",   "IN STOCK",     r => r.stats.onHand > 0],
+  ];
+  const test = (FILTERS.find(f => f[0] === filter) || FILTERS[0])[2];
+  const shown = rows.filter(r => test(r) && (!qq ||
+    `${r.item.pn} ${r.item.desc} ${r.item.location} ${r.item.supplier}`.toLowerCase().includes(qq) ||
+    (qk && pnKeyOf(r.item.pn).includes(qk))));
+  const big = (label, onClick, col = Y) => (
+    <button onClick={onClick} style={{flex: 1, background: CARD2, border: `1px solid ${BDR2}`, borderRadius: 9, padding: "11px 0", cursor: "pointer",
+      fontFamily: FF, fontSize: 12, fontWeight: 800, letterSpacing: 1, color: col}}>{label}</button>
+  );
+  return (
+    <div>
+      <div style={{background: CARD, padding: "14px 16px", borderBottom: `1px solid ${BDR}`}}>
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8}}>
+          {[["PARTS", `${totals.items}`, `${totals.inStock} in stock`, TXT],
+            ["STOCK VALUE", money0(totals.value), "at average cost", Y],
+            ["REORDER", `${totals.low + totals.out}`, `${totals.low} low · ${totals.out} out`, totals.low + totals.out ? AMBER : GRN]].map(([l, v, s, c]) => (
+            <div key={l} style={{background: CARD2, borderRadius: 8, padding: "9px 10px", minWidth: 0}}>
+              <div style={{fontFamily: FF, fontSize: 9, color: MUTED, letterSpacing: 1.5, marginBottom: 3}}>{l}</div>
+              <div style={{fontFamily: MONO, fontSize: 17, color: c}}>{v}</div>
+              <div style={{fontSize: 10, color: MUTED, marginTop: 2}}>{s}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{display: "flex", gap: 6, marginTop: 10}}>
+          {big("＋ RECEIVE", onReceive, GRN)}
+          {big("ISSUE TO JOB", onIssue, Y)}
+          {big("COUNT", onCount, TXT)}
+        </div>
+      </div>
+
+      <div style={{padding: "12px 14px 4px", background: BG}}>
+        <div style={{position: "relative"}}>
+          <input value={q} onChange={e => setQuery(e.target.value)} placeholder="Search stock — part number, name, bin, supplier…"
+            autoCorrect="off" autoCapitalize="none" spellCheck={false}
+            style={{...pFld, background: CARD, padding: "11px 40px 11px 14px"}}/>
+          {qq && (
+            <button onClick={() => setQuery("")} aria-label="Clear search"
+              style={{position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: BDR2, border: "none", borderRadius: 6, width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer"}}>
+              <X size={14} color={MUTED}/>
+            </button>
+          )}
+        </div>
+        <div style={{display: "flex", gap: 6, overflowX: "auto", padding: "8px 0 4px"}}>
+          {FILTERS.map(([v, label, fn]) => {
+            const on = filter === v;
+            return (
+              <button key={v} onClick={() => setFilter(v)}
+                style={{...pBtn(on ? BG : MUTED), background: on ? Y : CARD2, borderColor: on ? Y : BDR2, flexShrink: 0}}>
+                {label} ({rows.filter(fn).length})
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={onNew}
+          style={{width: "100%", margin: "6px 0 2px", background: "none", border: `1px dashed ${BDR2}`, borderRadius: 9, padding: "10px 0", cursor: "pointer", fontFamily: FF, fontSize: 12, fontWeight: 800, color: Y, letterSpacing: 1}}>
+          + ADD A PART TO THE STOCK LIST
+        </button>
+      </div>
+
+      <div style={{padding: "8px 14px 40px"}}>
+        {rows.length === 0 && (
+          <div style={{textAlign: "center", color: MUTED, fontSize: 13, padding: "34px 16px", lineHeight: 1.6}}>
+            Nothing in the stock list yet.<br/>Use <b style={{color: GRN}}>＋ RECEIVE</b> when parts arrive for the shelf, or <b style={{color: TXT}}>COUNT</b> to load what's already there.
+          </div>
+        )}
+        {rows.length > 0 && shown.length === 0 && <div style={{textAlign: "center", color: MUTED, fontSize: 13, padding: "30px 0"}}>No parts match.</div>}
+        {shown.map(({item, stats}) => {
+          const low = item.minQty > 0 && stats.onHand <= item.minQty;
+          const out = stats.onHand <= 0;
+          const col = out ? RED : low ? AMBER : GRN;
+          return (
+            <button key={item.id} onClick={() => onOpen(item)}
+              style={{display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", background: CARD, border: `1px solid ${out || low ? "rgba(245,165,36,.3)" : BDR}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6, cursor: "pointer"}}>
+              <div style={{flex: 1, minWidth: 0}}>
+                <div style={{display: "flex", gap: 7, alignItems: "baseline"}}>
+                  {item.pn && <span style={{fontFamily: MONO, fontSize: 11, color: Y, flexShrink: 0}}>{item.pn}</span>}
+                  <span style={{fontSize: 13, color: TXT, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>{item.desc || "—"}</span>
+                </div>
+                <div style={{fontSize: 10, color: MUTED, marginTop: 3}}>
+                  {[item.location && `bin ${item.location}`, item.supplier, stats.avgCost ? `${money2(stats.avgCost)} avg` : null, item.minQty ? `min ${qtyTxt(item.minQty)}` : null].filter(Boolean).join(" · ") || "no details yet"}
+                </div>
+              </div>
+              <div style={{textAlign: "right", flexShrink: 0}}>
+                <div style={{fontFamily: MONO, fontSize: 18, color: col, lineHeight: 1.1}}>{qtyTxt(stats.onHand)}</div>
+                <div style={{fontFamily: FF, fontSize: 9, fontWeight: 800, letterSpacing: .5, color: col}}>{out ? "OUT" : low ? "REORDER" : (item.unit || "ON HAND").toUpperCase()}</div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// One part on the stock list: details, stock on hand, and its movement history.
+const StockItemEditor = ({item, stats, isNew, existingKey, onSave, onDelete, onMove, onDeleteMove, jobLabel, onClose}) => {
+  const [pn, setPn]       = useState(item?.pn || "");
+  const [desc, setDesc]   = useState(item?.desc || "");
+  const [unit, setUnit]   = useState(item?.unit || "ea");
+  const [loc, setLoc]     = useState(item?.location || "");
+  const [sup, setSup]     = useState(item?.supplier || "");
+  const [minQ, setMinQ]   = useState(item?.minQty ? String(item.minQty) : "");
+  const [err, setErr]     = useState("");
+  const [busy, setBusy]   = useState(false);
+  const dirty = isNew || pn !== (item.pn || "") || desc !== (item.desc || "") || unit !== (item.unit || "ea") ||
+                loc !== (item.location || "") || sup !== (item.supplier || "") || minQ !== (item.minQty ? String(item.minQty) : "");
+  const save = async () => {
+    if (!pn.trim() && !desc.trim()) { setErr("Give it a part number or a name."); return; }
+    const clash = existingKey(pnKeyOf(pn), item?.id);
+    if (pnKeyOf(pn) && clash) { setErr(`That part number is already on the list: ${clash.pn} — ${clash.desc || "no name"}.`); return; }
+    setBusy(true);
+    await onSave({pn: pn.trim(), desc: desc.trim(), unit: unit.trim() || "ea", location: loc.trim(), supplier: sup.trim(), minQty: parseFloat(minQ) || 0});
+    setBusy(false);
+    if (isNew) onClose();
+  };
+  const label = s => <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "10px 0 5px"}}>{s}</div>;
+  const low = !isNew && item.minQty > 0 && stats.onHand <= item.minQty;
+  return (
+    <div style={{position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center"}}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{background: CARD, borderRadius: "18px 18px 0 0", padding: "18px 18px 28px", width: "100%", maxWidth: 560, border: `1px solid ${BDR}`, boxSizing: "border-box", maxHeight: "92dvh", overflowY: "auto"}}>
+        <div style={{display: "flex", alignItems: "flex-start", gap: 10}}>
+          <div style={{flex: 1, minWidth: 0}}>
+            <div style={{fontFamily: FF, fontSize: 20, fontWeight: 800, color: TXT}}>{isNew ? "NEW STOCK PART" : (item.desc || item.pn)}</div>
+            {!isNew && item.pn && <div style={{fontFamily: MONO, fontSize: 12, color: Y, marginTop: 2}}>{item.pn}</div>}
+          </div>
+          <button onClick={onClose} style={{background: BDR2, border: "none", borderRadius: 8, padding: 6, cursor: "pointer"}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        {!isNew && (<>
+          <div style={{display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 12}}>
+            {[["ON HAND", `${qtyTxt(stats.onHand)} ${item.unit || ""}`, stats.onHand <= 0 ? RED : low ? AMBER : GRN],
+              ["AVG COST", stats.avgCost ? money2(stats.avgCost) : "—", TXT],
+              ["VALUE", money0(Math.max(0, stats.onHand) * stats.avgCost), Y]].map(([l, v, c]) => (
+              <div key={l} style={{background: CARD2, borderRadius: 8, padding: "8px 10px"}}>
+                <div style={{fontFamily: FF, fontSize: 9, color: MUTED, letterSpacing: 1.5}}>{l}</div>
+                <div style={{fontFamily: MONO, fontSize: 15, color: c}}>{v}</div>
+              </div>
+            ))}
+          </div>
+          {low && <div style={{fontSize: 11, color: AMBER, marginTop: 6}}>At or below the reorder level ({qtyTxt(item.minQty)}).</div>}
+          <div style={{display: "flex", gap: 6, marginTop: 10}}>
+            <button onClick={() => onMove("in")}    style={{...pBtn(GRN), flex: 1, padding: "10px 0"}}>＋ RECEIVE</button>
+            <button onClick={() => onMove("out")}   style={{...pBtn(Y),   flex: 1, padding: "10px 0"}} disabled={stats.onHand <= 0}>ISSUE TO JOB</button>
+            <button onClick={() => onMove("count")} style={{...pBtn(TXT), flex: 1, padding: "10px 0"}}>COUNT</button>
+          </div>
+        </>)}
+
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8}}>
+          <div>{label("PART NUMBER")}<input value={pn} onChange={e => setPn(e.target.value)} placeholder="As on the invoice" style={{...pFld, fontFamily: MONO}}/></div>
+          <div>{label("UNIT")}<input value={unit} onChange={e => setUnit(e.target.value)} placeholder="ea, L, m" style={pFld}/></div>
+        </div>
+        {label("NAME")}
+        <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="e.g. Hydraulic filter" style={pFld}/>
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8}}>
+          <div>{label("BIN / SHELF")}<input value={loc} onChange={e => setLoc(e.target.value)} placeholder="A3" style={pFld}/></div>
+          <div>{label("SUPPLIER")}<input value={sup} onChange={e => setSup(e.target.value)} style={pFld}/></div>
+          <div>{label("REORDER AT")}<input type="number" inputMode="decimal" min="0" value={minQ} onChange={e => setMinQ(e.target.value)} placeholder="0" style={{...pFld, fontFamily: MONO}}/></div>
+        </div>
+        {err && <div style={{color: RED, fontSize: 12, marginTop: 8}}>{err}</div>}
+        {dirty && (
+          <button onClick={save} disabled={busy}
+            style={{width: "100%", marginTop: 12, background: Y, border: "none", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 14, fontWeight: 800, color: BG}}>
+            {busy ? "SAVING…" : isNew ? "ADD TO STOCK LIST" : "SAVE DETAILS"}
+          </button>
+        )}
+
+        {!isNew && (<>
+          <div style={{fontFamily: FF, fontSize: 11, fontWeight: 800, color: Y, letterSpacing: 2, margin: "18px 0 8px"}}>HISTORY</div>
+          {stats.moves.length === 0 && <div style={{fontSize: 12, color: MUTED}}>No movements yet.</div>}
+          {stats.moves.map(mv => {
+            const q = Number(mv.qty) || 0;
+            const [tag, col, sign] = mv.type === "in" ? ["IN", GRN, "+"] : mv.type === "out" ? ["OUT", Y, "−"] : ["COUNT", TXT, q >= 0 ? "+" : "−"];
+            return (
+              <div key={mv.id} style={{display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderBottom: `1px solid ${BDR}`}}>
+                <span style={{fontFamily: FF, fontSize: 9, fontWeight: 800, color: col, border: `1px solid ${col}`, borderRadius: 4, padding: "1px 5px", minWidth: 38, textAlign: "center"}}>{tag}</span>
+                <div style={{flex: 1, minWidth: 0, fontSize: 11, color: MUTED, lineHeight: 1.4}}>
+                  <span style={{color: TXT}}>{mv.date}</span>
+                  {mv.type === "in" && [mv.supplier, mv.invoiceNo && `inv ${mv.invoiceNo}`, mv.unitCost ? `${money2(mv.unitCost)} ea` : null].filter(Boolean).map(s => ` · ${s}`).join("")}
+                  {mv.type === "out" && ` · ${jobLabel(mv.jobId, mv.taskId)}`}
+                  {mv.note ? ` · ${mv.note}` : ""}
+                </div>
+                <span style={{fontFamily: MONO, fontSize: 13, color: col}}>{sign}{qtyTxt(Math.abs(q))}</span>
+                <button onClick={() => { if (window.confirm(mv.type === "out" && mv.jobId ? "Delete this issue? It also comes off the job's parts." : "Delete this movement?")) onDeleteMove(mv); }}
+                  style={{background: "none", border: "none", padding: 4, cursor: "pointer"}} aria-label="Delete movement"><Trash2 size={13} color={MUTED}/></button>
+              </div>
+            );
+          })}
+          <button onClick={() => { if (window.confirm(`Remove ${item.pn || item.desc} from the stock list${stats.moves.length ? ` and delete its ${stats.moves.length} movement${stats.moves.length === 1 ? "" : "s"}` : ""}?`)) { onDelete(); onClose(); } }}
+            style={{width: "100%", marginTop: 16, background: "rgba(255,76,76,.08)", border: "1px solid rgba(255,76,76,.25)", borderRadius: 10, padding: 12, cursor: "pointer", fontFamily: FF, fontSize: 13, fontWeight: 700, color: RED}}>
+            REMOVE FROM STOCK LIST
+          </button>
+        </>)}
+      </div>
+    </div>
+  );
+};
+
+// Receive / issue / count. Pick the part (or add a new one when receiving or
+// counting), then the details for that kind of movement.
+const StockMoveEditor = ({mode, item: item0, rows, jobs, jobName, tasksForJob, secsForJob, quoteLinesFor, defaults = {}, onSubmit, onClose}) => {
+  const [item, setItem]     = useState(item0 || null);
+  const [pick, setPick]     = useState("");
+  const [newPart, setNewP]  = useState(false);
+  const [npn, setNpn]       = useState("");
+  const [ndesc, setNdesc]   = useState("");
+  const stats = item ? (rows.find(r => r.item.id === item.id)?.stats || {onHand: 0, avgCost: 0, lastCost: 0}) : null;
+  const [qty, setQty]       = useState(defaults.qty != null ? String(defaults.qty) : mode === "count" ? (stats ? qtyTxt(stats.onHand) : "") : "1");
+  const [cost, setCost]     = useState(defaults.unitCost != null ? String(defaults.unitCost) : "");
+  const [sup, setSup]       = useState(item0?.supplier || "");
+  const [invNo, setInvNo]   = useState("");
+  const [date, setDate]     = useState(today());
+  const [note, setNote]     = useState("");
+  const [jobId, setJobId]   = useState(defaults.jobId || jobs[0]?.id || "");
+  const [taskId, setTaskId] = useState(defaults.taskId || "");
+  const [lineKey, setLine]  = useState(defaults.lineDocId || "");
+  const [busy, setBusy]     = useState(false);
+  const [err, setErr]       = useState("");
+
+  const title = mode === "in" ? "RECEIVE INTO STOCK" : mode === "out" ? "ISSUE TO JOB" : "STOCKTAKE COUNT";
+  const pq = pick.trim().toLowerCase(), pk = pnKeyOf(pick);
+  const matches = pq ? rows.filter(r => `${r.item.pn} ${r.item.desc}`.toLowerCase().includes(pq) || (pk && pnKeyOf(r.item.pn).includes(pk))).slice(0, 8) : [];
+  const choose = it => {
+    setItem(it); setPick("");
+    const st = rows.find(r => r.item.id === it.id)?.stats;
+    if (mode === "count") setQty(qtyTxt(st?.onHand || 0));
+    if (mode === "out" && !defaults.unitCost) setCost(st?.avgCost ? String(Math.round(st.avgCost * 100) / 100) : "");
+    if (mode === "in") { setSup(it.supplier || ""); if (st?.lastCost) setCost(String(st.lastCost)); }
+    setLine("");
+  };
+  // On issue: quote lines on the chosen job with the same part number.
+  const key = pnKeyOf(item?.pn || npn);
+  const quoteMatches = mode === "out" && jobId && key ? quoteLinesFor(jobId).filter(l => l.kind !== "extra" && l.kind !== "orphan" && pnKeyOf(l.pn) === key) : [];
+  const effLine = quoteMatches.find(l => l.docId === lineKey) || (lineKey === "none" ? null : (lineKey ? null : quoteMatches[0])) || null;
+  const tasks = jobId ? tasksForJob(jobId) : [];
+  const secs = jobId ? secsForJob(jobId) : [];
+
+  const qn = parseFloat(qty), cn = parseFloat(cost);
+  const submit = async () => {
+    setErr("");
+    if (!item && !(newPart && (npn.trim() || ndesc.trim()))) { setErr("Pick a part (or add a new one)."); return; }
+    if (mode === "count" ? !(qn >= 0) : !(qn > 0)) { setErr(mode === "count" ? "Enter how many are on the shelf." : "Enter a quantity."); return; }
+    if (mode === "in" && cost !== "" && !(cn >= 0)) { setErr("Unit cost doesn't look right."); return; }
+    if (mode === "out" && !jobId) { setErr("Which job is it going to?"); return; }
+    setBusy(true);
+    try {
+      await onSubmit({
+        mode, item, newItem: !item ? {pn: npn.trim(), desc: ndesc.trim(), supplier: sup.trim()} : null,
+        qty: qn, unitCost: cost === "" ? null : cn, supplier: sup.trim(), invoiceNo: invNo.trim(), date, note: note.trim(),
+        jobId, taskId: effLine ? effLine.taskId : taskId, line: effLine,
+        onHand: stats?.onHand || 0,
+      });
+      onClose();
+    } catch (e) { setErr(e.message || "Couldn't save."); setBusy(false); }
+  };
+  const label = s => <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "12px 0 5px"}}>{s}</div>;
+  return (
+    <div style={{position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 125, display: "flex", alignItems: "flex-end", justifyContent: "center"}}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{background: CARD, borderRadius: "18px 18px 0 0", padding: "18px 18px 28px", width: "100%", maxWidth: 560, border: `1px solid ${BDR}`, boxSizing: "border-box", maxHeight: "92dvh", overflowY: "auto"}}>
+        <div style={{display: "flex", alignItems: "center", gap: 10}}>
+          <div style={{flex: 1, fontFamily: FF, fontSize: 20, fontWeight: 800, color: mode === "in" ? GRN : mode === "out" ? Y : TXT}}>{title}</div>
+          <button onClick={onClose} style={{background: BDR2, border: "none", borderRadius: 8, padding: 6, cursor: "pointer"}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        {label("PART")}
+        {item ? (
+          <div style={{display: "flex", alignItems: "center", gap: 10, background: CARD2, border: `1px solid ${BDR2}`, borderRadius: 9, padding: "10px 12px"}}>
+            <div style={{flex: 1, minWidth: 0}}>
+              {item.pn && <span style={{fontFamily: MONO, fontSize: 12, color: Y}}>{item.pn} </span>}
+              <span style={{fontSize: 13, color: TXT}}>{item.desc}</span>
+              <div style={{fontSize: 11, color: MUTED, marginTop: 2}}>{qtyTxt(stats.onHand)} {item.unit || ""} on hand{stats.avgCost ? ` · ${money2(stats.avgCost)} avg` : ""}</div>
+            </div>
+            {!item0 && <button onClick={() => setItem(null)} style={pBtn(MUTED)}>CHANGE</button>}
+          </div>
+        ) : newPart ? (
+          <div style={{display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 6}}>
+            <input value={npn} onChange={e => setNpn(e.target.value)} placeholder="Part number" style={{...pFld, fontFamily: MONO}}/>
+            <input value={ndesc} onChange={e => setNdesc(e.target.value)} placeholder="Name" style={pFld}/>
+            {pnKeyOf(npn) && rows.some(r => pnKeyOf(r.item.pn) === pnKeyOf(npn)) && (
+              <div style={{gridColumn: "1 / -1", fontSize: 11, color: AMBER}}>
+                Already on the list — <button onClick={() => { choose(rows.find(r => pnKeyOf(r.item.pn) === pnKeyOf(npn)).item); setNewP(false); }} style={{background: "none", border: "none", color: Y, cursor: "pointer", padding: 0, fontSize: 11, textDecoration: "underline"}}>use that one</button>
+              </div>
+            )}
+            <button onClick={() => setNewP(false)} style={{...pBtn(MUTED), gridColumn: "1 / -1"}}>BACK TO SEARCH</button>
+          </div>
+        ) : (
+          <div>
+            <input value={pick} onChange={e => setPick(e.target.value)} placeholder="Search the stock list…" autoCorrect="off" autoCapitalize="none" spellCheck={false} style={pFld}/>
+            {matches.map(r => (
+              <button key={r.item.id} onClick={() => choose(r.item)}
+                style={{display: "flex", width: "100%", textAlign: "left", gap: 8, background: "none", border: "none", borderBottom: `1px solid ${BDR}`, padding: "9px 4px", cursor: "pointer"}}>
+                <span style={{fontFamily: MONO, fontSize: 11, color: Y, minWidth: 70}}>{r.item.pn || "—"}</span>
+                <span style={{flex: 1, fontSize: 12, color: TXT}}>{r.item.desc}</span>
+                <span style={{fontFamily: MONO, fontSize: 12, color: r.stats.onHand > 0 ? GRN : RED}}>{qtyTxt(r.stats.onHand)}</span>
+              </button>
+            ))}
+            {pq && matches.length === 0 && <div style={{fontSize: 12, color: MUTED, padding: "8px 2px"}}>Not on the stock list.</div>}
+            {mode !== "out" && (
+              <button onClick={() => { setNewP(true); if (pk && !npn) setNpn(pick.trim()); }}
+                style={{...pBtn(Y), width: "100%", marginTop: 8, padding: "9px 0"}}>+ NEW PART</button>
+            )}
+          </div>
+        )}
+
+        {mode === "count" ? (<>
+          {label("COUNTED ON THE SHELF")}
+          <input type="number" inputMode="decimal" min="0" value={qty} onChange={e => setQty(e.target.value)} style={{...pFld, fontFamily: MONO, fontSize: 18}}/>
+          {stats && qty !== "" && qn >= 0 && Math.abs(qn - stats.onHand) > 0.001 && (
+            <div style={{fontSize: 12, color: TXT, marginTop: 6}}>App says {qtyTxt(stats.onHand)} → adjusts by <b style={{color: qn > stats.onHand ? GRN : RED}}>{qn > stats.onHand ? "+" : "−"}{qtyTxt(Math.abs(qn - stats.onHand))}</b></div>
+          )}
+          {(!stats || qn > (stats?.onHand || 0)) && (<>
+            {label("UNIT COST ex GST (for any extra found)")}
+            <input type="number" inputMode="decimal" min="0" step="0.01" value={cost} onChange={e => setCost(e.target.value)} placeholder="optional" style={{...pFld, fontFamily: MONO}}/>
+          </>)}
+        </>) : (<>
+          <div style={{display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 8}}>
+            <div>{label("QTY")}<input type="number" inputMode="decimal" min="0" value={qty} onChange={e => setQty(e.target.value)} style={{...pFld, fontFamily: MONO, fontSize: 16}}/></div>
+            <div>{label(mode === "in" ? "UNIT COST ex GST" : "COST TO JOB ex GST (each)")}
+              <input type="number" inputMode="decimal" min="0" step="0.01" value={cost} onChange={e => setCost(e.target.value)} placeholder="0.00" style={{...pFld, fontFamily: MONO, fontSize: 16}}/></div>
+          </div>
+          {mode === "out" && stats && qn > stats.onHand && <div style={{fontSize: 11, color: AMBER, marginTop: 5}}>Only {qtyTxt(stats.onHand)} on hand — stock will go negative. Receive the rest first if they've arrived.</div>}
+          {qn > 0 && cn >= 0 && cost !== "" && <div style={{fontSize: 12, color: MUTED, marginTop: 6}}>Total {money2(qn * cn)}</div>}
+        </>)}
+
+        {mode === "in" && (<>
+          <div style={{display: "grid", gridTemplateColumns: "1.3fr 1fr", gap: 8}}>
+            <div>{label("SUPPLIER")}<input value={sup} onChange={e => setSup(e.target.value)} style={pFld}/></div>
+            <div>{label("INVOICE #")}<input value={invNo} onChange={e => setInvNo(e.target.value)} style={{...pFld, fontFamily: MONO}}/></div>
+          </div>
+        </>)}
+
+        {mode === "out" && (<>
+          {label("JOB")}
+          <select value={jobId} onChange={e => { setJobId(e.target.value); setTaskId(""); setLine(""); }} style={{...pFld, appearance: "none"}}>
+            {jobs.map(j => <option key={j.id} value={j.id}>{jobName(j.id)}</option>)}
+          </select>
+          {quoteMatches.length > 0 && (<>
+            {label("COUNTS AGAINST")}
+            <select value={effLine ? effLine.docId : "none"} onChange={e => setLine(e.target.value)} style={{...pFld, appearance: "none"}}>
+              {quoteMatches.map(l => <option key={l.docId} value={l.docId}>Quoted: {l.taskId} {l.desc} — {l.qty} × {l.noPrice ? "no price" : money2(l.price)}{l.status !== "none" ? ` (${l.status})` : ""}</option>)}
+              <option value="none">Not the quoted line — add as an extra part</option>
+            </select>
+            {effLine && <div style={{fontSize: 11, color: MUTED, marginTop: 5}}>Marks that quoted part as supplied from stock at this cost.</div>}
+          </>)}
+          {!effLine && (<>
+            {label("FOR TASK (optional)")}
+            <select value={taskId} onChange={e => setTaskId(e.target.value)} style={{...pFld, appearance: "none"}}>
+              <option value="">— General / whole machine —</option>
+              {secs.map(s => (
+                <optgroup key={s.id} label={`${s.id}. ${s.name}`}>
+                  {tasks.filter(t => t.sId === s.id).map(t => <option key={t.id} value={t.id}>{t.id} — {t.desc}</option>)}
+                </optgroup>
+              ))}
+            </select>
+          </>)}
+        </>)}
+
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 8}}>
+          <div>{label("DATE")}<input type="date" value={date} onChange={e => setDate(e.target.value)} style={{...pFld, colorScheme: "dark"}}/></div>
+          <div>{label("NOTE")}<input value={note} onChange={e => setNote(e.target.value)} placeholder="optional" style={pFld}/></div>
+        </div>
+
+        {err && <div style={{color: RED, fontSize: 12, marginTop: 10}}>{err}</div>}
+        <button onClick={submit} disabled={busy}
+          style={{width: "100%", marginTop: 16, background: mode === "in" ? GRN : Y, border: "none", borderRadius: 10, padding: 14, cursor: "pointer", fontFamily: FF, fontSize: 15, fontWeight: 800, color: BG}}>
+          {busy ? "SAVING…" : mode === "in" ? "RECEIVE" : mode === "out" ? "ISSUE" : "SAVE COUNT"}
+        </button>
       </div>
     </div>
   );
@@ -2237,6 +2636,14 @@ export default function App() {
       snap.docs.forEach(d => { m[d.id] = {id: d.id, ...d.data()}; });
       setPartsTrack(m);
     }, () => {}));
+    unsubs.push(onSnapshot(collection(db,"stockItems"), snap => {
+      const m = {};
+      snap.docs.forEach(d => { m[d.id] = {id: d.id, ...d.data()}; });
+      setStockItems(m);
+    }, () => {}));
+    unsubs.push(onSnapshot(collection(db,"stockMoves"), snap => {
+      setStockMoves(snap.docs.map(d => ({id: d.id, ...d.data()})));
+    }, () => {}));
     unsubs.push(onSnapshot(collection(db,"cream"), snap => {
       const m = {};
       snap.docs.forEach(d => { const x = d.data(); m[eKey(x.jobId, x.taskId)] = {id: d.id, ...x}; });
@@ -2283,6 +2690,10 @@ export default function App() {
   const [cream, setCream]             = useState({});    // `${jobId}_${taskId}` -> cream hours billed on top
   const [editPart, setEditPart]       = useState(null);  // {jobId, line} | {jobId, isNew:true}
   const [editCream, setEditCream]     = useState(null);  // {jobId, taskId}
+  const [stockItems, setStockItems]   = useState({});    // id -> part on the stock list
+  const [stockMoves, setStockMoves]   = useState([]);    // in / out / adjust movements
+  const [stockItemModal, setStockItemModal] = useState(null); // {itemId} | {isNew:true}
+  const [stockMoveModal, setStockMoveModal] = useState(null); // {mode, itemId?, defaults?}
   const [invites, setInvites]         = useState([]);    // pre-approved signups: {email, role, jobIds}
   const [clients, setClients]         = useState([]);    // customer list for job cards
   const [machines, setMachines]       = useState([]);    // each client's fleet
@@ -2793,6 +3204,104 @@ export default function App() {
     invoiceDate: partsUI.invoice.date || line.invoiceDate || today(),
     orderedDate: line.orderedDate || today()});
 
+  // ── Stock ──
+  // On hand = received − issued ± stocktake adjustments. Average cost is the
+  // weighted average of everything received (and any extra found at a count).
+  const stockRows = (() => {
+    const m = {};
+    Object.values(stockItems).forEach(it => {
+      m[it.id] = {item: {...it, minQty: Number(it.minQty) || 0}, stats: {onHand: 0, inQty: 0, inCost: 0, lastCost: 0, lastDate: "", avgCost: 0, moves: []}};
+    });
+    stockMoves.forEach(mv => {
+      const r = m[mv.itemId]; if (!r) return;
+      const s = r.stats, q = Number(mv.qty) || 0, c = Number(mv.unitCost);
+      if (mv.type === "in") s.onHand += q;
+      else if (mv.type === "out") s.onHand -= q;
+      else if (mv.type === "adjust") s.onHand += q;
+      if ((mv.type === "in" || (mv.type === "adjust" && q > 0)) && c > 0) {
+        s.inQty += q; s.inCost += q * c;
+        if ((mv.date || "") >= s.lastDate) { s.lastDate = mv.date || ""; s.lastCost = c; }
+      }
+      s.moves.push(mv);
+    });
+    return Object.values(m).map(r => {
+      const s = r.stats;
+      s.onHand = Math.round(s.onHand * 100) / 100;
+      s.avgCost = s.inQty ? s.inCost / s.inQty : 0;
+      s.moves.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+      return r;
+    }).sort((a, b) => String(a.item.pn || a.item.desc).localeCompare(String(b.item.pn || b.item.desc)));
+  })();
+  const stockTotals = stockRows.reduce((t, r) => {
+    t.items++;
+    if (r.stats.onHand > 0) { t.inStock++; t.value += r.stats.onHand * r.stats.avgCost; }
+    else t.out++;
+    if (r.stats.onHand > 0 && r.item.minQty > 0 && r.stats.onHand <= r.item.minQty) t.low++;
+    return t;
+  }, {items: 0, inStock: 0, value: 0, low: 0, out: 0});
+  const stockByKey = pn => { const k = pnKeyOf(pn); return k ? stockRows.find(r => pnKeyOf(r.item.pn) === k) || null : null; };
+  const jobName = jid => { const j = jobs.find(x => x.id === jid); return j ? `${getTemplate(j.templateId).name} — ${j.client || ""}${j.serial ? ` (${j.serial})` : ""}` : "Unknown job"; };
+  const stockJobLabel = (jid, tid) => { const j = jobs.find(x => x.id === jid); return j ? `${j.client || getTemplate(j.templateId).name}${tid ? ` · ${tid}` : ""}` : "job"; };
+
+  const saveStockItem = async (id, data) => {
+    const stamp = new Date().toISOString();
+    const pnKey = pnKeyOf(data.pn);
+    if (id) { await setDoc(doc(db, "stockItems", id), {...data, pnKey, updatedAt: stamp}, {merge: true}); return id; }
+    // New part: id from the part number, unless that id's already taken by a part that's since been renumbered.
+    if (pnKey && !stockItems[`pn_${pnKey}`]) { const nid = `pn_${pnKey}`; await setDoc(doc(db, "stockItems", nid), {...data, pnKey, createdAt: stamp}); return nid; }
+    const r = await addDoc(collection(db, "stockItems"), {...data, pnKey: "", createdAt: stamp});
+    return r.id;
+  };
+  const deleteStockItem = async id => {
+    const moves = stockMoves.filter(m => m.itemId === id);
+    for (let i = 0; i < moves.length; i += 400) {
+      const b = writeBatch(db);
+      moves.slice(i, i + 400).forEach(m => b.delete(doc(db, "stockMoves", m.id)));
+      await b.commit();
+    }
+    await deleteDoc(doc(db, "stockItems", id));
+  };
+  // Issuing to a job also books the part on that job's PARTS tab, at the
+  // stock cost — against the matching quoted line, or as an extra part.
+  const submitStockMove = async p => {
+    let itemId = p.item?.id;
+    let item = p.item;
+    if (!itemId && p.newItem && pnKeyOf(p.newItem.pn)) {          // typed a number that's already on the list
+      const existing = stockByKey(p.newItem.pn);
+      if (existing) { itemId = existing.item.id; item = existing.item; }
+    }
+    if (!itemId) {
+      itemId = await saveStockItem(null, {pn: p.newItem.pn, desc: p.newItem.desc, supplier: p.newItem.supplier || p.supplier || "", unit: "ea", location: "", minQty: 0});
+      item = {id: itemId, ...p.newItem};
+    }
+    const base = {itemId, date: p.date || today(), note: p.note || "", createdAt: new Date().toISOString()};
+    if (p.mode === "in") {
+      await addDoc(collection(db, "stockMoves"), {...base, type: "in", qty: p.qty, unitCost: p.unitCost, supplier: p.supplier, invoiceNo: p.invoiceNo});
+      if (p.supplier && item && !item.supplier) await setDoc(doc(db, "stockItems", itemId), {supplier: p.supplier}, {merge: true});
+    } else if (p.mode === "count") {
+      const diff = Math.round((p.qty - (p.onHand || 0)) * 100) / 100;
+      if (Math.abs(diff) < 0.001) return;
+      await addDoc(collection(db, "stockMoves"), {...base, type: "adjust", qty: diff, unitCost: diff > 0 ? p.unitCost : null, counted: p.qty});
+    } else {
+      const unit = p.unitCost ?? 0;
+      const ref_ = await addDoc(collection(db, "stockMoves"), {...base, type: "out", qty: p.qty, unitCost: unit, jobId: p.jobId, taskId: p.taskId || ""});
+      const booked = {status: "invoiced", actualQty: p.qty, actualUnit: unit, supplier: "From stock", invoiceNo: "",
+                      invoiceDate: base.date, orderedDate: base.date, notes: `Issued from stock${p.note ? ` — ${p.note}` : ""}`, stockMoveId: ref_.id};
+      if (p.line) await savePartLine(p.jobId, p.line, booked);
+      else {
+        const t = tasksForJob(p.jobId).find(x => x.id === p.taskId);
+        await savePartLine(p.jobId, null, {...booked, taskId: p.taskId || "", sId: t?.sId ?? null, desc: item.desc || item.pn, pn: item.pn || ""});
+      }
+    }
+  };
+  const deleteStockMove = async mv => {
+    await deleteDoc(doc(db, "stockMoves", mv.id));
+    if (mv.type === "out") {
+      const linked = Object.values(partsTrack).filter(d => d.stockMoveId === mv.id);
+      for (const d of linked) await deleteDoc(doc(db, "partsTrack", d.id));
+    }
+  };
+
   const sStats = (jid, sid) => {
     const lr      = getLR(jid);
     const builtin = tasksOf(jid).filter(t => t.sId === sid && isIn(jid,t));
@@ -3233,6 +3742,7 @@ export default function App() {
   };
   const assignOf = (jobId, taskId) => assigns.find(a => a.jobId===jobId && a.taskId===taskId);
   const goGantt = () => { setStack([]); setView("gantt"); setSelJob(null); setSelSec(null); setSelTask(null); };
+  const goStock = () => { setStack([]); setView("stock"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   const goCards = () => { setStack([]); setView("cards"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
@@ -4268,7 +4778,7 @@ export default function App() {
 
   const BottomNav = () => {
     const navItems = mode==="admin"
-      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"GANTT",Icon:BarChart3,action:goGantt,active:view==="gantt"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"DASH",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:isAdminUser?"SIGN OUT":"SWITCH",Icon:LogOut,action:()=>isAdminUser?doSignOut():setMode("select"),active:false}]
+      ? [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"GANTT",Icon:BarChart3,action:goGantt,active:view==="gantt"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"},{label:"STOCK",Icon:Package,action:goStock,active:view==="stock"},{label:"DASH",Icon:BarChart3,action:()=>go("dashboard"),active:view==="dashboard"},{label:"TECHS",Icon:Users,action:goUsers,active:view==="users",badge:pendingCount},{label:isAdminUser?"SIGN OUT":"SWITCH",Icon:LogOut,action:()=>isAdminUser?doSignOut():setMode("select"),active:false}]
       : [{label:"JOBS",Icon:Home,action:goHome,active:view==="jobs"},{label:"CARDS",Icon:Clock,action:goCards,active:view==="cards"},{label:"HOSES",Icon:Cable,action:goHoses,active:view==="hoses"||view==="hoseJob"},{label:"SIGN OUT",Icon:LogOut,action:doSignOut,active:false}];
     const BtnStyle = (active) => ({flex:1,padding:"10px 0 14px",background:"none",border:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3});
     if (isAdmin && isDesktop) return (
@@ -4601,6 +5111,9 @@ export default function App() {
           const lines = partsLines(j.id);
           return (
             <PartsPanel job={j} lines={lines} summary={partsSummary(lines)} sections={secsOf(j.id)}
+              stockOf={l => stockByKey(l.pn)}
+              onFromStock={(l, row) => setStockMoveModal({mode: "out", itemId: row.item.id,
+                defaults: {jobId: j.id, taskId: l.taskId, lineDocId: l.docId, qty: l.qty, unitCost: row.stats.avgCost ? Math.round(row.stats.avgCost*100)/100 : undefined}})}
               onOrdered={l => partOrdered(j.id, l)}
               onConfirm={l => partInvoicedAtQuote(j.id, l)}
               onEdit={l => setEditPart({jobId: j.id, line: l})}
@@ -6435,6 +6948,19 @@ export default function App() {
             </div>
           </Section>
 
+          {dashJob==="all" && stockTotals.items>0 && (
+            <Section title="STOCK" right={`${stockTotals.items} parts`}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <Stat label="STOCK VALUE" value={money(stockTotals.value)} col={Y} sub={`${stockTotals.inStock} parts in stock`}/>
+                <Stat label="TO REORDER" value={`${stockTotals.low + stockTotals.out}`} col={stockTotals.low+stockTotals.out?AMBER:GRN}
+                      sub={`${stockTotals.low} low · ${stockTotals.out} out`}/>
+              </div>
+              <button onClick={goStock}
+                style={{width:"100%",marginTop:8,background:CARD,border:`1px solid ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:Y}}>
+                OPEN STOCK →
+              </button>
+            </Section>
+          )}
           {partsTotals.lines>0 && (
             <Section title="PARTS" right={`${partsTotals.invoiced}/${partsTotals.lines} invoiced`}>
               <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(4,1fr)":"1fr 1fr",gap:8}}>
@@ -6630,6 +7156,25 @@ export default function App() {
           {view==="users"     && <AdminUsersView/>}
           {view==="cards"     && <AdminCardsView/>}
           {view==="gantt"     && <GanttView/>}
+          {view==="stock"     && (
+            <div>
+              <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`,display:"flex",alignItems:"center",gap:10}}>
+                <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+                  <ChevronLeft size={18} color={TXT}/>
+                </button>
+                <div style={{flex:1}}>
+                  <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>STOCK</div>
+                  <div style={{fontSize:11,color:MUTED}}>Parts on the shelf · receive, issue to jobs, count</div>
+                </div>
+              </div>
+              <StockPanel rows={stockRows} totals={stockTotals}
+                onOpen={it => setStockItemModal({itemId: it.id})}
+                onNew={() => setStockItemModal({isNew: true})}
+                onReceive={() => setStockMoveModal({mode: "in"})}
+                onIssue={() => setStockMoveModal({mode: "out"})}
+                onCount={() => setStockMoveModal({mode: "count"})}/>
+            </div>
+          )}
         </>) : (<>
           {view==="jobs"    && <TechJobsView/>}
           {view==="hoses"   && <TechHosesView/>}
@@ -6696,6 +7241,29 @@ export default function App() {
         <SplitEntryModal entry={splitEntry} jobs={jobs}
           tasksForJob={tasksForJob} secsForJob={secsOf}
           onSplit={splitMoveEntry} onClose={()=>setSplitEntry(null)}/>
+      )}
+      {stockItemModal && (() => {
+        const row = stockItemModal.itemId ? stockRows.find(r => r.item.id === stockItemModal.itemId) : null;
+        if (stockItemModal.itemId && !row) return null;          // deleted
+        return (
+          <StockItemEditor key={stockItemModal.itemId || "new"} isNew={!!stockItemModal.isNew}
+            item={row?.item} stats={row?.stats}
+            existingKey={(k, selfId) => stockRows.find(r => r.item.id !== selfId && pnKeyOf(r.item.pn) === k)?.item}
+            onSave={async data => { const id = await saveStockItem(row?.item.id || null, data); if (stockItemModal.isNew) setStockItemModal(null); return id; }}
+            onDelete={() => deleteStockItem(row.item.id)}
+            onMove={mode => setStockMoveModal({mode, itemId: row.item.id})}
+            onDeleteMove={deleteStockMove}
+            jobLabel={stockJobLabel}
+            onClose={() => setStockItemModal(null)}/>
+        );
+      })()}
+      {stockMoveModal && (
+        <StockMoveEditor key={`${stockMoveModal.mode}-${stockMoveModal.itemId || ""}`} mode={stockMoveModal.mode}
+          item={stockMoveModal.itemId ? stockItems[stockMoveModal.itemId] : null}
+          rows={stockRows} jobs={jobs} jobName={jobName}
+          tasksForJob={tasksForJob} secsForJob={secsOf} quoteLinesFor={partsLines}
+          defaults={stockMoveModal.defaults}
+          onSubmit={submitStockMove} onClose={() => setStockMoveModal(null)}/>
       )}
       {editPart && (() => {
         const jid = editPart.jobId;
