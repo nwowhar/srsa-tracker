@@ -209,6 +209,383 @@ const DEP_TYPES = [
 // — iOS then drops the keyboard after one character. Keeping the query local
 // means typing re-renders only this component. It renders `children` (the
 // normal sections list) when the box is empty, and results when it isn't.
+// ══════════════════════════════════════════════════════════════════════
+// PARTS TRACKING + CREAM HOURS (admin only)
+// Module-level so their inputs keep focus — App's inner views remount on
+// every data change. Anything that must survive a remount lives in partsUI.
+// ══════════════════════════════════════════════════════════════════════
+const partsUI = { q: "", filter: "all", invoice: { supplier: "", number: "", date: "" } };
+const slugKey = s => String(s || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "x";
+const money2 = n => `${n < 0 ? "−" : ""}$${Math.abs(Number(n) || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+const money0 = n => `${n < 0 ? "−" : ""}$${Math.round(Math.abs(Number(n) || 0)).toLocaleString()}`;
+const signed0 = n => Math.abs(n) < 0.5 ? "$0" : `${n > 0 ? "+" : "−"}$${Math.round(Math.abs(n)).toLocaleString()}`;
+const PART_STATES = {
+  none:     {label: "NOT ORDERED", col: MUTED},
+  ordered:  {label: "ORDERED",     col: "#F5A524"},
+  invoiced: {label: "INVOICED",    col: GRN},
+};
+const AMBER = "#F5A524";
+const pBtn = (col = TXT) => ({background: CARD2, border: `1px solid ${BDR2}`, borderRadius: 7, padding: "6px 10px", cursor: "pointer",
+  fontFamily: FF, fontSize: 11, fontWeight: 800, letterSpacing: .5, color: col, whiteSpace: "nowrap"});
+const pFld = {width: "100%", background: CARD2, border: `1px solid ${BDR2}`, borderRadius: 8, padding: "10px 12px", color: TXT,
+  fontSize: 14, boxSizing: "border-box", outline: "none"};
+
+// The PARTS tab on a job. `lines` come from the quote (template parts + sundries),
+// plus extras added from invoices and tracking for lines no longer on the sheet.
+const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit, onAddExtra}) => {
+  const [q, setQ]       = useState(partsUI.q);
+  const [filter, setF]  = useState(partsUI.filter);
+  const [inv, setInv]   = useState(partsUI.invoice);
+  const setQuery  = v => { partsUI.q = v; setQ(v); };
+  const setFilter = v => { partsUI.filter = v; setF(v); };
+  const setInvF   = (k, v) => { const n = {...partsUI.invoice, [k]: v}; partsUI.invoice = n; setInv(n); };
+
+  const FILTERS = [
+    ["all",      "ALL",           () => true],
+    ["none",     "NOT ORDERED",   l => l.kind !== "extra" && l.status === "none"],
+    ["ordered",  "ORDERED",       l => l.status === "ordered"],
+    ["invoiced", "INVOICED",      l => l.status === "invoiced"],
+    ["changed",  "PRICE CHANGED", l => l.status === "invoiced" && Math.abs(l.variance) >= 0.005],
+    ["extra",    "NOT ON QUOTE",  l => l.kind === "extra"],
+  ];
+  const qq = q.trim().toLowerCase();
+  const matchQ = l => !qq || `${l.taskId} ${l.desc} ${l.pn} ${l.supplier} ${l.invoiceNo}`.toLowerCase().includes(qq);
+  const test = (FILTERS.find(f => f[0] === filter) || FILTERS[0])[2];
+  const shown = lines.filter(l => test(l) && matchQ(l));
+
+  const groups = [];
+  const secName = sid => sections.find(s => s.id === sid)?.name || "";
+  sections.forEach(sec => {
+    const ls = shown.filter(l => l.kind !== "orphan" && l.sId === sec.id);
+    if (ls.length) groups.push({key: sec.id, title: `${sec.id}. ${sec.name}`, lines: ls});
+  });
+  const loose = shown.filter(l => l.kind !== "orphan" && !sections.some(s => s.id === l.sId));
+  if (loose.length) groups.push({key: "loose", title: "No section", lines: loose});
+  const orphans = shown.filter(l => l.kind === "orphan");
+  if (orphans.length) groups.push({key: "orphan", title: "Tracked parts no longer on the sheet", lines: orphans});
+
+  const invSet = !!(inv.number || inv.supplier);
+  const statBox = (label, value, sub, col = TXT) => (
+    <div style={{background: CARD2, borderRadius: 8, padding: "9px 10px", minWidth: 0}}>
+      <div style={{fontFamily: FF, fontSize: 9, color: MUTED, letterSpacing: 1.5, marginBottom: 3}}>{label}</div>
+      <div style={{fontFamily: MONO, fontSize: 16, color: col, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"}}>{value}</div>
+      {sub && <div style={{fontSize: 10, color: MUTED, marginTop: 2}}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{background: CARD, padding: "14px 16px", borderBottom: `1px solid ${BDR}`}}>
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8}}>
+          {statBox("QUOTED PARTS", money0(summary.quoted), `${summary.lines} lines · +GST`, Y)}
+          {statBox("FORECAST", money0(summary.forecast), "invoiced + still to come + extras")}
+          {statBox("INVOICED SO FAR", money0(summary.invoicedActual), `${summary.invoiced} lines · quoted ${money0(summary.invoicedQuoted)}`)}
+          {statBox("PARTS VARIANCE", signed0(summary.variance),
+            summary.variance > 0.5 ? "over the quote" : summary.variance < -0.5 ? "under the quote" : "on the quote",
+            summary.variance > 0.5 ? RED : summary.variance < -0.5 ? GRN : MUTED)}
+        </div>
+        <div style={{display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: MUTED, marginTop: 8}}>
+          <span><b style={{color: TXT}}>{summary.none}</b> not ordered</span>
+          <span><b style={{color: AMBER}}>{summary.ordered}</b> ordered</span>
+          <span><b style={{color: GRN}}>{summary.invoiced}</b> invoiced</span>
+          {summary.changed > 0 && <span><b style={{color: RED}}>{summary.changed}</b> price changed</span>}
+          {summary.extrasN > 0 && <span><b style={{color: TXT}}>{money0(summary.extras)}</b> not on quote ({summary.extrasN})</span>}
+        </div>
+      </div>
+
+      {/* Invoice being entered: filled into every part you mark or confirm */}
+      <div style={{background: invSet ? "rgba(40,199,111,.07)" : CARD, borderBottom: `1px solid ${invSet ? "rgba(40,199,111,.35)" : BDR}`, padding: "12px 16px"}}>
+        <div style={{fontFamily: FF, fontSize: 10, fontWeight: 800, color: invSet ? GRN : MUTED, letterSpacing: 1.5, marginBottom: 7}}>
+          INVOICE YOU'RE ENTERING {invSet ? "· added to each part you confirm" : "· optional"}
+        </div>
+        <div style={{display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 6}}>
+          <input value={inv.supplier} onChange={e => setInvF("supplier", e.target.value)} placeholder="Supplier" style={{...pFld, padding: "8px 10px", fontSize: 13}}/>
+          <input value={inv.number} onChange={e => setInvF("number", e.target.value)} placeholder="Invoice #" style={{...pFld, padding: "8px 10px", fontSize: 13, fontFamily: MONO}}/>
+          <input type="date" value={inv.date} onChange={e => setInvF("date", e.target.value)} style={{...pFld, padding: "8px 8px", fontSize: 12, colorScheme: "dark"}}/>
+        </div>
+        {invSet && (
+          <button onClick={() => { const n = {supplier: "", number: "", date: ""}; partsUI.invoice = n; setInv(n); }}
+            style={{background: "none", border: "none", padding: "6px 0 0", cursor: "pointer", fontSize: 11, color: MUTED}}>Done with this invoice — clear</button>
+        )}
+      </div>
+
+      <div style={{padding: "12px 14px 4px", background: BG}}>
+        <div style={{position: "relative"}}>
+          <input value={q} onChange={e => setQuery(e.target.value)} placeholder="Search parts — part number, name, job, invoice…"
+            autoCorrect="off" autoCapitalize="none" spellCheck={false}
+            style={{...pFld, background: CARD, padding: "11px 40px 11px 14px"}}/>
+          {qq && (
+            <button onClick={() => setQuery("")} aria-label="Clear search"
+              style={{position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: BDR2, border: "none", borderRadius: 6, width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer"}}>
+              <X size={14} color={MUTED}/>
+            </button>
+          )}
+        </div>
+        <div style={{display: "flex", gap: 6, overflowX: "auto", padding: "8px 0 4px"}}>
+          {FILTERS.map(([v, label, fn]) => {
+            const n = lines.filter(fn).length;
+            const on = filter === v;
+            return (
+              <button key={v} onClick={() => setFilter(v)}
+                style={{...pBtn(on ? BG : MUTED), background: on ? Y : CARD2, borderColor: on ? Y : BDR2, flexShrink: 0}}>
+                {label} ({n})
+              </button>
+            );
+          })}
+        </div>
+        <button onClick={onAddExtra}
+          style={{width: "100%", margin: "6px 0 2px", background: "none", border: `1px dashed ${BDR2}`, borderRadius: 9, padding: "10px 0", cursor: "pointer", fontFamily: FF, fontSize: 12, fontWeight: 800, color: Y, letterSpacing: 1}}>
+          + ADD A PART THAT'S NOT ON THE QUOTE
+        </button>
+      </div>
+
+      <div style={{padding: "8px 14px 40px"}}>
+        {shown.length === 0 && <div style={{textAlign: "center", color: MUTED, fontSize: 13, padding: "30px 0"}}>No parts match.</div>}
+        {groups.map(g => {
+          const gq = g.lines.reduce((s, l) => s + l.quoted, 0);
+          const gi = g.lines.filter(l => l.status === "invoiced" || (l.kind === "extra" && l.status !== "none")).reduce((s, l) => s + l.actual, 0);
+          return (
+            <div key={g.key} style={{marginBottom: 18}}>
+              <div style={{display: "flex", alignItems: "baseline", gap: 8, padding: "0 2px 6px", borderBottom: `1px solid ${BDR}`, marginBottom: 6}}>
+                <span style={{fontFamily: FF, fontSize: 14, fontWeight: 800, color: g.key === "orphan" ? AMBER : TXT, flex: 1, minWidth: 0}}>{g.title}</span>
+                <span style={{fontFamily: MONO, fontSize: 10, color: MUTED, whiteSpace: "nowrap"}}>quoted {money0(gq)}{gi ? ` · invoiced ${money0(gi)}` : ""}</span>
+              </div>
+              {g.lines.map(l => {
+                const st = PART_STATES[l.status] || PART_STATES.none;
+                const changed = l.status === "invoiced" && l.kind !== "extra" && Math.abs(l.variance) >= 0.005;
+                return (
+                  <div key={l.docId} style={{background: CARD, border: `1px solid ${changed ? "rgba(255,76,76,.35)" : BDR}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6}}>
+                    <div onClick={() => onEdit(l)} style={{cursor: "pointer"}}>
+                      <div style={{display: "flex", alignItems: "flex-start", gap: 8}}>
+                        {l.taskId && <span style={{fontFamily: MONO, fontSize: 10, color: Y, paddingTop: 2, flexShrink: 0}}>{l.taskId}</span>}
+                        <div style={{flex: 1, minWidth: 0}}>
+                          <div style={{fontSize: 13, color: TXT, fontWeight: 600, lineHeight: 1.3}}>{l.desc || l.pn || "Part"}</div>
+                          <div style={{fontSize: 10, color: MUTED, marginTop: 2, fontFamily: MONO}}>
+                            {l.pn && l.pn !== l.desc ? `${l.pn} · ` : ""}{l.kind === "sundry" ? "freight / consumables · " : ""}{l.kind === "extra" ? "not on quote · " : ""}
+                            {l.kind === "extra" ? `${l.actualQty} × ${money2(l.actualUnit)}` : l.noPrice ? `${l.qty} × no quoted price` : `${l.qty} × ${money2(l.price)} = ${money2(l.quoted)}`}
+                          </div>
+                        </div>
+                        <span style={{fontFamily: FF, fontSize: 9, fontWeight: 800, letterSpacing: .5, color: st.col, border: `1px solid ${st.col}`, borderRadius: 5, padding: "2px 6px", whiteSpace: "nowrap", flexShrink: 0}}>
+                          {changed ? "PRICE CHANGED" : st.label}
+                        </span>
+                      </div>
+                      {(l.status === "invoiced" || (l.kind === "extra" && l.status !== "none")) && (
+                        <div style={{display: "flex", alignItems: "baseline", gap: 8, marginTop: 6, fontSize: 11}}>
+                          <span style={{color: MUTED, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>
+                            {[l.supplier, l.invoiceNo && `inv ${l.invoiceNo}`, l.invoiceDate].filter(Boolean).join(" · ") || "invoiced"}
+                            {l.kind !== "extra" && (l.actualQty !== l.qty) ? ` · qty ${l.actualQty}` : ""}
+                          </span>
+                          <span style={{fontFamily: MONO, color: TXT}}>{money2(l.actual)}</span>
+                          {l.kind !== "extra" && <span style={{fontFamily: MONO, color: changed ? (l.variance > 0 ? RED : GRN) : MUTED, minWidth: 60, textAlign: "right"}}>{changed ? `${l.variance > 0 ? "+" : "−"}${money2(Math.abs(l.variance))}` : "✓ as quoted"}</span>}
+                        </div>
+                      )}
+                      {l.status === "ordered" && (
+                        <div style={{fontSize: 11, color: MUTED, marginTop: 5}}>Ordered{l.orderedDate ? ` ${l.orderedDate}` : ""}{l.supplier ? ` · ${l.supplier}` : ""}</div>
+                      )}
+                      {l.notes && <div style={{fontSize: 11, color: MUTED, marginTop: 4, fontStyle: "italic"}}>{l.notes}</div>}
+                    </div>
+                    {l.kind !== "orphan" && l.status !== "invoiced" && (
+                      <div style={{display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap"}}>
+                        {l.kind !== "extra" && l.status === "none" && (
+                          <button onClick={() => onOrdered(l)} style={pBtn(AMBER)}>MARK ORDERED</button>
+                        )}
+                        {l.kind !== "extra" && !l.noPrice && (
+                          <button onClick={() => onConfirm(l)} style={pBtn(GRN)}>✓ INVOICED AT {money2(l.price)}</button>
+                        )}
+                        <button onClick={() => onEdit(l)} style={pBtn(TXT)}>{l.kind === "extra" ? "EDIT" : "DIFFERENT PRICE / EDIT"}</button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// Edit one part line: status, qty, unit price from the invoice, supplier, notes.
+// For a part that's not on the quote, also what it is and which job it's for.
+const PartEditor = ({line, isNew, tasks, sections, invoice, onSave, onDelete, onClose}) => {
+  const extra = isNew || line?.kind === "extra";
+  const t = line?.track;
+  const [status, setStatus]   = useState(t?.status || (isNew ? (invoice.number ? "invoiced" : "ordered") : "invoiced"));
+  const [taskId, setTaskId]   = useState(line?.taskId || "");
+  const [desc, setDesc]       = useState(line?.desc || "");
+  const [pn, setPn]           = useState(line?.pn || "");
+  const [qty, setQty]         = useState(String(t?.actualQty ?? line?.qty ?? 1));
+  const [unit, setUnit]       = useState(t?.actualUnit != null ? String(t.actualUnit) : (line?.price != null ? String(line.price) : ""));
+  const [supplier, setSup]    = useState(t?.supplier || invoice.supplier || "");
+  const [invoiceNo, setInvNo] = useState(t?.invoiceNo || invoice.number || "");
+  const [invoiceDate, setInvD]= useState(t?.invoiceDate || invoice.date || today());
+  const [orderedDate, setOrd] = useState(t?.orderedDate || today());
+  const [notes, setNotes]     = useState(t?.notes || "");
+  const [busy, setBusy]       = useState(false);
+  const [err, setErr]         = useState("");
+
+  const qn = parseFloat(qty) || 0, un = parseFloat(unit) || 0;
+  const actual = qn * un;
+  const quoted = extra ? 0 : (line?.quoted || 0);
+  const variance = actual - quoted;
+  const save = async () => {
+    if (extra && !desc.trim()) { setErr("What's the part? Add a name or part number."); return; }
+    if (status === "invoiced" && unit === "") { setErr("Enter the unit price from the invoice."); return; }
+    setBusy(true);
+    const task = tasks.find(x => x.id === taskId);
+    await onSave({
+      status,
+      actualQty: qn, actualUnit: unit === "" ? null : un,
+      supplier: supplier.trim(), invoiceNo: invoiceNo.trim(),
+      invoiceDate: status === "invoiced" ? invoiceDate : "",
+      orderedDate, notes: notes.trim(),
+      ...(extra ? {taskId, sId: task?.sId ?? line?.sId ?? null, desc: desc.trim(), pn: pn.trim()} : {}),
+    });
+    setBusy(false); onClose();
+  };
+  const seg = (v, label, col) => (
+    <button key={v} onClick={() => setStatus(v)}
+      style={{flex: 1, background: status === v ? col : CARD2, border: `1px solid ${status === v ? col : BDR2}`, borderRadius: 8, padding: "10px 0", cursor: "pointer",
+        fontFamily: FF, fontSize: 11, fontWeight: 800, letterSpacing: .5, color: status === v ? BG : MUTED}}>{label}</button>
+  );
+  const label = s => <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "12px 0 5px"}}>{s}</div>;
+  return (
+    <div style={{position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center"}}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{background: CARD, borderRadius: "18px 18px 0 0", padding: "18px 18px 28px", width: "100%", maxWidth: 560, border: `1px solid ${BDR}`, boxSizing: "border-box", maxHeight: "92dvh", overflowY: "auto"}}>
+        <div style={{display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 4}}>
+          <div style={{flex: 1, minWidth: 0}}>
+            <div style={{fontFamily: FF, fontSize: 20, fontWeight: 800, color: TXT}}>{isNew ? "PART NOT ON QUOTE" : (line.desc || line.pn)}</div>
+            {!extra && (
+              <div style={{fontSize: 11, color: MUTED, marginTop: 3, fontFamily: MONO}}>
+                {line.taskId ? `${line.taskId} · ` : ""}{line.pn && line.pn !== line.desc ? `${line.pn} · ` : ""}
+                quoted {line.noPrice ? "— no price" : `${line.qty} × ${money2(line.price)} = ${money2(line.quoted)}`}
+              </div>
+            )}
+          </div>
+          <button onClick={onClose} style={{background: BDR2, border: "none", borderRadius: 8, padding: 6, cursor: "pointer"}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        {extra && (<>
+          {label("PART")}
+          <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="Name, e.g. Hydraulic filter" style={pFld}/>
+          <input value={pn} onChange={e => setPn(e.target.value)} placeholder="Part number (optional)" style={{...pFld, marginTop: 6, fontFamily: MONO}}/>
+          {label("FOR JOB")}
+          <select value={taskId} onChange={e => setTaskId(e.target.value)} style={{...pFld, appearance: "none"}}>
+            <option value="">— General / whole machine —</option>
+            {sections.map(s => (
+              <optgroup key={s.id} label={`${s.id}. ${s.name}`}>
+                {tasks.filter(x => x.sId === s.id).map(x => <option key={x.id} value={x.id}>{x.id} — {x.desc}</option>)}
+              </optgroup>
+            ))}
+          </select>
+        </>)}
+
+        {label("STATUS")}
+        <div style={{display: "flex", gap: 6}}>
+          {!extra && seg("none", "NOT ORDERED", MUTED)}
+          {seg("ordered", "ORDERED", AMBER)}
+          {seg("invoiced", "INVOICED", GRN)}
+        </div>
+
+        {status !== "none" && (<>
+          <div style={{display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 8}}>
+            <div>{label("QTY")}<input type="number" inputMode="decimal" min="0" step="1" value={qty} onChange={e => setQty(e.target.value)} style={{...pFld, fontFamily: MONO}}/></div>
+            <div>{label(status === "invoiced" ? "UNIT PRICE ON INVOICE (ex GST)" : "EXPECTED UNIT PRICE (ex GST)")}
+              <input type="number" inputMode="decimal" min="0" step="0.01" value={unit} onChange={e => setUnit(e.target.value)} placeholder="0.00" style={{...pFld, fontFamily: MONO}}/></div>
+          </div>
+          <div style={{background: CARD2, border: `1px solid ${BDR}`, borderRadius: 8, padding: "9px 12px", marginTop: 8, fontSize: 12, color: TXT, display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap"}}>
+            <span>Total <b style={{fontFamily: MONO}}>{money2(actual)}</b></span>
+            {!extra && !line.noPrice && (
+              <span style={{fontFamily: MONO, color: Math.abs(variance) < 0.005 ? MUTED : variance > 0 ? RED : GRN}}>
+                {Math.abs(variance) < 0.005 ? "matches quote" : `${variance > 0 ? "+" : "−"}${money2(Math.abs(variance))} vs quote`}
+              </span>
+            )}
+          </div>
+          {label("SUPPLIER")}
+          <input value={supplier} onChange={e => setSup(e.target.value)} placeholder="e.g. AFGRI, Tutt Bryant" style={pFld}/>
+          <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8}}>
+            <div>{label("ORDERED ON")}<input type="date" value={orderedDate} onChange={e => setOrd(e.target.value)} style={{...pFld, colorScheme: "dark"}}/></div>
+            {status === "invoiced" && <div>{label("INVOICE DATE")}<input type="date" value={invoiceDate} onChange={e => setInvD(e.target.value)} style={{...pFld, colorScheme: "dark"}}/></div>}
+          </div>
+          {status === "invoiced" && (<>{label("INVOICE #")}<input value={invoiceNo} onChange={e => setInvNo(e.target.value)} style={{...pFld, fontFamily: MONO}}/></>)}
+          {label("NOTES")}
+          <input value={notes} onChange={e => setNotes(e.target.value)} placeholder="e.g. price went up, backordered" style={pFld}/>
+        </>)}
+
+        {err && <div style={{color: RED, fontSize: 12, marginTop: 10}}>{err}</div>}
+        <div style={{display: "grid", gridTemplateColumns: (onDelete ? "1fr " : "") + "2fr", gap: 8, marginTop: 16}}>
+          {onDelete && (
+            <button onClick={async () => { if (window.confirm(extra ? "Delete this part?" : "Clear the tracking on this part (back to not ordered)?")) { setBusy(true); await onDelete(); onClose(); } }}
+              style={{background: "rgba(255,76,76,.1)", border: "1px solid rgba(255,76,76,.3)", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 13, fontWeight: 800, color: RED}}>
+              {extra ? "DELETE" : "CLEAR"}
+            </button>
+          )}
+          <button onClick={save} disabled={busy}
+            style={{background: Y, border: "none", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 14, fontWeight: 800, color: BG}}>
+            {busy ? "SAVING…" : "SAVE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Cream: hours billed on top of what was logged when a job came in under plan
+// (planned 10h, done in 7h → up to 3h cream). Admin only.
+const CreamEditor = ({task, planned, loggedHrs, current, rate, onSave, onClose}) => {
+  const avail = Math.max(0, Math.round((planned - loggedHrs) * 100) / 100);
+  const [hours, setHours] = useState(String(current || avail || ""));
+  const [busy, setBusy]   = useState(false);
+  const h = Math.max(0, parseFloat(hours) || 0);
+  const save = async v => { setBusy(true); await onSave(v); setBusy(false); onClose(); };
+  return (
+    <div style={{position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center"}}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{background: CARD, borderRadius: "18px 18px 0 0", padding: "18px 18px 28px", width: "100%", maxWidth: 520, border: `1px solid ${BDR}`, boxSizing: "border-box"}}>
+        <div style={{display: "flex", alignItems: "flex-start", gap: 10}}>
+          <div style={{flex: 1, minWidth: 0}}>
+            <div style={{fontFamily: FF, fontSize: 20, fontWeight: 800, color: TXT}}>CREAM HOURS</div>
+            <div style={{fontSize: 12, color: MUTED, marginTop: 2}}><span style={{fontFamily: MONO, color: Y}}>{task.id}</span> {task.desc}</div>
+          </div>
+          <button onClick={onClose} style={{background: BDR2, border: "none", borderRadius: 8, padding: 6, cursor: "pointer"}}><X size={16} color={MUTED}/></button>
+        </div>
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 14}}>
+          {[["PLANNED", `${planned}h`, TXT], ["LOGGED", `${Math.round(loggedHrs * 10) / 10}h`, TXT], ["UNDER PLAN", `${avail}h`, avail > 0 ? GRN : MUTED]].map(([l, v, c]) => (
+            <div key={l} style={{background: CARD2, borderRadius: 8, padding: "8px 10px"}}>
+              <div style={{fontFamily: FF, fontSize: 9, color: MUTED, letterSpacing: 1.5}}>{l}</div>
+              <div style={{fontFamily: MONO, fontSize: 16, color: c}}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "14px 0 5px"}}>CREAM HOURS TO BILL</div>
+        <div style={{display: "flex", gap: 8}}>
+          <input type="number" inputMode="decimal" min="0" step="0.5" value={hours} onChange={e => setHours(e.target.value)} style={{...pFld, flex: 1, fontFamily: MONO, fontSize: 18}}/>
+          {avail > 0 && String(avail) !== hours && (
+            <button onClick={() => setHours(String(avail))} style={{...pBtn(Y), padding: "0 12px"}}>USE {avail}h</button>
+          )}
+        </div>
+        <div style={{fontSize: 12, color: TXT, marginTop: 8}}>
+          Billable: {Math.round(loggedHrs * 10) / 10}h logged + <b style={{color: Y}}>{h}h cream</b> = {Math.round((loggedHrs + h) * 10) / 10}h
+          <span style={{color: MUTED}}> · cream worth {money0(h * rate)} +GST</span>
+        </div>
+        {h > avail + 0.001 && <div style={{fontSize: 11, color: AMBER, marginTop: 4}}>That's more than the {avail}h under plan.</div>}
+        <div style={{display: "grid", gridTemplateColumns: current ? "1fr 2fr" : "1fr", gap: 8, marginTop: 16}}>
+          {current > 0 && (
+            <button onClick={() => save(0)} disabled={busy}
+              style={{background: "rgba(255,76,76,.1)", border: "1px solid rgba(255,76,76,.3)", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 13, fontWeight: 800, color: RED}}>REMOVE</button>
+          )}
+          <button onClick={() => save(h)} disabled={busy}
+            style={{background: Y, border: "none", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 14, fontWeight: 800, color: BG}}>
+            {busy ? "SAVING…" : h > 0 ? `SAVE ${h}h CREAM` : "SAVE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const JobTaskSearch = ({search, statusOf, onPick, children}) => {
   const [q, setQ] = useState("");
   const active = q.trim().length > 0;
@@ -1855,6 +2232,16 @@ export default function App() {
     unsubs.push(onSnapshot(collection(db,"users"), snap => {
       setUsers(snap.docs.map(d => ({id:d.id, ...d.data()})));
     }, () => {}));
+    unsubs.push(onSnapshot(collection(db,"partsTrack"), snap => {
+      const m = {};
+      snap.docs.forEach(d => { m[d.id] = {id: d.id, ...d.data()}; });
+      setPartsTrack(m);
+    }, () => {}));
+    unsubs.push(onSnapshot(collection(db,"cream"), snap => {
+      const m = {};
+      snap.docs.forEach(d => { const x = d.data(); m[eKey(x.jobId, x.taskId)] = {id: d.id, ...x}; });
+      setCream(m);
+    }, () => {}));
     unsubs.push(onSnapshot(collection(db,"schedule"), snap => {
       const m = {};
       snap.docs.forEach(d => { m[d.id] = {id:d.id, ...d.data()}; });
@@ -1892,6 +2279,10 @@ export default function App() {
   const [customTasks, setCustomTasks] = useState({});   // jid -> [{id,sId,parentId,desc,est,cost,opt}]
   const [hoses, setHoses]             = useState([]);    // hose records (Hoses feature)
   const [schedOv, setSchedOv]         = useState({});    // `${jobId}_${taskId}` -> schedule override
+  const [partsTrack, setPartsTrack]   = useState({});    // doc id -> part ordered/invoiced tracking
+  const [cream, setCream]             = useState({});    // `${jobId}_${taskId}` -> cream hours billed on top
+  const [editPart, setEditPart]       = useState(null);  // {jobId, line} | {jobId, isNew:true}
+  const [editCream, setEditCream]     = useState(null);  // {jobId, taskId}
   const [invites, setInvites]         = useState([]);    // pre-approved signups: {email, role, jobIds}
   const [clients, setClients]         = useState([]);    // customer list for job cards
   const [machines, setMachines]       = useState([]);    // each client's fleet
@@ -2297,6 +2688,111 @@ export default function App() {
     await b.commit();
     return true;
   };
+  // ── Cream hours ──
+  // Hours billed on top of what the boys logged when a job came in under plan.
+  // One record per job (task); rate is locked in when it's added.
+  const creamHrs   = (jid, tid) => Number(cream[eKey(jid, tid)]?.hours) || 0;
+  const creamCost  = (jid, tid) => creamHrs(jid, tid) * (Number(cream[eKey(jid, tid)]?.rate) || getLR(jid));
+  const creamAvail = (jid, t) => Math.max(0, Math.round(((Number(t.est) || 0) - logged(jid, t.id)) * 100) / 100);
+  const saveCream = async (jid, tid, hours) => {
+    const h = Math.round((Number(hours) || 0) * 100) / 100;
+    if (!(h > 0)) { await deleteDoc(doc(db, "cream", eKey(jid, tid))); return; }
+    await setDoc(doc(db, "cream", eKey(jid, tid)),
+      {jobId: jid, taskId: tid, hours: h, rate: getLR(jid), date: today()}, {merge: true});
+  };
+
+  // ── Parts tracking ──
+  // Each quoted part (and sundry line) gets a stable key from its job number and
+  // part number/name, so the ordered/invoiced record sticks to it. Parts bought
+  // that weren't on the quote are "extras". Tracking whose quote line has since
+  // been removed from the sheet shows as an orphan rather than vanishing.
+  const partsLines = jid => {
+    const T = tmplOf(jid);
+    const tasks = tasksForJob(jid);
+    const inScope = new Set(tasks.map(t => t.id));
+    const tracks = Object.values(partsTrack).filter(d => d.jobId === jid);
+    const byKey = {};
+    tracks.forEach(d => { if (d.kind !== "extra" && d.key) byKey[d.key] = d; });
+    const seen = {}, used = new Set(), out = [];
+    const nextKey = base => { seen[base] = (seen[base] || 0) + 1; return `${base}__${seen[base]}`; };
+    const lineOf = (kind, key, b, t) => {
+      const status = t?.status || "none";
+      const qty = b.qty == null ? 1 : Number(b.qty);
+      const price = b.price == null || b.price === "" ? null : Number(b.price);
+      const quoted = kind === "extra" ? 0 : (price == null ? 0 : price * qty);
+      const actualQty  = t && t.actualQty  != null && t.actualQty  !== "" ? Number(t.actualQty)  : qty;
+      const actualUnit = t && t.actualUnit != null && t.actualUnit !== "" ? Number(t.actualUnit) : (price ?? 0);
+      const actual = actualQty * actualUnit;
+      return {kind, key, docId: t?.id || `${jid}__${key}`, track: t || null,
+        taskId: b.taskId || "", sId: b.sId ?? null, desc: b.desc || "", pn: b.pn || "",
+        qty, price, noPrice: kind !== "extra" && price == null, quoted,
+        status, actualQty, actualUnit, actual,
+        variance: status === "invoiced" ? actual - quoted : 0,
+        supplier: t?.supplier || "", invoiceNo: t?.invoiceNo || "", invoiceDate: t?.invoiceDate || "",
+        orderedDate: t?.orderedDate || "", notes: t?.notes || ""};
+    };
+    (T.parts || []).forEach(p => {
+      if (!inScope.has(p.taskId)) return;
+      const key = nextKey(`q__${p.taskId}__${slugKey(p.pn || p.desc)}`);
+      used.add(key);
+      out.push(lineOf("quote", key, {taskId: p.taskId, sId: p.sId ?? tasks.find(t => t.id === p.taskId)?.sId,
+        desc: p.desc || p.pn, pn: p.pn, qty: qtyOf(p), price: p.price}, byKey[key]));
+    });
+    (T.sundries || []).forEach(x => {
+      const key = nextKey(`s__${x.sId}__${slugKey(x.desc)}`);
+      used.add(key);
+      out.push(lineOf("sundry", key, {sId: x.sId, desc: x.desc, qty: qtyOf(x), price: x.price}, byKey[key]));
+    });
+    tracks.filter(d => d.kind === "extra").forEach(d =>
+      out.push(lineOf("extra", d.id, {taskId: d.taskId, sId: d.sId, desc: d.desc, pn: d.pn, qty: d.actualQty, price: null}, d)));
+    tracks.filter(d => d.kind !== "extra" && d.key && !used.has(d.key)).forEach(d =>
+      out.push(lineOf("orphan", d.key, {taskId: d.taskId, sId: d.sId, desc: d.desc, pn: d.pn, qty: d.quotedQty, price: d.quotedPrice}, d)));
+    return out;
+  };
+  // Forecast = invoiced parts at their real price + everything not yet invoiced
+  // at the quoted price + parts bought that weren't on the quote.
+  const partsSummary = lines => {
+    const s = {lines: 0, quoted: 0, none: 0, ordered: 0, invoiced: 0, invoicedQuoted: 0, invoicedActual: 0,
+               changed: 0, extras: 0, extrasN: 0, forecast: 0};
+    lines.forEach(l => {
+      if (l.kind === "orphan") return;
+      if (l.kind === "extra") {
+        if (l.status !== "none") { s.extras += l.actual; s.extrasN++; s.forecast += l.actual; }
+        return;
+      }
+      s.lines++; s.quoted += l.quoted; s[l.status]++;
+      if (l.status === "invoiced") {
+        s.invoicedQuoted += l.quoted; s.invoicedActual += l.actual; s.forecast += l.actual;
+        if (Math.abs(l.variance) >= 0.005) s.changed++;
+      } else s.forecast += l.quoted;
+    });
+    s.variance = s.forecast - s.quoted;
+    return s;
+  };
+  const savePartLine = async (jid, line, data) => {
+    const stamp = {updatedAt: new Date().toISOString()};
+    if (!line || line.kind === "extra") {
+      const payload = {jobId: jid, kind: "extra", ...data, ...stamp};
+      if (line?.kind === "extra") await setDoc(doc(db, "partsTrack", line.docId), payload, {merge: true});
+      else await addDoc(collection(db, "partsTrack"), payload);
+      return;
+    }
+    if (data.status === "none") { await deleteDoc(doc(db, "partsTrack", line.docId)); return; }
+    await setDoc(doc(db, "partsTrack", line.docId), {
+      jobId: jid, kind: line.kind === "orphan" ? (line.track?.kind || "quote") : line.kind, key: line.key,
+      taskId: line.taskId, sId: line.sId, desc: line.desc, pn: line.pn,
+      quotedQty: line.qty, quotedPrice: line.price, ...data, ...stamp}, {merge: true});
+  };
+  const partOrdered = (jid, line) => savePartLine(jid, line, {
+    status: "ordered", orderedDate: line.orderedDate || today(),
+    supplier: line.supplier || partsUI.invoice.supplier || ""});
+  const partInvoicedAtQuote = (jid, line) => savePartLine(jid, line, {
+    status: "invoiced", actualQty: line.qty, actualUnit: line.price ?? 0,
+    supplier: partsUI.invoice.supplier || line.supplier || "",
+    invoiceNo: partsUI.invoice.number || line.invoiceNo || "",
+    invoiceDate: partsUI.invoice.date || line.invoiceDate || today(),
+    orderedDate: line.orderedDate || today()});
+
   const sStats = (jid, sid) => {
     const lr      = getLR(jid);
     const builtin = tasksOf(jid).filter(t => t.sId === sid && isIn(jid,t));
@@ -2308,6 +2804,8 @@ export default function App() {
       actual:     act,
       estCost:    ts.reduce((s,t)=>s+t.est*lr,0),
       actualCost: ts.reduce((s,t)=>s+entryCost(jid,t.id),0),
+      cream:      ts.reduce((s,t)=>s+creamHrs(jid,t.id),0),
+      creamCost:  ts.reduce((s,t)=>s+creamCost(jid,t.id),0),
       total:      ts.length,
       photos:     ts.reduce((s,t)=>s+getPh(jid,t.id).length,0),
       completed:  ts.filter(t=>getStatus(jid,t.id)==='completed').length,
@@ -2324,6 +2822,8 @@ export default function App() {
       actual:     act,
       estCost:    ts.reduce((s,t)=>s+t.est*lr,0),
       actualCost: ts.reduce((s,t)=>s+entryCost(jid,t.id),0),
+      cream:      ts.reduce((s,t)=>s+creamHrs(jid,t.id),0),
+      creamCost:  ts.reduce((s,t)=>s+creamCost(jid,t.id),0),
       lr,
     };
   };
@@ -4088,16 +4588,26 @@ export default function App() {
             <Edit2 size={13} color={Y}/><span style={{fontFamily:FF,fontSize:12,fontWeight:700,color:Y}}>EDIT</span>
           </button>}/>
         <div style={{background:CARD,borderBottom:`1px solid ${BDR}`}}>
-          <div style={{display:"flex"}}>
-            {[["progress","PROGRESS"],["costings","COSTINGS"],["photos","CLIENT PHOTOS"]].map(([t,l])=>(
+          <div style={{display:"flex",overflowX:"auto"}}>
+            {[["progress","PROGRESS"],["costings","COSTINGS"],["parts","PARTS"],["photos","CLIENT PHOTOS"]].map(([t,l])=>(
               <button key={t} onClick={()=>setJobTab(t)}
-                style={{flex:1,padding:"13px 0",background:"none",border:"none",borderBottom:`2px solid ${tab===t?Y:"transparent"}`,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:tab===t?Y:MUTED,letterSpacing:1,transition:"all .15s",whiteSpace:"nowrap"}}>
+                style={{flex:"1 0 auto",padding:"13px 12px",background:"none",border:"none",borderBottom:`2px solid ${tab===t?Y:"transparent"}`,cursor:"pointer",fontFamily:FF,fontSize:13,fontWeight:700,color:tab===t?Y:MUTED,letterSpacing:1,transition:"all .15s",whiteSpace:"nowrap"}}>
                 {l}
               </button>
             ))}
           </div>
         </div>
-        <JobTaskSearch
+        {tab==="parts" && j && (() => {
+          const lines = partsLines(j.id);
+          return (
+            <PartsPanel job={j} lines={lines} summary={partsSummary(lines)} sections={secsOf(j.id)}
+              onOrdered={l => partOrdered(j.id, l)}
+              onConfirm={l => partInvoicedAtQuote(j.id, l)}
+              onEdit={l => setEditPart({jobId: j.id, line: l})}
+              onAddExtra={() => setEditPart({jobId: j.id, isNew: true})}/>
+          );
+        })()}
+        {tab!=="parts" && <JobTaskSearch
           search={q => searchTasks(selJob, q)}
           statusOf={tid => getStatus(selJob, tid)}
           onPick={task => go("task",{sec:task.sId, task:task.id})}>
@@ -4281,6 +4791,32 @@ export default function App() {
                   </div>
                 );
               })()}
+              {/* Billing: hours the boys logged + cream hours added on top */}
+              <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${o.cream>0?"rgba(232,176,0,.35)":BDR2}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                  <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>BILLABLE LABOUR · LOGGED + CREAM</span>
+                  <span style={{fontFamily:MONO,fontSize:17,color:Y}}>{money0(o.actualCost + o.creamCost)}</span>
+                </div>
+                <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.6}}>
+                  {o.actual.toFixed(1)}h logged ({money0(o.actualCost)}) + <b style={{color:Y}}>{o.cream.toFixed(1)}h cream</b> ({money0(o.creamCost)}) = {(o.actual+o.cream).toFixed(1)}h · +GST
+                </div>
+              </div>
+              {(() => {
+                const ps = partsSummary(partsLines(selJob));
+                if (!ps.lines && !ps.extrasN) return null;
+                return (
+                  <button onClick={()=>setJobTab("parts")}
+                    style={{display:"block",width:"100%",textAlign:"left",background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${ps.variance>0.5?"rgba(255,76,76,.35)":BDR2}`,cursor:"pointer"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                      <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>PARTS · QUOTED VS INVOICED</span>
+                      <span style={{fontFamily:MONO,fontSize:15,color:ps.variance>0.5?RED:ps.variance<-0.5?GRN:MUTED}}>{signed0(ps.variance)}</span>
+                    </div>
+                    <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.6}}>
+                      Quoted {money0(ps.quoted)} · forecast {money0(ps.forecast)} · {ps.invoiced}/{ps.lines} invoiced · {ps.none} not ordered{ps.changed?` · ${ps.changed} price changed`:""} <span style={{color:Y}}>→ PARTS</span>
+                    </div>
+                  </button>
+                );
+              })()}
             </div>
             <div style={{padding:"12px 14px"}}>
               <div style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 60px",gap:6,padding:"0 6px 8px",borderBottom:`1px solid ${BDR}`}}>
@@ -4315,10 +4851,63 @@ export default function App() {
                 <div style={{fontFamily:MONO,fontSize:11,color:o.actual>0?(o.actualCost>o.estCost?RED:TXT):MUTED,textAlign:"right"}}>{o.actual>0?fmt(o.actualCost):"—"}</div>
                 <div style={{fontFamily:MONO,fontSize:11,color:o.actual>0?(o.actualCost>o.estCost?RED:GRN):MUTED,textAlign:"right"}}>{o.actual>0?((o.actualCost-o.estCost>=0?"+":"")+fmt(o.actualCost-o.estCost)):"—"}</div>
               </div>
+
+              {/* Cream: jobs done under plan — add the difference on before billing */}
+              {(() => {
+                const tasks = tasksForJob(selJob);
+                const rows = tasks
+                  .map(t => ({t, l: logged(selJob, t.id), c: creamHrs(selJob, t.id), a: creamAvail(selJob, t), done: getStatus(selJob, t.id)==="completed"}))
+                  .filter(r => r.c > 0 || (r.l > 0 && r.a > 0))
+                  .sort((x, y) => (y.c>0) - (x.c>0) || (y.done - x.done) || (y.a - x.a));
+                const pending = rows.filter(r => r.c === 0 && r.done);
+                const pendingHrs = pending.reduce((s, r) => s + r.a, 0);
+                return (
+                  <div style={{marginTop:22}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                      <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:2}}>CREAM</span>
+                      <div style={{flex:1,height:1,background:BDR}}/>
+                      <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{o.cream.toFixed(1)}h added · {money0(o.creamCost)}</span>
+                    </div>
+                    <div style={{fontSize:11,color:MUTED,lineHeight:1.5,marginBottom:10}}>
+                      Jobs that came in under their planned hours. Add the difference as cream before billing — it's billed on top of the hours logged.
+                    </div>
+                    {pending.length>1 && (
+                      <button onClick={async ()=>{ if (window.confirm(`Add ${pendingHrs.toFixed(1)}h cream across ${pending.length} completed jobs (each one's full under-plan hours)?`)) { for (const r of pending) await saveCream(selJob, r.t.id, r.a); } }}
+                        style={{width:"100%",marginBottom:10,background:"rgba(232,176,0,.1)",border:"1px solid rgba(232,176,0,.4)",borderRadius:9,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:1}}>
+                        ADD ALL · {pendingHrs.toFixed(1)}h ON {pending.length} COMPLETED JOBS
+                      </button>
+                    )}
+                    {rows.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"16px 0"}}>No jobs under plan yet — once hours are logged, any job that comes in under shows up here.</div>}
+                    {rows.map(({t, l, c, a, done}) => (
+                      <div key={t.id} style={{background:CARD,border:`1px solid ${c>0?"rgba(232,176,0,.35)":BDR}`,borderRadius:10,padding:"10px 12px",marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+                        <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>go("task",{sec:t.sId, task:t.id})}>
+                          <div style={{display:"flex",gap:7,alignItems:"baseline"}}>
+                            <span style={{fontFamily:MONO,fontSize:10,color:Y,flexShrink:0}}>{t.id}</span>
+                            <span style={{fontSize:13,color:TXT,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</span>
+                          </div>
+                          <div style={{fontSize:11,color:MUTED,marginTop:3}}>
+                            {t.est}h planned · {l.toFixed(1)}h logged · <span style={{color:a>0?GRN:MUTED}}>{a}h under</span>{!done && <span style={{color:AMBER}}> · not marked complete</span>}
+                          </div>
+                        </div>
+                        {c>0 ? (
+                          <button onClick={()=>setEditCream({jobId:selJob, taskId:t.id})} style={{...pBtn(Y),textAlign:"right",lineHeight:1.3}}>
+                            ✓ {c}h<div style={{fontFamily:MONO,fontSize:9,color:MUTED,fontWeight:400}}>{money0(creamCost(selJob,t.id))}</div>
+                          </button>
+                        ) : (
+                          <div style={{display:"flex",gap:5,flexShrink:0}}>
+                            <button onClick={()=>saveCream(selJob, t.id, a)} style={pBtn(GRN)}>ADD {a}h</button>
+                            <button onClick={()=>setEditCream({jobId:selJob, taskId:t.id})} style={pBtn(MUTED)}>…</button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         )}
-        </JobTaskSearch>
+        </JobTaskSearch>}
       </div>
     );
   };
@@ -4421,6 +5010,21 @@ export default function App() {
             <StatBox label="VARIANCE" val={variance===null?"—":(variance>0?`+${variance.toFixed(1)}`:variance.toFixed(1))} col={variance===null?MUTED:variance>0?RED:GRN}/>
           </div>
           {task.est>0&&<Bar v={l} max={task.est} h={6}/>}
+          {(() => {
+            const c = creamHrs(selJob, selTask), a = creamAvail(selJob, task);
+            if (!(c > 0) && !(l > 0 && a > 0)) return null;
+            return (
+              <button onClick={()=>setEditCream({jobId:selJob, taskId:selTask})}
+                style={{width:"100%",marginTop:10,background:c>0?"rgba(232,176,0,.1)":CARD2,border:`1px solid ${c>0?"rgba(232,176,0,.4)":BDR2}`,borderRadius:9,padding:"10px 12px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
+                <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:c>0?Y:GRN,letterSpacing:1}}>
+                  {c>0 ? `CREAM ${c}h ADDED` : `${a}h UNDER PLAN · ADD CREAM`}
+                </span>
+                <span style={{fontFamily:MONO,fontSize:12,color:MUTED}}>
+                  {c>0 ? `${money0(creamCost(selJob,selTask))} · billable ${(l+c).toFixed(1)}h` : "tap to add"}
+                </span>
+              </button>
+            );
+          })()}
           {task.opt&&(
             <div style={{marginTop:12,display:"flex",justifyContent:"space-between",alignItems:"center",background:CARD2,borderRadius:8,padding:"10px 14px"}}>
               <div><div style={{fontFamily:FF,fontSize:13,fontWeight:700,color:TXT}}>OPTIONAL ITEM</div><div style={{fontSize:11,color:MUTED}}>${task.cost.toLocaleString()} +GST</div></div>
@@ -5471,14 +6075,27 @@ export default function App() {
       if (!e.date) return;
       hoursByDate[e.date] = (hoursByDate[e.date]||0) + (Number(e.hours)||0);
     });
-    // Cumulative hours over time — feeds the burn-up chart.
-    const burnPoints = Object.keys(hoursByDate).sort().reduce((acc, d) => {
-      const prev = acc.length ? acc[acc.length-1].cum : 0;
-      acc.push({date:d, cum: prev + hoursByDate[d]});
-      return acc;
-    }, []);
-    const daysWorked = Object.keys(hoursByDate).length;
-    const avgPerDay  = daysWorked ? (burnPoints[burnPoints.length-1].cum / daysWorked) : 0;
+    // ── Cream: added so far, and under-plan hours on completed jobs not yet added ──
+    const creamTotals = scopeJobs.reduce((a, j) => {
+      tasksForJob(j.id).forEach(t => {
+        const c = creamHrs(j.id, t.id);
+        if (c > 0) { a.hours += c; a.value += creamCost(j.id, t.id); a.jobs++; }
+        else if (getStatus(j.id, t.id) === "completed" && logged(j.id, t.id) > 0) {
+          const av = creamAvail(j.id, t);
+          if (av > 0) { a.availHrs += av; a.availVal += av * getLR(j.id); a.availJobs++; }
+        }
+      });
+      return a;
+    }, {hours:0, value:0, jobs:0, availHrs:0, availVal:0, availJobs:0});
+
+    // ── Parts: quoted vs invoiced across machines ──
+    const partsTotals = scopeJobs.reduce((a, j) => {
+      const s = partsSummary(partsLines(j.id));
+      a.quoted += s.quoted; a.forecast += s.forecast; a.variance += s.variance;
+      a.invoicedActual += s.invoicedActual; a.none += s.none; a.ordered += s.ordered;
+      a.invoiced += s.invoiced; a.lines += s.lines; a.changed += s.changed; a.extras += s.extras;
+      return a;
+    }, {quoted:0, forecast:0, variance:0, invoicedActual:0, none:0, ordered:0, invoiced:0, lines:0, changed:0, extras:0});
 
     // ── Hoses: value made vs still unbilled ──
     const rangeHoses = hoses.filter(h => inRange(h.date) && inJob(h.jobId));
@@ -5582,41 +6199,6 @@ export default function App() {
     };
 
     // ── Burn-up: cumulative hours logged against the estimate ──
-    const BurnUp = ({points, estimate}) => {
-      if (points.length < 2) return (
-        <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"24px 14px",textAlign:"center",color:MUTED,fontSize:12}}>
-          Not enough history yet — this fills in as hours get logged.
-        </div>
-      );
-      const W=320, H=120, PL=34, PR=8, PT=10, PB=18;
-      const maxY = Math.max(estimate||0, points[points.length-1].cum) * 1.05 || 1;
-      const x = i => PL + (i/(points.length-1))*(W-PL-PR);
-      const y = v => H-PB - (v/maxY)*(H-PT-PB);
-      const path = points.map((p,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join(" ");
-      const area = `${path} L${x(points.length-1).toFixed(1)},${H-PB} L${x(0).toFixed(1)},${H-PB} Z`;
-      const estY = estimate>0 ? y(estimate) : null;
-      return (
-        <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"12px 12px 8px"}}>
-          <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"auto",display:"block"}}>
-            {[0,.5,1].map(f=>(
-              <g key={f}>
-                <line x1={PL} x2={W-PR} y1={y(maxY*f)} y2={y(maxY*f)} stroke={BDR} strokeWidth="1"/>
-                <text x={PL-5} y={y(maxY*f)+3} fill={MUTED} fontSize="8" textAnchor="end" fontFamily="'DM Mono',monospace">{Math.round(maxY*f)}h</text>
-              </g>
-            ))}
-            {estY!==null && <>
-              <line x1={PL} x2={W-PR} y1={estY} y2={estY} stroke={RED} strokeWidth="1" strokeDasharray="3 3" opacity=".8"/>
-              <text x={W-PR} y={estY-4} fill={RED} fontSize="8" textAnchor="end" fontFamily="'Barlow',sans-serif">ESTIMATE</text>
-            </>}
-            <path d={area} fill={Y} opacity=".12"/>
-            <path d={path} fill="none" stroke={Y} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round"/>
-            <circle cx={x(points.length-1)} cy={y(points[points.length-1].cum)} r="3.5" fill={Y}/>
-            <text x={PL} y={H-5} fill={MUTED} fontSize="8" fontFamily="'Barlow',sans-serif">{points[0].date}</text>
-            <text x={W-PR} y={H-5} fill={MUTED} fontSize="8" textAnchor="end" fontFamily="'Barlow',sans-serif">{points[points.length-1].date}</text>
-          </svg>
-        </div>
-      );
-    };
 
     // ── Donut for task status ──
     const StatusDonut = ({counts}) => {
@@ -5844,9 +6426,28 @@ export default function App() {
             </div>
           </Section>
 
-          <Section title="HOURS OVER TIME" right={avgPerDay?`${avgPerDay.toFixed(1)}h avg/day`:""}>
-            <BurnUp points={burnPoints} estimate={totals.est}/>
+          <Section title="CREAM" right="all time">
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <Stat label="CREAM ADDED" value={`${creamTotals.hours.toFixed(1)}h`} col={Y}
+                    sub={`${money(creamTotals.value)} +GST · ${creamTotals.jobs} job${creamTotals.jobs===1?"":"s"}`}/>
+              <Stat label="NOT YET ADDED" value={`${creamTotals.availHrs.toFixed(1)}h`} col={creamTotals.availHrs>0?GRN:MUTED}
+                    sub={creamTotals.availJobs ? `${money(creamTotals.availVal)} on ${creamTotals.availJobs} completed job${creamTotals.availJobs===1?"":"s"}` : "nothing waiting"}/>
+            </div>
           </Section>
+
+          {partsTotals.lines>0 && (
+            <Section title="PARTS" right={`${partsTotals.invoiced}/${partsTotals.lines} invoiced`}>
+              <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(4,1fr)":"1fr 1fr",gap:8}}>
+                <Stat label="QUOTED" value={money(partsTotals.quoted)} sub="+GST"/>
+                <Stat label="FORECAST" value={money(partsTotals.forecast)} sub={partsTotals.extras>0?`incl ${money(partsTotals.extras)} not on quote`:"invoiced + still to come"}/>
+                <Stat label="VARIANCE" value={signed0(partsTotals.variance)}
+                      col={partsTotals.variance>0.5?RED:partsTotals.variance<-0.5?GRN:MUTED}
+                      sub={partsTotals.changed?`${partsTotals.changed} price change${partsTotals.changed===1?"":"s"}`:"no price changes"}/>
+                <Stat label="NOT ORDERED" value={`${partsTotals.none}`} col={partsTotals.none>0?AMBER:GRN}
+                      sub={`${partsTotals.ordered} ordered, awaiting invoice`}/>
+              </div>
+            </Section>
+          )}
 
           <Section title="HOSES" right={`${rangeHoses.length} made`}>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
@@ -6096,6 +6697,27 @@ export default function App() {
           tasksForJob={tasksForJob} secsForJob={secsOf}
           onSplit={splitMoveEntry} onClose={()=>setSplitEntry(null)}/>
       )}
+      {editPart && (() => {
+        const jid = editPart.jobId;
+        return (
+          <PartEditor key={editPart.line?.docId || "new"} line={editPart.line} isNew={!!editPart.isNew}
+            tasks={tasksForJob(jid)} sections={secsOf(jid)} invoice={partsUI.invoice}
+            onSave={data => savePartLine(jid, editPart.line, data)}
+            onDelete={editPart.line && (editPart.line.kind==="extra" || editPart.line.track)
+              ? () => editPart.line.kind==="extra" ? deleteDoc(doc(db,"partsTrack",editPart.line.docId)) : savePartLine(jid, editPart.line, {status:"none"})
+              : null}
+            onClose={()=>setEditPart(null)}/>
+        );
+      })()}
+      {editCream && (() => {
+        const jid = editCream.jobId;
+        const t = tasksForJob(jid).find(x => x.id === editCream.taskId) || getCTById(jid, editCream.taskId) || {id: editCream.taskId, desc: "", est: 0};
+        return (
+          <CreamEditor key={editCream.taskId} task={t} planned={Number(t.est)||0} loggedHrs={logged(jid, t.id)}
+            current={creamHrs(jid, t.id)} rate={Number(cream[eKey(jid,t.id)]?.rate) || getLR(jid)}
+            onSave={h => saveCream(jid, t.id, h)} onClose={()=>setEditCream(null)}/>
+        );
+      })()}
       {editSched && (
         <ScheduleEditor {...editSched}
           anchor={ganttAnchor(jobs.find(j=>j.id===editSched.job.id) || editSched.job)}
