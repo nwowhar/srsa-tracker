@@ -3204,6 +3204,80 @@ export default function App() {
     invoiceDate: partsUI.invoice.date || line.invoiceDate || today(),
     orderedDate: line.orderedDate || today()});
 
+  // ── Final cost vs quote (what the customer sees once a job is complete) ──
+  // Labour = hours billed (logged + cream) at their rates. Parts = the quote, with
+  // invoiced parts swapped for their real price, plus parts bought that weren't
+  // quoted. Parts not invoiced yet stay at the quoted price. A job only counts
+  // once it's marked complete AND has hours in — so ticking it off before the
+  // timesheets are entered doesn't show the customer a 100% saving.
+  const taskFinal = (jid, t, lines) => {
+    const q = taskCost(jid, t);
+    const done = getStatus(jid, t.id) === "completed";
+    const loggedH = logged(jid, t.id), creamH = creamHrs(jid, t.id);
+    const hrs = loggedH + creamH;
+    const labour = entryCost(jid, t.id) + creamCost(jid, t.id);
+    let partsDelta = 0, extras = 0, pending = 0, invoiced = 0;
+    (lines || partsLines(jid)).forEach(l => {
+      if (l.taskId !== t.id || l.kind === "orphan" || l.kind === "sundry") return;
+      if (l.kind === "extra") { if (l.status !== "none") { extras += l.actual; partsDelta += l.actual; } return; }
+      if (l.status === "invoiced") { partsDelta += l.variance; invoiced++; } else pending++;
+    });
+    const est = Number(t.est) || 0;
+    const ready = done && (hrs > 0 || q.labour === 0);
+    const parts = q.parts + partsDelta;
+    return {
+      done, ready, pendingParts: pending, invoicedParts: invoiced, extras,
+      quotedHrs: est, hrs, loggedH, creamH,
+      quotedLabour: q.labour, labour, labourVar: labour - q.labour,
+      quotedParts: q.parts, parts, partsVar: partsDelta,
+      quoted: q.total, final: labour + parts, variance: (labour - q.labour) + partsDelta,
+    };
+  };
+  // Section roll-up over its completed jobs. Freight/consumables and any
+  // section-wide extra parts join in once every job in the section is complete.
+  const sectionFinal = (jid, sid, lines) => {
+    const ls = lines || partsLines(jid);
+    const ts = tasksForJob(jid).filter(t => t.sId === sid);
+    const r = {jobs: ts.length, complete: 0, quoted: 0, final: 0, labourVar: 0, partsVar: 0, variance: 0,
+               quotedHrs: 0, hrs: 0, sectionDone: false, sundriesVar: 0};
+    ts.forEach(t => {
+      const f = taskFinal(jid, t, ls);
+      if (!f.ready) return;
+      r.complete++; r.quoted += f.quoted; r.final += f.final;
+      r.labourVar += f.labourVar; r.partsVar += f.partsVar; r.quotedHrs += f.quotedHrs; r.hrs += f.hrs;
+    });
+    r.sectionDone = ts.length > 0 && r.complete === ts.length;
+    if (r.sectionDone) {
+      ls.forEach(l => {
+        if (l.sId !== sid || l.kind === "orphan") return;
+        if (l.kind === "sundry") {
+          r.quoted += l.quoted;
+          const a = l.status === "invoiced" ? l.actual : l.quoted;
+          r.final += a; r.sundriesVar += a - l.quoted;
+        } else if (l.kind === "extra" && !l.taskId && l.status !== "none") {
+          r.final += l.actual; r.sundriesVar += l.actual;
+        }
+      });
+      r.partsVar += r.sundriesVar;
+    }
+    r.variance = r.labourVar + r.partsVar;
+    return r;
+  };
+  const jobFinal = jid => {
+    const ls = partsLines(jid);
+    const r = {jobs: 0, complete: 0, quoted: 0, final: 0, labourVar: 0, partsVar: 0, variance: 0, quotedHrs: 0, hrs: 0};
+    secsOf(jid).forEach(sec => {
+      const s = sectionFinal(jid, sec.id, ls);
+      r.jobs += s.jobs; r.complete += s.complete; r.quoted += s.quoted; r.final += s.final;
+      r.labourVar += s.labourVar; r.partsVar += s.partsVar; r.quotedHrs += s.quotedHrs; r.hrs += s.hrs;
+    });
+    if (r.jobs > 0 && r.complete === r.jobs) {           // whole machine done: machine-wide extras too
+      ls.forEach(l => { if (l.kind === "extra" && !l.taskId && l.sId == null && l.status !== "none") { r.final += l.actual; r.partsVar += l.actual; } });
+    }
+    r.variance = r.labourVar + r.partsVar;
+    return r;
+  };
+
   // ── Stock ──
   // On hand = received − issued ± stocktake adjustments. Average cost is the
   // weighted average of everything received (and any extra found at a count).
@@ -5304,6 +5378,23 @@ export default function App() {
                   </div>
                 );
               })()}
+              {(() => {
+                const f = jobFinal(selJob);
+                if (!f.complete) return null;
+                const vc = v => v < -0.5 ? GRN : v > 0.5 ? RED : MUTED;
+                const vs = v => Math.abs(v) < 0.5 ? "$0" : `${v<0?"−":"+"}${money0(Math.abs(v))}`;
+                return (
+                  <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${BDR2}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                      <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>CLIENT SEES · {f.complete} COMPLETED JOB{f.complete===1?"":"S"}</span>
+                      <span style={{fontFamily:MONO,fontSize:15,color:vc(f.variance)}}>{Math.abs(f.variance)<0.5?"on budget":f.variance<0?`${money0(-f.variance)} saving`:`${money0(f.variance)} over`}</span>
+                    </div>
+                    <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.6}}>
+                      Quoted {money0(f.quoted)} → final {money0(f.final)} · labour <span style={{color:vc(f.labourVar)}}>{vs(f.labourVar)}</span> ({(Math.round(f.hrs*10)/10)}h incl cream vs {f.quotedHrs}h) · parts <span style={{color:vc(f.partsVar)}}>{vs(f.partsVar)}</span>
+                    </div>
+                  </div>
+                );
+              })()}
               {/* Billing: hours the boys logged + cream hours added on top */}
               <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${o.cream>0?"rgba(232,176,0,.35)":BDR2}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
@@ -5547,6 +5638,33 @@ export default function App() {
             </div>
           )}
           <StatusToggle jid={selJob} tid={selTask}/>
+          {(() => {
+            const f = taskFinal(selJob, task);
+            const who = jobs.find(x=>x.id===selJob)?.client || "The client";
+            const vc = v => v < -0.5 ? GRN : v > 0.5 ? RED : MUTED;
+            const vs = v => Math.abs(v) < 0.5 ? "$0" : `${v<0?"−":"+"}${money0(Math.abs(v))}`;
+            return (
+              <div style={{marginTop:10,background:CARD2,border:`1px solid ${f.ready?"rgba(232,176,0,.35)":BDR}`,borderRadius:10,padding:"11px 13px"}}>
+                <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WHAT {who.toUpperCase()} SEES</div>
+                {!f.done && <div style={{fontSize:12,color:MUTED}}>Only the quoted price until you mark this complete.</div>}
+                {f.done && !f.ready && <div style={{fontSize:12,color:AMBER}}>Marked complete but no hours are in yet — they'll see the final cost once hours are entered.</div>}
+                {f.ready && (<>
+                  <div style={{fontSize:13,color:TXT,lineHeight:1.5}}>
+                    Done in <b style={{fontFamily:MONO,color:Y}}>{Math.round(f.hrs*10)/10}h</b> vs {f.quotedHrs}h quoted · <b style={{color:vc(f.variance)}}>{Math.abs(f.variance)<0.5?"on budget":f.variance<0?`${money0(-f.variance)} saving`:`${money0(f.variance)} over`}</b>
+                  </div>
+                  <div style={{fontSize:11,color:MUTED,marginTop:4,lineHeight:1.5}}>
+                    Labour <span style={{fontFamily:MONO,color:vc(f.labourVar)}}>{vs(f.labourVar)}</span> · Parts <span style={{fontFamily:MONO,color:vc(f.partsVar)}}>{vs(f.partsVar)}</span>
+                    {f.pendingParts>0 && ` · ${f.pendingParts} part${f.pendingParts===1?"":"s"} not invoiced (at quote)`}
+                  </div>
+                  {f.creamH>0 && (
+                    <div style={{fontSize:11,color:Y,marginTop:5}}>
+                      Actually took {Math.round(f.loggedH*10)/10}h — includes {f.creamH}h cream they don't see.
+                    </div>
+                  )}
+                </>)}
+              </div>
+            );
+          })()}
         </div>
         <div style={{padding:"14px 14px 0"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
@@ -5685,6 +5803,13 @@ export default function App() {
     const jc = jobCost(job.id);
     const pct = jc.count ? Math.round(jc.done/jc.count*100) : 0;
     const money = n => `$${Math.round(n).toLocaleString()}`;
+    // Saving / over-budget on completed jobs. Negative variance = saving.
+    const plines = partsLines(job.id);
+    const jf = jobFinal(job.id);
+    const varCol = v => v < -0.5 ? GRN : v > 0.5 ? RED : MUTED;
+    const varTxt = v => Math.abs(v) < 0.5 ? "on budget" : v < 0 ? `${money(-v)} saving` : `${money(v)} over`;
+    const varSigned = v => Math.abs(v) < 0.5 ? "$0" : `${v < 0 ? "−" : "+"}${money(Math.abs(v))}`;
+    const hrsTxt = h => `${Math.round(h*10)/10}h`;
     const tasksIn = sid => [...tasksOf(job.id).filter(t => t.sId===sid && isIn(job.id,t)),
                             ...(customTasks[job.id]||[]).filter(t => t.sId===sid)]
                            .sort((a,b)=>a.id.localeCompare(b.id));
@@ -5750,11 +5875,29 @@ export default function App() {
                 </div>
               </div>
 
+              {jf.complete>0 && (
+                <div style={{background:CARD,border:`1px solid ${jf.variance< -0.5?"rgba(40,199,111,.5)":jf.variance>0.5?"rgba(255,76,76,.5)":BDR2}`,borderRadius:12,padding:"15px",marginBottom:16}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                    <span style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5}}>COMPLETED JOBS · {jf.complete} OF {jf.jobs}</span>
+                    <span style={{fontSize:10,color:MUTED}}>+GST</span>
+                  </div>
+                  <div style={{fontFamily:MONO,fontSize:24,color:varCol(jf.variance),marginTop:6}}>{varTxt(jf.variance)}</div>
+                  <div style={{fontSize:12,color:TXT,marginTop:6}}>
+                    Quoted {money(jf.quoted)} → final {money(jf.final)}
+                  </div>
+                  <div style={{fontSize:11,color:MUTED,marginTop:4,lineHeight:1.6}}>
+                    Labour <span style={{fontFamily:MONO,color:varCol(jf.labourVar)}}>{varSigned(jf.labourVar)}</span> ({hrsTxt(jf.hrs)} vs {hrsTxt(jf.quotedHrs)} quoted)
+                    {" · "}Parts <span style={{fontFamily:MONO,color:varCol(jf.partsVar)}}>{varSigned(jf.partsVar)}</span>
+                  </div>
+                </div>
+              )}
+
               <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2,marginBottom:10}}>BY SECTION</div>
               {secsOf(job.id).map(sec => {
                 const c = sectionCost(job.id, sec.id);
                 if (!c.count) return null;
                 const isOpen = openSec === sec.id;
+                const sf = sectionFinal(job.id, sec.id, plines);
                 return (
                   <div key={sec.id} style={{background:CARD,border:`1px solid ${isOpen?Y:BDR}`,borderRadius:11,marginBottom:8,overflow:"hidden"}}>
                     <button onClick={()=>{setOpenSec(isOpen?null:sec.id); setOpenTask(null);}}
@@ -5763,10 +5906,17 @@ export default function App() {
                         <span style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT}}>{sec.id}. {sec.name}</span>
                         <span style={{fontFamily:MONO,fontSize:15,color:Y,whiteSpace:"nowrap"}}>{money(c.total)}</span>
                       </div>
-                      <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginTop:4,gap:8}}>
                         <span style={{fontSize:11,color:MUTED}}>{c.count} job{c.count===1?"":"s"} · {c.done} complete</span>
-                        <span style={{fontSize:10,color:MUTED}}>+GST</span>
+                        {sf.complete>0
+                          ? <span style={{fontFamily:MONO,fontSize:12,color:varCol(sf.variance),whiteSpace:"nowrap"}}>{varTxt(sf.variance)}</span>
+                          : <span style={{fontSize:10,color:MUTED}}>+GST</span>}
                       </div>
+                      {sf.complete>0 && (
+                        <div style={{fontSize:10,color:MUTED,marginTop:3,textAlign:"right"}}>
+                          on {sf.sectionDone ? "the whole section" : `${sf.complete} completed job${sf.complete===1?"":"s"}`}: labour {varSigned(sf.labourVar)} · parts {varSigned(sf.partsVar)}
+                        </div>
+                      )}
                     </button>
 
                     {isOpen && (
@@ -5776,6 +5926,7 @@ export default function App() {
                           const tp = partsOf(job.id, t.id);
                           const done = getStatus(job.id, t.id)==="completed";
                           const tOpen = openTask === t.id;
+                          const tf = done ? taskFinal(job.id, t, plines) : null;
                           return (
                             <div key={t.id} style={{borderBottom:`1px solid ${BDR}`}}>
                               <button onClick={()=>setOpenTask(tOpen?null:t.id)}
@@ -5785,11 +5936,37 @@ export default function App() {
                                   <span style={{flex:1,fontSize:13,color:TXT,lineHeight:1.35}}>{t.desc}</span>
                                   <span style={{fontFamily:MONO,fontSize:13,color:TXT,whiteSpace:"nowrap"}}>{money(tc.total)}</span>
                                 </div>
-                                <div style={{display:"flex",gap:8,marginTop:4,paddingLeft:47}}>
+                                <div style={{display:"flex",gap:8,marginTop:4,paddingLeft:47,alignItems:"center",flexWrap:"wrap"}}>
                                   {done && <HChip label="COMPLETE" col={BG} bg={GRN}/>}
+                                  {tf?.ready && <span style={{fontFamily:MONO,fontSize:11,color:varCol(tf.variance)}}>{varTxt(tf.variance)}</span>}
                                   {tp.length>0 && <span style={{fontSize:10,color:MUTED}}>{tp.length} part{tp.length===1?"":"s"} — tap to see</span>}
+                                  {tf?.ready && tp.length===0 && <span style={{fontSize:10,color:MUTED}}>tap for breakdown</span>}
                                 </div>
                               </button>
+                              {tOpen && tf && (
+                                <div style={{margin:"0 14px 10px 47px",background:CARD,border:`1px solid ${BDR}`,borderRadius:9,padding:"10px 12px"}}>
+                                  {!tf.ready ? (
+                                    <div style={{fontSize:11,color:MUTED}}>Complete — the final cost shows here once the hours are finalised.</div>
+                                  ) : (<>
+                                    <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:7}}>FINAL COST VS QUOTE</div>
+                                    {[
+                                      ["Labour", `${hrsTxt(tf.hrs)} vs ${hrsTxt(tf.quotedHrs)}`, tf.quotedLabour, tf.labour, tf.labourVar],
+                                      ["Parts", tf.pendingParts ? `${tf.pendingParts} still at quote` : (tf.extras ? "incl extra parts" : ""), tf.quotedParts, tf.parts, tf.partsVar],
+                                    ].filter(r => r[0]==="Labour" || r[2] || r[3]).map(([label, sub, qv, fv, v]) => (
+                                      <div key={label} style={{display:"grid",gridTemplateColumns:"1fr auto auto",gap:10,alignItems:"baseline",padding:"4px 0",borderBottom:`1px solid ${BDR}`}}>
+                                        <div><span style={{fontSize:12,color:TXT}}>{label}</span>{sub && <span style={{fontSize:10,color:MUTED}}> · {sub}</span>}</div>
+                                        <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{money(qv)} → {money(fv)}</span>
+                                        <span style={{fontFamily:MONO,fontSize:12,color:varCol(v),minWidth:62,textAlign:"right"}}>{varSigned(v)}</span>
+                                      </div>
+                                    ))}
+                                    <div style={{display:"grid",gridTemplateColumns:"1fr auto auto",gap:10,alignItems:"baseline",padding:"6px 0 0"}}>
+                                      <span style={{fontSize:12,color:TXT,fontWeight:700}}>Total</span>
+                                      <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{money(tf.quoted)} → {money(tf.final)}</span>
+                                      <span style={{fontFamily:MONO,fontSize:13,color:varCol(tf.variance),minWidth:62,textAlign:"right",fontWeight:700}}>{varSigned(tf.variance)}</span>
+                                    </div>
+                                  </>)}
+                                </div>
+                              )}
                               {tOpen && tp.length>0 && (
                                 <div style={{padding:"0 14px 12px 47px"}}>
                                   <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:6}}>PARTS</div>
@@ -5846,7 +6023,7 @@ export default function App() {
                 );
               })}
               <div style={{fontSize:10,color:MUTED,marginTop:14,lineHeight:1.6,padding:"0 2px"}}>
-                Quoted figures based on the agreed job sheet. Talk to SRSA about anything that doesn't look right.
+                Quoted figures based on the agreed job sheet. Once a job is complete, its final cost and any saving or overspend show against the quote — parts not yet invoiced are counted at the quoted price. Talk to SRSA about anything that doesn't look right.
               </div>
             </div>
           )}
