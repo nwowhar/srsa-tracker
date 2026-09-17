@@ -232,7 +232,7 @@ const pFld = {width: "100%", background: CARD2, border: `1px solid ${BDR2}`, bor
 
 // The PARTS tab on a job. `lines` come from the quote (template parts + sundries),
 // plus extras added from invoices and tracking for lines no longer on the sheet.
-const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit, onAddExtra, stockOf = () => null, onFromStock = () => {}}) => {
+const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit, onAddExtra, stockOf = () => null, onFromStock = () => {}, onAllocate, onBulkReceive}) => {
   const [q, setQ]       = useState(partsUI.q);
   const [filter, setF]  = useState(partsUI.filter);
   const [inv, setInv]   = useState(partsUI.invoice);
@@ -334,10 +334,27 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
             );
           })}
         </div>
-        <button onClick={onAddExtra}
-          style={{width: "100%", margin: "6px 0 2px", background: "none", border: `1px dashed ${BDR2}`, borderRadius: 9, padding: "10px 0", cursor: "pointer", fontFamily: FF, fontSize: 12, fontWeight: 800, color: Y, letterSpacing: 1}}>
-          + ADD A PART THAT'S NOT ON THE QUOTE
-        </button>
+        <div style={{display: "flex", gap: 6, margin: "6px 0 2px"}}>
+          {onAllocate && (
+            <button onClick={onAllocate}
+              style={{flex: 1, background: "rgba(40,199,111,.1)", border: "1px solid rgba(40,199,111,.45)", borderRadius: 9, padding: "10px 0", cursor: "pointer", fontFamily: FF, fontSize: 12, fontWeight: 800, color: GRN, letterSpacing: 1}}>
+              PARTS USED FROM STOCK
+            </button>
+          )}
+          <button onClick={onAddExtra}
+            style={{flex: 1, background: "none", border: `1px dashed ${BDR2}`, borderRadius: 9, padding: "10px 0", cursor: "pointer", fontFamily: FF, fontSize: 12, fontWeight: 800, color: Y, letterSpacing: 1}}>
+            + PART NOT ON QUOTE
+          </button>
+        </div>
+        {onBulkReceive && (() => {
+          const waiting = lines.filter(l => l.status === "ordered" && l.kind !== "orphan" && !l.track?.receivedToStock).length;
+          return waiting > 0 && (
+            <button onClick={onBulkReceive}
+              style={{width: "100%", margin: "6px 0 2px", background: CARD, border: `1px solid ${BDR2}`, borderRadius: 9, padding: "10px 0", cursor: "pointer", fontFamily: FF, fontSize: 12, fontWeight: 800, color: GRN, letterSpacing: 1}}>
+              ↓ RECEIVE ORDERED PARTS INTO STOCK ({waiting})
+            </button>
+          );
+        })()}
       </div>
 
       <div style={{padding: "8px 14px 40px"}}>
@@ -353,7 +370,7 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
               </div>
               {g.lines.map(l => {
                 const st = PART_STATES[l.status] || PART_STATES.none;
-                const stock = (l.pn || l.alt) ? stockOf(l) : null;
+                const stock = (l.pn || l.alt || l.track?.stockItemId) ? stockOf(l) : null;
                 const changed = l.status === "invoiced" && l.kind !== "extra" && Math.abs(l.variance) >= 0.005;
                 return (
                   <div key={l.docId} style={{background: CARD, border: `1px solid ${changed ? "rgba(255,76,76,.35)" : BDR}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6}}>
@@ -369,7 +386,7 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
                         </div>
                         <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, flexShrink: 0}}>
                           <span style={{fontFamily: FF, fontSize: 9, fontWeight: 800, letterSpacing: .5, color: st.col, border: `1px solid ${st.col}`, borderRadius: 5, padding: "2px 6px", whiteSpace: "nowrap"}}>
-                            {changed ? "PRICE CHANGED" : (l.purchased && l.status === "ordered" && !l.track) ? "PURCHASED" : st.label}
+                            {changed ? "PRICE CHANGED" : (l.track?.receivedToStock && l.status !== "invoiced") ? "IN STOCK" : (l.purchased && l.status === "ordered" && !l.track) ? "PURCHASED" : st.label}
                           </span>
                           {l.priceTbc && l.status !== "invoiced" && (
                             <span style={{fontFamily: FF, fontSize: 9, fontWeight: 800, letterSpacing: .5, color: AMBER, whiteSpace: "nowrap"}}>PRICE TBC</span>
@@ -392,8 +409,13 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
                           {l.kind !== "extra" && <span style={{fontFamily: MONO, color: changed ? (l.variance > 0 ? RED : GRN) : MUTED, minWidth: 60, textAlign: "right"}}>{changed ? `${l.variance > 0 ? "+" : "−"}${money2(Math.abs(l.variance))}` : "✓ as quoted"}</span>}
                         </div>
                       )}
-                      {l.status === "ordered" && (
+                      {l.status === "ordered" && !l.track?.receivedToStock && l.track && (
                         <div style={{fontSize: 11, color: MUTED, marginTop: 5}}>Ordered{l.orderedDate ? ` ${l.orderedDate}` : ""}{l.supplier ? ` · ${l.supplier}` : ""}</div>
+                      )}
+                      {l.track?.receivedToStock && l.status !== "invoiced" && (
+                        <div style={{fontSize: 11, color: GRN, marginTop: 5}}>
+                          ✓ Received into stock: {qtyTxt(l.track.receivedQty)}{l.track.receivedDate ? ` on ${l.track.receivedDate}` : ""}{l.track.actualUnit != null ? ` at ${money2(l.track.actualUnit)} each` : ""} — allocate it when it's used
+                        </div>
                       )}
                       {l.notes && <div style={{fontSize: 11, color: MUTED, marginTop: 4, fontStyle: "italic"}}>{l.notes}</div>}
                     </div>
@@ -424,11 +446,11 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
 
 // Edit one part line: status, qty, unit price from the invoice, supplier, notes.
 // For a part that's not on the quote, also what it is and which job it's for.
-const PartEditor = ({line, isNew, tasks, sections, invoice, onSave, onDelete, onClose}) => {
+const PartEditor = ({line, isNew, presetTask, tasks, sections, invoice, onSave, onDelete, onClose}) => {
   const extra = isNew || line?.kind === "extra";
   const t = line?.track;
   const [status, setStatus]   = useState(t?.status || (isNew ? (invoice.number ? "invoiced" : "ordered") : "invoiced"));
-  const [taskId, setTaskId]   = useState(line?.taskId || "");
+  const [taskId, setTaskId]   = useState(line?.taskId || presetTask || "");
   const [desc, setDesc]       = useState(line?.desc || "");
   const [pn, setPn]           = useState(line?.pn || "");
   const [qty, setQty]         = useState(String(t?.actualQty ?? line?.qty ?? 1));
@@ -773,7 +795,7 @@ const StockItemEditor = ({item, stats, isNew, existingKey, onSave, onDelete, onM
           {low && <div style={{fontSize: 11, color: AMBER, marginTop: 6}}>At or below the reorder level ({qtyTxt(item.minQty)}).</div>}
           <div style={{display: "flex", gap: 6, marginTop: 10}}>
             <button onClick={() => onMove("in")}    style={{...pBtn(GRN), flex: 1, padding: "10px 0"}}>＋ RECEIVE</button>
-            <button onClick={() => onMove("out")}   style={{...pBtn(Y),   flex: 1, padding: "10px 0"}} disabled={stats.onHand <= 0}>ISSUE TO JOB</button>
+            <button onClick={() => onMove("out")}   style={{...pBtn(Y),   flex: 1, padding: "10px 0"}}>ISSUE TO JOB</button>
             <button onClick={() => onMove("count")} style={{...pBtn(TXT), flex: 1, padding: "10px 0"}}>COUNT</button>
           </div>
         </>)}
@@ -998,6 +1020,312 @@ const StockMoveEditor = ({mode, item: item0, rows, jobs, jobName, tasksForJob, s
           style={{width: "100%", marginTop: 16, background: mode === "in" ? GRN : Y, border: "none", borderRadius: 10, padding: 14, cursor: "pointer", fontFamily: FF, fontSize: 15, fontWeight: 800, color: BG}}>
           {busy ? "SAVING…" : mode === "in" ? "RECEIVE" : mode === "out" ? "ISSUE" : "SAVE COUNT"}
         </button>
+      </div>
+    </div>
+  );
+};
+
+// Allocate parts used on a job out of stock. Search the stock list, tap parts
+// into the list, set how many were used, then allocate them all at once. Each
+// comes off stock and is booked on the job's parts (against the matching quoted
+// part where there is one).
+const AllocateParts = ({jobs, jobName, jobId: job0, taskId: task0, preset = [], rows, tasksForJob, secsForJob, quoteLinesFor, onAllocate, onAddNotInStock, onClose}) => {
+  const [jobId, setJobId]   = useState(job0 || jobs[0]?.id || "");
+  const [taskId, setTaskId] = useState(task0 || "");
+  const [q, setQ]           = useState("");
+  const [cart, setCart]     = useState(() => preset.map(p => {
+    const r = rows.find(x => x.item.id === p.itemId);
+    return r ? {itemId: p.itemId, qty: String(p.qty ?? 1), cost: r.stats.avgCost ? String(Math.round(r.stats.avgCost * 100) / 100) : ""} : null;
+  }).filter(Boolean));
+  const [date, setDate]     = useState(today());
+  const [note, setNote]     = useState("");
+  const [busy, setBusy]     = useState(false);
+  const [err, setErr]       = useState("");
+
+  const rowOf = id => rows.find(r => r.item.id === id);
+  const add = (r, qty = 1) => {
+    setErr("");
+    setCart(c => c.some(x => x.itemId === r.item.id)
+      ? c.map(x => x.itemId === r.item.id ? {...x, qty: String((parseFloat(x.qty) || 0) + qty)} : x)
+      : [...c, {itemId: r.item.id, qty: String(qty), cost: r.stats.avgCost ? String(Math.round(r.stats.avgCost * 100) / 100) : ""}]);
+    setQ("");
+  };
+  const setLine = (id, k, v) => setCart(c => c.map(x => x.itemId === id ? {...x, [k]: v} : x));
+  const remove  = id => setCart(c => c.filter(x => x.itemId !== id));
+
+  const qq = q.trim().toLowerCase(), qk = pnKeyOf(q);
+  const results = qq ? rows.filter(r =>
+    `${r.item.pn} ${r.item.desc} ${r.item.location}`.toLowerCase().includes(qq) || (qk && pnKeyOf(r.item.pn).includes(qk))
+  ).sort((a, b) => (b.stats.onHand > 0) - (a.stats.onHand > 0)).slice(0, 12) : [];
+
+  const tasks = jobId ? tasksForJob(jobId) : [];
+  const secs  = jobId ? secsForJob(jobId) : [];
+  // Quoted parts on the chosen job (task) that are sitting in stock.
+  const suggestions = jobId && taskId ? quoteLinesFor(jobId)
+    .filter(l => l.taskId === taskId && l.kind === "quote" && l.status !== "invoiced")
+    .map(l => ({l, r: rows.find(r => r.stats.onHand > 0 && ((l.pn && pnKeyOf(r.item.pn) === pnKeyOf(l.pn)) || (l.alt && pnKeyOf(r.item.pn) === pnKeyOf(l.alt))))}))
+    .filter(x => x.r && !cart.some(c => c.itemId === x.r.item.id)) : [];
+
+  const total = cart.reduce((s, x) => s + (parseFloat(x.qty) || 0) * (parseFloat(x.cost) || 0), 0);
+  const submit = async () => {
+    setErr("");
+    if (!jobId) { setErr("Pick the machine."); return; }
+    if (!cart.length) { setErr("Search for a part and add it first."); return; }
+    const bad = cart.find(x => !(parseFloat(x.qty) > 0));
+    if (bad) { setErr(`Enter how many ${rowOf(bad.itemId)?.item.desc || "of that part"} were used.`); return; }
+    setBusy(true);
+    try {
+      await onAllocate({jobId, taskId, date, note: note.trim(),
+        lines: cart.map(x => ({item: rowOf(x.itemId).item, qty: parseFloat(x.qty), unitCost: parseFloat(x.cost) || 0}))});
+      onClose();
+    } catch (e) { setErr(e.message || "Couldn't allocate."); setBusy(false); }
+  };
+  const label = s => <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "12px 0 5px"}}>{s}</div>;
+  const task = tasks.find(t => t.id === taskId);
+  return (
+    <div style={{position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 125, display: "flex", alignItems: "flex-end", justifyContent: "center"}}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{background: CARD, borderRadius: "18px 18px 0 0", padding: "18px 18px 24px", width: "100%", maxWidth: 600, border: `1px solid ${BDR}`, boxSizing: "border-box", maxHeight: "94dvh", overflowY: "auto"}}>
+        <div style={{display: "flex", alignItems: "center", gap: 10}}>
+          <div style={{flex: 1}}>
+            <div style={{fontFamily: FF, fontSize: 20, fontWeight: 800, color: Y}}>PARTS USED</div>
+            <div style={{fontSize: 11, color: MUTED}}>Takes them out of stock and puts them on the job</div>
+          </div>
+          <button onClick={onClose} style={{background: BDR2, border: "none", borderRadius: 8, padding: 6, cursor: "pointer"}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        <div style={{display: "grid", gridTemplateColumns: jobs.length > 1 ? "1fr 1.3fr" : "1fr", gap: 8}}>
+          {jobs.length > 1 && (<div>{label("MACHINE")}
+            <select value={jobId} onChange={e => { setJobId(e.target.value); setTaskId(""); }} style={{...pFld, appearance: "none"}}>
+              {jobs.map(j => <option key={j.id} value={j.id}>{jobName(j.id)}</option>)}
+            </select></div>)}
+          <div>{label("JOB")}
+            <select value={taskId} onChange={e => setTaskId(e.target.value)} style={{...pFld, appearance: "none"}}>
+              <option value="">— General / whole machine —</option>
+              {secs.map(s => (
+                <optgroup key={s.id} label={`${s.id}. ${s.name}`}>
+                  {tasks.filter(t => t.sId === s.id).map(t => <option key={t.id} value={t.id}>{t.id} — {t.desc}</option>)}
+                </optgroup>
+              ))}
+            </select></div>
+        </div>
+
+        {suggestions.length > 0 && (<>
+          {label(`QUOTED FOR ${taskId} · IN STOCK`)}
+          <div style={{display: "flex", flexWrap: "wrap", gap: 6}}>
+            {suggestions.map(({l, r}) => (
+              <button key={l.docId} onClick={() => add(r, l.qty || 1)}
+                style={{...pBtn(GRN), whiteSpace: "normal", textAlign: "left", lineHeight: 1.3}}>
+                + {l.qty}× {l.desc} <span style={{color: MUTED, fontWeight: 400}}>({qtyTxt(r.stats.onHand)} in stock)</span>
+              </button>
+            ))}
+          </div>
+        </>)}
+
+        {label("SEARCH STOCK")}
+        <div style={{position: "relative"}}>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Part number, name or bin…" autoCorrect="off" autoCapitalize="none" spellCheck={false}
+            style={{...pFld, padding: "12px 40px 12px 14px", fontSize: 15}}/>
+          {qq && (
+            <button onClick={() => setQ("")} aria-label="Clear search"
+              style={{position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: BDR2, border: "none", borderRadius: 6, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer"}}>
+              <X size={14} color={MUTED}/>
+            </button>
+          )}
+        </div>
+        {qq && (
+          <div style={{border: `1px solid ${BDR2}`, borderTop: "none", borderRadius: "0 0 9px 9px", overflow: "hidden"}}>
+            {results.length === 0 && <div style={{fontSize: 12, color: MUTED, padding: "10px 12px"}}>Not on the stock list.</div>}
+            {results.map(r => {
+              const inCart = cart.some(x => x.itemId === r.item.id);
+              return (
+                <button key={r.item.id} onClick={() => add(r)}
+                  style={{display: "flex", width: "100%", textAlign: "left", alignItems: "center", gap: 8, background: inCart ? "rgba(232,176,0,.07)" : CARD2, border: "none", borderBottom: `1px solid ${BDR}`, padding: "10px 12px", cursor: "pointer"}}>
+                  <span style={{fontFamily: MONO, fontSize: 11, color: Y, minWidth: 74}}>{r.item.pn || "—"}</span>
+                  <span style={{flex: 1, fontSize: 13, color: TXT, minWidth: 0}}>{r.item.desc}{r.item.location ? <span style={{color: MUTED, fontSize: 11}}> · bin {r.item.location}</span> : ""}</span>
+                  <span style={{fontFamily: MONO, fontSize: 12, color: r.stats.onHand > 0 ? GRN : RED, whiteSpace: "nowrap"}}>{qtyTxt(r.stats.onHand)} left</span>
+                  <span style={{fontFamily: FF, fontSize: 16, fontWeight: 800, color: Y, width: 18, textAlign: "center"}}>+</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {onAddNotInStock && (
+          <button onClick={() => onAddNotInStock(jobId, taskId)}
+            style={{background: "none", border: "none", padding: "8px 0 0", cursor: "pointer", fontSize: 11, color: MUTED, textDecoration: "underline"}}>
+            Part not in stock? Add it as a part bought for this job instead
+          </button>
+        )}
+
+        {label(`ALLOCATING${task ? ` TO ${task.id}` : ""} (${cart.length})`)}
+        {cart.length === 0 && <div style={{fontSize: 12, color: MUTED, padding: "4px 0 2px"}}>Nothing yet — search above and tap a part to add it.</div>}
+        {cart.map(x => {
+          const r = rowOf(x.itemId); if (!r) return null;
+          const qn = parseFloat(x.qty) || 0;
+          return (
+            <div key={x.itemId} style={{background: CARD2, border: `1px solid ${qn > r.stats.onHand ? "rgba(245,165,36,.45)" : BDR}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6}}>
+              <div style={{display: "flex", alignItems: "flex-start", gap: 8}}>
+                <div style={{flex: 1, minWidth: 0}}>
+                  {r.item.pn && <span style={{fontFamily: MONO, fontSize: 11, color: Y}}>{r.item.pn} </span>}
+                  <span style={{fontSize: 13, color: TXT}}>{r.item.desc}</span>
+                  <div style={{fontSize: 10, color: qn > r.stats.onHand ? AMBER : MUTED, marginTop: 2}}>
+                    {qtyTxt(r.stats.onHand)} in stock{qn > r.stats.onHand ? " — more than on hand, stock will go negative" : ""}
+                  </div>
+                </div>
+                <button onClick={() => remove(x.itemId)} aria-label="Remove" style={{background: "none", border: "none", padding: 2, cursor: "pointer"}}><X size={15} color={MUTED}/></button>
+              </div>
+              <div style={{display: "grid", gridTemplateColumns: "auto 1fr 1fr", gap: 8, alignItems: "center", marginTop: 8}}>
+                <div style={{display: "flex", alignItems: "center", gap: 4}}>
+                  <button onClick={() => setLine(x.itemId, "qty", String(Math.max(0, qn - 1)))} style={{...pBtn(TXT), width: 34, padding: "6px 0", fontSize: 16}}>−</button>
+                  <input type="number" inputMode="decimal" min="0" value={x.qty} onChange={e => setLine(x.itemId, "qty", e.target.value)}
+                    style={{...pFld, width: 64, textAlign: "center", fontFamily: MONO, padding: "7px 4px"}}/>
+                  <button onClick={() => setLine(x.itemId, "qty", String(qn + 1))} style={{...pBtn(TXT), width: 34, padding: "6px 0", fontSize: 16}}>+</button>
+                </div>
+                <div style={{position: "relative"}}>
+                  <span style={{position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: MUTED}}>$</span>
+                  <input type="number" inputMode="decimal" min="0" step="0.01" value={x.cost} onChange={e => setLine(x.itemId, "cost", e.target.value)} placeholder="each"
+                    style={{...pFld, fontFamily: MONO, padding: "7px 8px 7px 20px"}}/>
+                </div>
+                <span style={{fontFamily: MONO, fontSize: 13, color: TXT, textAlign: "right"}}>{money2(qn * (parseFloat(x.cost) || 0))}</span>
+              </div>
+            </div>
+          );
+        })}
+
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: 8}}>
+          <div>{label("DATE")}<input type="date" value={date} onChange={e => setDate(e.target.value)} style={{...pFld, colorScheme: "dark"}}/></div>
+          <div>{label("NOTE")}<input value={note} onChange={e => setNote(e.target.value)} placeholder="optional" style={pFld}/></div>
+        </div>
+        {err && <div style={{color: RED, fontSize: 12, marginTop: 10}}>{err}</div>}
+        <button onClick={submit} disabled={busy}
+          style={{width: "100%", marginTop: 14, background: Y, border: "none", borderRadius: 10, padding: 14, cursor: "pointer", fontFamily: FF, fontSize: 15, fontWeight: 800, color: BG}}>
+          {busy ? "ALLOCATING…" : cart.length ? `ALLOCATE ${cart.length} PART${cart.length === 1 ? "" : "S"} · ${money2(total)}` : "ALLOCATE"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// Bulk receive: parts ordered for a job arrive → tick what came in, check qty and
+// price, and they all go into stock in one go. Each part is found on the stock
+// list by part number (or aftermarket number) or added to it.
+const BulkReceive = ({title, lines, sections, invoice, onSubmit, onClose}) => {
+  const [sel, setSel]       = useState({});        // docId -> {qty, cost}
+  const [q, setQ]           = useState("");
+  const [supplier, setSup]  = useState(invoice.supplier || "");
+  const [invoiceNo, setInv] = useState(invoice.number || "");
+  const [date, setDate]     = useState(invoice.date || today());
+  const [busy, setBusy]     = useState(false);
+  const [err, setErr]       = useState("");
+  const defQty  = l => (l.track?.actualQty != null ? Number(l.track.actualQty) : l.qty) || 1;
+  const defCost = l => l.track?.actualUnit != null && l.track.actualUnit !== "" ? Number(l.track.actualUnit) : (l.price ?? "");
+  const qq = q.trim().toLowerCase();
+  const shown = lines.filter(l => !qq || `${l.taskId} ${l.desc} ${l.pn} ${l.alt} ${l.supplier}`.toLowerCase().includes(qq));
+  const toggle = l => setSel(s => { const n = {...s}; if (n[l.docId]) delete n[l.docId]; else n[l.docId] = {qty: String(defQty(l)), cost: String(defCost(l))}; return n; });
+  const setF = (id, k, v) => setSel(s => ({...s, [id]: {...s[id], [k]: v}}));
+  const allOn = shown.length > 0 && shown.every(l => sel[l.docId]);
+  const selectAll = () => setSel(s => {
+    const n = {...s};
+    if (allOn) shown.forEach(l => delete n[l.docId]);
+    else shown.forEach(l => { if (!n[l.docId]) n[l.docId] = {qty: String(defQty(l)), cost: String(defCost(l))}; });
+    return n;
+  });
+  const chosen = lines.filter(l => sel[l.docId]);
+  const total = chosen.reduce((s, l) => s + (parseFloat(sel[l.docId].qty) || 0) * (parseFloat(sel[l.docId].cost) || 0), 0);
+  const submit = async () => {
+    setErr("");
+    if (!chosen.length) { setErr("Tick the parts that arrived."); return; }
+    const bad = chosen.find(l => !(parseFloat(sel[l.docId].qty) > 0));
+    if (bad) { setErr(`Check the qty for ${bad.desc}.`); return; }
+    setBusy(true);
+    try {
+      await onSubmit({supplier: supplier.trim(), invoiceNo: invoiceNo.trim(), date,
+        items: chosen.map(l => ({line: l, qty: parseFloat(sel[l.docId].qty), unitCost: sel[l.docId].cost === "" ? null : parseFloat(sel[l.docId].cost)}))});
+      onClose();
+    } catch (e) { setErr(e.message || "Couldn't receive."); setBusy(false); }
+  };
+  const label = s => <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "12px 0 5px"}}>{s}</div>;
+  const secName = sid => sections.find(s => s.id === sid)?.name;
+  let lastSec = null;
+  return (
+    <div style={{position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 125, display: "flex", alignItems: "flex-end", justifyContent: "center"}}
+      onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{background: CARD, borderRadius: "18px 18px 0 0", padding: "18px 18px 24px", width: "100%", maxWidth: 640, border: `1px solid ${BDR}`, boxSizing: "border-box", maxHeight: "94dvh", overflowY: "auto"}}>
+        <div style={{display: "flex", alignItems: "center", gap: 10}}>
+          <div style={{flex: 1}}>
+            <div style={{fontFamily: FF, fontSize: 20, fontWeight: 800, color: GRN}}>RECEIVE ORDERED PARTS</div>
+            <div style={{fontSize: 11, color: MUTED}}>{title} · tick what arrived — it goes into stock, ready to allocate</div>
+          </div>
+          <button onClick={onClose} style={{background: BDR2, border: "none", borderRadius: 8, padding: 6, cursor: "pointer"}}><X size={16} color={MUTED}/></button>
+        </div>
+
+        <div style={{display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: 6}}>
+          <div>{label("SUPPLIER")}<input value={supplier} onChange={e => setSup(e.target.value)} style={{...pFld, padding: "8px 10px", fontSize: 13}}/></div>
+          <div>{label("INVOICE #")}<input value={invoiceNo} onChange={e => setInv(e.target.value)} style={{...pFld, padding: "8px 10px", fontSize: 13, fontFamily: MONO}}/></div>
+          <div>{label("DATE")}<input type="date" value={date} onChange={e => setDate(e.target.value)} style={{...pFld, padding: "8px 8px", fontSize: 12, colorScheme: "dark"}}/></div>
+        </div>
+
+        {lines.length === 0 ? (
+          <div style={{textAlign: "center", color: MUTED, fontSize: 13, padding: "30px 10px", lineHeight: 1.6}}>
+            No ordered parts waiting to come in.<br/>Mark parts as ordered on the PARTS tab first.
+          </div>
+        ) : (<>
+          <div style={{display: "flex", gap: 6, marginTop: 12}}>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search ordered parts…" autoCorrect="off" autoCapitalize="none" spellCheck={false}
+              style={{...pFld, flex: 1, padding: "9px 12px"}}/>
+            <button onClick={selectAll} style={{...pBtn(allOn ? MUTED : GRN), padding: "0 12px"}}>{allOn ? "UNTICK ALL" : `TICK ALL (${shown.length})`}</button>
+          </div>
+          <div style={{marginTop: 8}}>
+            {shown.map(l => {
+              const s = sel[l.docId];
+              const head = l.sId !== lastSec ? (lastSec = l.sId, secName(l.sId)) : null;
+              return (
+                <div key={l.docId}>
+                  {head && <div style={{fontFamily: FF, fontSize: 12, fontWeight: 800, color: TXT, margin: "10px 2px 5px"}}>{l.sId}. {head}</div>}
+                  <div style={{background: s ? "rgba(40,199,111,.07)" : CARD2, border: `1px solid ${s ? "rgba(40,199,111,.45)" : BDR}`, borderRadius: 9, padding: "9px 11px", marginBottom: 5}}>
+                    <div onClick={() => toggle(l)} style={{display: "flex", alignItems: "center", gap: 10, cursor: "pointer"}}>
+                      <span style={{width: 22, height: 22, borderRadius: 6, border: `2px solid ${s ? GRN : BDR2}`, background: s ? GRN : "transparent", color: BG, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800, flexShrink: 0}}>{s ? "✓" : ""}</span>
+                      <div style={{flex: 1, minWidth: 0}}>
+                        <div style={{fontSize: 13, color: TXT}}>
+                          {l.taskId && <span style={{fontFamily: MONO, fontSize: 10, color: Y}}>{l.taskId} </span>}{l.desc}
+                        </div>
+                        <div style={{fontSize: 10, color: MUTED, fontFamily: MONO, marginTop: 1}}>
+                          {[l.pn, l.alt && `alt ${l.alt}`, `${defQty(l)} ordered`, l.purchased && !l.track ? "purchased" : null].filter(Boolean).join(" · ")}
+                        </div>
+                      </div>
+                    </div>
+                    {s && (
+                      <div style={{display: "grid", gridTemplateColumns: "1fr 1.3fr auto", gap: 8, alignItems: "center", marginTop: 8, paddingLeft: 32}}>
+                        <input type="number" inputMode="decimal" min="0" value={s.qty} onChange={e => setF(l.docId, "qty", e.target.value)} placeholder="qty"
+                          style={{...pFld, padding: "7px 8px", fontFamily: MONO, textAlign: "center"}}/>
+                        <div style={{position: "relative"}}>
+                          <span style={{position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: MUTED}}>$</span>
+                          <input type="number" inputMode="decimal" min="0" step="0.01" value={s.cost} onChange={e => setF(l.docId, "cost", e.target.value)} placeholder="each ex GST"
+                            style={{...pFld, padding: "7px 8px 7px 20px", fontFamily: MONO}}/>
+                        </div>
+                        <span style={{fontFamily: MONO, fontSize: 12, color: TXT, minWidth: 74, textAlign: "right"}}>{money2((parseFloat(s.qty) || 0) * (parseFloat(s.cost) || 0))}</span>
+                        {l.price != null && s.cost !== "" && Math.abs(parseFloat(s.cost) - l.price) >= 0.005 && (
+                          <div style={{gridColumn: "1 / -1", fontSize: 10, color: parseFloat(s.cost) > l.price ? RED : GRN}}>
+                            Quoted {money2(l.price)} each — {parseFloat(s.cost) > l.price ? "dearer" : "cheaper"} by {money2(Math.abs(parseFloat(s.cost) - l.price))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {shown.length === 0 && <div style={{fontSize: 12, color: MUTED, padding: "12px 2px"}}>No ordered parts match.</div>}
+          </div>
+        </>)}
+
+        {err && <div style={{color: RED, fontSize: 12, marginTop: 10}}>{err}</div>}
+        {lines.length > 0 && (
+          <button onClick={submit} disabled={busy}
+            style={{width: "100%", marginTop: 14, background: GRN, border: "none", borderRadius: 10, padding: 14, cursor: "pointer", fontFamily: FF, fontSize: 15, fontWeight: 800, color: BG}}>
+            {busy ? "RECEIVING…" : chosen.length ? `RECEIVE ${chosen.length} PART${chosen.length === 1 ? "" : "S"} INTO STOCK · ${money2(total)}` : "RECEIVE INTO STOCK"}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -2712,6 +3040,8 @@ export default function App() {
   const [stockMoves, setStockMoves]   = useState([]);    // in / out / adjust movements
   const [stockItemModal, setStockItemModal] = useState(null); // {itemId} | {isNew:true}
   const [stockMoveModal, setStockMoveModal] = useState(null); // {mode, itemId?, defaults?}
+  const [allocModal, setAllocModal]   = useState(null);  // {jobId?, taskId?, preset?} — parts used from stock
+  const [bulkReceive, setBulkReceive] = useState(null);  // {jobId} — ordered parts arriving into stock
   const [invites, setInvites]         = useState([]);    // pre-approved signups: {email, role, jobIds}
   const [clients, setClients]         = useState([]);    // customer list for job cards
   const [machines, setMachines]       = useState([]);    // each client's fleet
@@ -3390,18 +3720,72 @@ export default function App() {
       const ref_ = await addDoc(collection(db, "stockMoves"), {...base, type: "out", qty: p.qty, unitCost: unit, jobId: p.jobId, taskId: p.taskId || ""});
       const booked = {status: "invoiced", actualQty: p.qty, actualUnit: unit, supplier: "From stock", invoiceNo: "",
                       invoiceDate: base.date, orderedDate: base.date, notes: `Issued from stock${p.note ? ` — ${p.note}` : ""}`, stockMoveId: ref_.id};
-      if (p.line) await savePartLine(p.jobId, p.line, booked);
+      if (p.line) {
+        if (p.line.track) { const {id, ...before} = p.line.track; booked.beforeIssue = before; }
+        await savePartLine(p.jobId, p.line, booked);
+      }
       else {
         const t = tasksForJob(p.jobId).find(x => x.id === p.taskId);
         await savePartLine(p.jobId, null, {...booked, taskId: p.taskId || "", sId: t?.sId ?? null, desc: item.desc || item.pn, pn: item.pn || ""});
       }
     }
   };
+  // Several parts at once, each matched to a quoted part on that job where it can be.
+  const allocateParts = async ({jobId, taskId, date, note, lines}) => {
+    const quoted = partsLines(jobId).filter(l => (l.kind === "quote" || l.kind === "extra") && l.status !== "invoiced" && l.taskId === taskId);
+    const used = new Set();
+    for (const x of lines) {
+      const k = pnKeyOf(x.item.pn);
+      const line = quoted.find(l => !used.has(l.docId) && l.track?.stockItemId === x.item.id)       // received into stock for this part
+                || (k ? quoted.find(l => l.kind === "quote" && !used.has(l.docId) && (pnKeyOf(l.pn) === k || pnKeyOf(l.alt) === k)) : null);
+      if (line) used.add(line.docId);
+      await submitStockMove({mode: "out", item: x.item, qty: x.qty, unitCost: x.unitCost, jobId, taskId, line: line || null, date, note});
+    }
+  };
+  // The stock line on the stock list for a job's part: whatever it was received
+  // into, else a match on part number or aftermarket number.
+  const stockForLine = l => (l.track?.stockItemId && stockRows.find(r => r.item.id === l.track.stockItemId)) || stockByKey(l.pn) || stockByKey(l.alt);
+  // Ordered parts for a job arriving: each goes into stock (found on the list by
+  // part number / aftermarket number, or added), and the job's part is marked
+  // as received so it isn't received twice.
+  const receiveOrderedToStock = async (jobId, {supplier, invoiceNo, date, items}) => {
+    const made = {};                                     // key -> new item id, for repeats in this batch
+    for (const {line: l, qty, unitCost} of items) {
+      const pn = l.pn || l.alt || "";
+      const key = pnKeyOf(pn) || `desc:${(l.desc || "").trim().toLowerCase()}`;
+      let row = stockForLine(l) || (!pnKeyOf(pn) ? stockRows.find(r => !r.item.pn && (r.item.desc || "").trim().toLowerCase() === (l.desc || "").trim().toLowerCase()) : null);
+      let itemId = row?.item.id || made[key];
+      if (!itemId) {
+        itemId = await saveStockItem(null, {pn, desc: l.desc || pn, unit: "ea", location: "", supplier: supplier || l.supplier || "", minQty: 0});
+        made[key] = itemId;
+      }
+      const mv = await addDoc(collection(db, "stockMoves"), {itemId, type: "in", qty, unitCost, supplier: supplier || l.supplier || "",
+        invoiceNo, date, note: `Ordered for ${stockJobLabel(jobId, l.taskId)}`, jobId, taskId: l.taskId || "", partDocId: l.docId,
+        createdAt: new Date().toISOString()});
+      const status = l.status === "none" ? "ordered" : l.status;
+      if (l.kind === "extra") {
+        await setDoc(doc(db, "partsTrack", l.docId), {receivedToStock: true, stockItemId: itemId, receivedQty: qty, receivedDate: date, stockMoveInId: mv.id}, {merge: true});
+      } else {
+        await savePartLine(jobId, l, {status, orderedDate: l.orderedDate || date, supplier: l.supplier || supplier || "",
+          receivedToStock: true, stockItemId: itemId, receivedQty: qty, receivedDate: date, stockMoveInId: mv.id,
+          ...(unitCost != null ? {actualQty: qty, actualUnit: unitCost} : {})});
+      }
+    }
+  };
   const deleteStockMove = async mv => {
     await deleteDoc(doc(db, "stockMoves", mv.id));
     if (mv.type === "out") {
+      // Put the job's part back how it was before the issue (or remove it if the issue created it).
       const linked = Object.values(partsTrack).filter(d => d.stockMoveId === mv.id);
-      for (const d of linked) await deleteDoc(doc(db, "partsTrack", d.id));
+      for (const d of linked) {
+        if (d.beforeIssue) await setDoc(doc(db, "partsTrack", d.id), d.beforeIssue);
+        else await deleteDoc(doc(db, "partsTrack", d.id));
+      }
+    }
+    if (mv.type === "in") {
+      const linked = Object.values(partsTrack).filter(d => d.stockMoveInId === mv.id);
+      for (const d of linked) await setDoc(doc(db, "partsTrack", d.id),
+        {receivedToStock: false, stockItemId: null, receivedQty: null, receivedDate: null, stockMoveInId: null}, {merge: true});
     }
   };
 
@@ -5214,9 +5598,10 @@ export default function App() {
           const lines = partsLines(j.id);
           return (
             <PartsPanel job={j} lines={lines} summary={partsSummary(lines)} sections={secsOf(j.id)}
-              stockOf={l => stockByKey(l.pn) || stockByKey(l.alt)}
-              onFromStock={(l, row) => setStockMoveModal({mode: "out", itemId: row.item.id,
-                defaults: {jobId: j.id, taskId: l.taskId, lineDocId: l.docId, qty: l.qty, unitCost: row.stats.avgCost ? Math.round(row.stats.avgCost*100)/100 : undefined}})}
+              stockOf={stockForLine}
+              onBulkReceive={() => setBulkReceive({jobId: j.id})}
+              onFromStock={(l, row) => setAllocModal({jobId: j.id, taskId: l.taskId, preset: [{itemId: row.item.id, qty: l.qty}]})}
+              onAllocate={() => setAllocModal({jobId: j.id})}
               onOrdered={l => partOrdered(j.id, l)}
               onConfirm={l => partInvoicedAtQuote(j.id, l)}
               onEdit={l => setEditPart({jobId: j.id, line: l})}
@@ -5315,6 +5700,41 @@ export default function App() {
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          );
+        })()}
+
+        {tab==="progress" && (() => {
+          // Work left behind on job numbers that are no longer on the sheet
+          // (renumbered in a revision, or an added task deleted) — move it on.
+          const orphans = orphanedWork(selJob);
+          if (!orphans.length) return null;
+          return (
+            <div style={{padding:"14px 14px 0"}}>
+              <div style={{background:"rgba(245,165,36,.08)",border:"1px solid #F5A524",borderRadius:12,padding:"13px 14px"}}>
+                <div style={{fontFamily:FF,fontSize:12,fontWeight:800,color:"#F5A524",letterSpacing:1,marginBottom:5}}>
+                  {orphans.length} JOB NUMBER{orphans.length===1?"":"S"} NO LONGER ON THE SHEET
+                </div>
+                <div style={{fontSize:11,color:MUTED,lineHeight:1.5,marginBottom:11}}>
+                  The work logged against these is still saved but isn't showing anywhere — move it to the right job number.
+                </div>
+                {orphans.map(o => (
+                  <div key={o.taskId} style={{background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7,display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <span style={{fontFamily:MONO,fontSize:13,color:"#F5A524"}}>{o.taskId}</span>
+                      <div style={{fontSize:11,color:MUTED,marginTop:2}}>
+                        {[o.photos?`${o.photos} photo${o.photos===1?"":"s"}`:null,
+                          o.entries?`${o.entries} entr${o.entries===1?"y":"ies"} (${o.hours}h)`:null,
+                          o.status?`marked ${String(o.status).replace("_"," ")}`:null].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                    <button onClick={()=>setRemapFrom(o)}
+                      style={{background:Y,border:"none",borderRadius:7,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:BG,flexShrink:0}}>
+                      MOVE
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           );
@@ -5668,6 +6088,39 @@ export default function App() {
           )}
           <StatusToggle jid={selJob} tid={selTask}/>
           {(() => {
+            // Parts used on this job from stock — allocate here when the job's done.
+            const moves = stockMoves.filter(m => m.type === "out" && m.jobId === selJob && m.taskId === selTask)
+              .sort((a,b) => String(b.date||"").localeCompare(String(a.date||"")));
+            const done = getStatus(selJob, selTask) === "completed";
+            const val = moves.reduce((s,m) => s + (Number(m.qty)||0)*(Number(m.unitCost)||0), 0);
+            return (
+              <div style={{marginTop:10,background:CARD2,border:`1px solid ${done && !moves.length ? "rgba(40,199,111,.45)" : BDR}`,borderRadius:10,padding:"11px 13px"}}>
+                <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:moves.length?6:8}}>
+                  <span style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,flex:1}}>PARTS USED FROM STOCK</span>
+                  {moves.length>0 && <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{money2(val)}</span>}
+                </div>
+                {moves.map(m => {
+                  const it = stockItems[m.itemId];
+                  return (
+                    <div key={m.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderTop:`1px solid ${BDR}`}}>
+                      <span style={{fontFamily:MONO,fontSize:12,color:Y,minWidth:34}}>{qtyTxt(m.qty)}×</span>
+                      <span style={{flex:1,minWidth:0,fontSize:12,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {it ? `${it.pn ? it.pn+" · " : ""}${it.desc||""}` : "Part removed from stock list"}
+                      </span>
+                      <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{m.date?.slice(5)}</span>
+                      <button onClick={()=>{ if (window.confirm("Undo this? The part goes back into stock and comes off the job.")) deleteStockMove(m); }}
+                        style={{background:"none",border:"none",padding:3,cursor:"pointer"}} aria-label="Undo"><Trash2 size={13} color={MUTED}/></button>
+                    </div>
+                  );
+                })}
+                <button onClick={()=>setAllocModal({jobId: selJob, taskId: selTask})}
+                  style={{width:"100%",marginTop:moves.length?8:0,background:done?"rgba(40,199,111,.12)":"none",border:`1px solid ${done?"rgba(40,199,111,.5)":BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:done?GRN:Y,letterSpacing:1}}>
+                  {moves.length ? "+ ALLOCATE MORE PARTS" : done ? "JOB COMPLETE · ALLOCATE PARTS USED" : "+ ALLOCATE PARTS USED"}
+                </button>
+              </div>
+            );
+          })()}
+          {(() => {
             const f = taskFinal(selJob, task);
             const who = jobs.find(x=>x.id===selJob)?.client || "The client";
             const vc = v => v < -0.5 ? GRN : v > 0.5 ? RED : MUTED;
@@ -5838,7 +6291,6 @@ export default function App() {
     const varCol = v => v < -0.5 ? GRN : v > 0.5 ? RED : MUTED;
     const varTxt = v => Math.abs(v) < 0.5 ? "on budget" : v < 0 ? `${money(-v)} saving` : `${money(v)} over`;
     const varSigned = v => Math.abs(v) < 0.5 ? "$0" : `${v < 0 ? "−" : "+"}${money(Math.abs(v))}`;
-    const hrsTxt = h => `${Math.round(h*10)/10}h`;
     const tasksIn = sid => [...tasksOf(job.id).filter(t => t.sId===sid && isIn(job.id,t)),
                             ...(customTasks[job.id]||[]).filter(t => t.sId===sid)]
                            .sort((a,b)=>a.id.localeCompare(b.id));
@@ -5915,7 +6367,7 @@ export default function App() {
                     Quoted {money(jf.quoted)} → final {money(jf.final)}
                   </div>
                   <div style={{fontSize:11,color:MUTED,marginTop:4,lineHeight:1.6}}>
-                    Labour <span style={{fontFamily:MONO,color:varCol(jf.labourVar)}}>{varSigned(jf.labourVar)}</span> ({hrsTxt(jf.hrs)} vs {hrsTxt(jf.quotedHrs)} quoted)
+                    Labour <span style={{fontFamily:MONO,color:varCol(jf.labourVar)}}>{varSigned(jf.labourVar)}</span>
                     {" · "}Parts <span style={{fontFamily:MONO,color:varCol(jf.partsVar)}}>{varSigned(jf.partsVar)}</span>
                   </div>
                 </div>
@@ -5975,12 +6427,12 @@ export default function App() {
                               {tOpen && tf && (
                                 <div style={{margin:"0 14px 10px 47px",background:CARD,border:`1px solid ${BDR}`,borderRadius:9,padding:"10px 12px"}}>
                                   {!tf.ready ? (
-                                    <div style={{fontSize:11,color:MUTED}}>Complete — the final cost shows here once the hours are finalised.</div>
+                                    <div style={{fontSize:11,color:MUTED}}>Complete — the final cost will show here shortly.</div>
                                   ) : (<>
                                     <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:7}}>FINAL COST VS QUOTE</div>
                                     {[
-                                      ["Labour", `${hrsTxt(tf.hrs)} vs ${hrsTxt(tf.quotedHrs)}`, tf.quotedLabour, tf.labour, tf.labourVar],
-                                      ["Parts", tf.pendingParts ? `${tf.pendingParts} still at quote` : (tf.extras ? "incl extra parts" : ""), tf.quotedParts, tf.parts, tf.partsVar],
+                                      ["Labour", "", tf.quotedLabour, tf.labour, tf.labourVar],
+                                      ["Parts", "", tf.quotedParts, tf.parts, tf.partsVar],
                                     ].filter(r => r[0]==="Labour" || r[2] || r[3]).map(([label, sub, qv, fv, v]) => (
                                       <div key={label} style={{display:"grid",gridTemplateColumns:"1fr auto auto",gap:10,alignItems:"baseline",padding:"4px 0",borderBottom:`1px solid ${BDR}`}}>
                                         <div><span style={{fontSize:12,color:TXT}}>{label}</span>{sub && <span style={{fontSize:10,color:MUTED}}> · {sub}</span>}</div>
@@ -6056,41 +6508,6 @@ export default function App() {
               </div>
             </div>
           )}
-
-        {tab==="progress" && (() => {
-          // Work stranded by a template revision — see orphanedWork().
-          const orphans = orphanedWork(selJob);
-          if (!orphans.length) return null;
-          return (
-            <div style={{padding:"14px 14px 0"}}>
-              <div style={{background:"rgba(245,165,36,.08)",border:"1px solid #F5A524",borderRadius:12,padding:"13px 14px"}}>
-                <div style={{fontFamily:FF,fontSize:12,fontWeight:800,color:"#F5A524",letterSpacing:1,marginBottom:5}}>
-                  {orphans.length} JOB NUMBER{orphans.length===1?"":"S"} NO LONGER ON THE SHEET
-                </div>
-                <div style={{fontSize:11,color:MUTED,lineHeight:1.5,marginBottom:11}}>
-                  These were renumbered in the latest revision. The work logged against them is
-                  still saved but isn't showing anywhere — move it to the right job number.
-                </div>
-                {orphans.map(o => (
-                  <div key={o.taskId} style={{background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"10px 12px",marginBottom:7,display:"flex",alignItems:"center",gap:10}}>
-                    <div style={{flex:1,minWidth:0}}>
-                      <span style={{fontFamily:MONO,fontSize:13,color:"#F5A524"}}>{o.taskId}</span>
-                      <div style={{fontSize:11,color:MUTED,marginTop:2}}>
-                        {[o.photos?`${o.photos} photo${o.photos===1?"":"s"}`:null,
-                          o.entries?`${o.entries} entr${o.entries===1?"y":"ies"} (${o.hours}h)`:null,
-                          o.status?`marked ${String(o.status).replace("_"," ")}`:null].filter(Boolean).join(" · ")}
-                      </div>
-                    </div>
-                    <button onClick={()=>setRemapFrom(o)}
-                      style={{background:Y,border:"none",borderRadius:7,padding:"8px 12px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:BG,flexShrink:0}}>
-                      MOVE
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })()}
 
           {tab==="progress" && (
             <div style={{padding:"16px 14px"}}>
@@ -7377,7 +7794,7 @@ export default function App() {
                 onOpen={it => setStockItemModal({itemId: it.id})}
                 onNew={() => setStockItemModal({isNew: true})}
                 onReceive={() => setStockMoveModal({mode: "in"})}
-                onIssue={() => setStockMoveModal({mode: "out"})}
+                onIssue={() => setAllocModal({})}
                 onCount={() => setStockMoveModal({mode: "count"})}/>
             </div>
           )}
@@ -7457,12 +7874,29 @@ export default function App() {
             existingKey={(k, selfId) => stockRows.find(r => r.item.id !== selfId && pnKeyOf(r.item.pn) === k)?.item}
             onSave={async data => { const id = await saveStockItem(row?.item.id || null, data); if (stockItemModal.isNew) setStockItemModal(null); return id; }}
             onDelete={() => deleteStockItem(row.item.id)}
-            onMove={mode => setStockMoveModal({mode, itemId: row.item.id})}
+            onMove={mode => mode === "out" ? setAllocModal({preset: [{itemId: row.item.id, qty: 1}]}) : setStockMoveModal({mode, itemId: row.item.id})}
             onDeleteMove={deleteStockMove}
             jobLabel={stockJobLabel}
             onClose={() => setStockItemModal(null)}/>
         );
       })()}
+      {bulkReceive && (() => {
+        const jid = bulkReceive.jobId;
+        const waiting = partsLines(jid).filter(l => l.status === "ordered" && l.kind !== "orphan" && !l.track?.receivedToStock)
+          .sort((a, b) => (a.sId ?? 999) - (b.sId ?? 999));
+        return (
+          <BulkReceive key={jid} title={jobName(jid)} lines={waiting} sections={secsOf(jid)} invoice={partsUI.invoice}
+            onSubmit={data => receiveOrderedToStock(jid, data)} onClose={() => setBulkReceive(null)}/>
+        );
+      })()}
+      {allocModal && (
+        <AllocateParts key={`${allocModal.jobId || ""}-${allocModal.taskId || ""}`}
+          jobs={jobs} jobName={jobName} jobId={allocModal.jobId} taskId={allocModal.taskId} preset={allocModal.preset}
+          rows={stockRows} tasksForJob={tasksForJob} secsForJob={secsOf} quoteLinesFor={partsLines}
+          onAllocate={allocateParts}
+          onAddNotInStock={(jid, tid) => { setAllocModal(null); setEditPart({jobId: jid, isNew: true, taskId: tid}); }}
+          onClose={() => setAllocModal(null)}/>
+      )}
       {stockMoveModal && (
         <StockMoveEditor key={`${stockMoveModal.mode}-${stockMoveModal.itemId || ""}`} mode={stockMoveModal.mode}
           item={stockMoveModal.itemId ? stockItems[stockMoveModal.itemId] : null}
@@ -7474,7 +7908,7 @@ export default function App() {
       {editPart && (() => {
         const jid = editPart.jobId;
         return (
-          <PartEditor key={editPart.line?.docId || "new"} line={editPart.line} isNew={!!editPart.isNew}
+          <PartEditor key={editPart.line?.docId || "new"} line={editPart.line} isNew={!!editPart.isNew} presetTask={editPart.taskId}
             tasks={tasksForJob(jid)} sections={secsOf(jid)} invoice={partsUI.invoice}
             onSave={data => savePartLine(jid, editPart.line, data)}
             onDelete={editPart.line && (editPart.line.kind==="extra" || editPart.line.track)
