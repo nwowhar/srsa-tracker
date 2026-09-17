@@ -3042,6 +3042,9 @@ export default function App() {
   const [stockMoveModal, setStockMoveModal] = useState(null); // {mode, itemId?, defaults?}
   const [allocModal, setAllocModal]   = useState(null);  // {jobId?, taskId?, preset?} — parts used from stock
   const [bulkReceive, setBulkReceive] = useState(null);  // {jobId} — ordered parts arriving into stock
+  const [creamPeriod, setCreamPeriod] = useState("all"); // CREAM report: all | month | last
+  const [creamJob, setCreamJob]       = useState("all"); // CREAM report: all | jobId
+  const [creamOpen, setCreamOpen]     = useState(null);  // CREAM report: expanded machine
   const [invites, setInvites]         = useState([]);    // pre-approved signups: {email, role, jobIds}
   const [clients, setClients]         = useState([]);    // customer list for job cards
   const [machines, setMachines]       = useState([]);    // each client's fleet
@@ -3453,6 +3456,53 @@ export default function App() {
   const creamHrs   = (jid, tid) => Number(cream[eKey(jid, tid)]?.hours) || 0;
   const creamCost  = (jid, tid) => creamHrs(jid, tid) * (Number(cream[eKey(jid, tid)]?.rate) || getLR(jid));
   const creamAvail = (jid, t) => Math.max(0, Math.round(((Number(t.est) || 0) - logged(jid, t.id)) * 100) / 100);
+  // A job's cream is shared between the people who worked it, in proportion to
+  // the hours each logged on it. Entries are matched to accounts by id, or by
+  // name for older entries, so one person isn't counted twice.
+  const creamSplit = (jid, tid) => {
+    const c = creamHrs(jid, tid);
+    if (!(c > 0)) return [];
+    const rate = Number(cream[eKey(jid, tid)]?.rate) || getLR(jid);
+    const by = {};
+    getEnt(jid, tid).forEach(e => {
+      const h = Number(e.hours) || 0;
+      if (!(h > 0)) return;
+      const nm = String(e.worker || "").trim();
+      const tech = (e.workerId && users.find(u => u.id === e.workerId)) || (nm && users.find(u => (u.name || "").trim().toLowerCase() === nm.toLowerCase()));
+      const key = tech ? `id:${tech.id}` : `n:${nm.toLowerCase() || "unassigned"}`;
+      if (!by[key]) by[key] = {key, name: tech?.name || nm || "Unassigned", hours: 0};
+      by[key].hours += h;
+    });
+    const tot = Object.values(by).reduce((s, w) => s + w.hours, 0);
+    if (!tot) return [{key: "n:unassigned", name: "No hours logged", hours: 0, share: 1, creamH: c, value: c * rate}];
+    return Object.values(by).map(w => ({...w, share: w.hours / tot, creamH: c * w.hours / tot, value: c * rate * w.hours / tot}))
+      .sort((a, b) => b.hours - a.hours);
+  };
+  // Cream across machines for a period (by the date cream was added), with the
+  // per-person totals.
+  const creamReport = (jobIds, from, to) => {
+    const workers = {}, out = [];
+    let hours = 0, value = 0, count = 0;
+    jobIds.forEach(jid => {
+      const rows = tasksForJob(jid).map(t => {
+        const c = creamHrs(jid, t.id);
+        if (!(c > 0)) return null;
+        const d = cream[eKey(jid, t.id)]?.date || "";
+        if ((from && d < from) || (to && d > to)) return null;
+        const split = creamSplit(jid, t.id);
+        split.forEach(w => {
+          const W = workers[w.key] || (workers[w.key] = {key: w.key, name: w.name, creamH: 0, value: 0, jobs: 0, hoursWorked: 0});
+          W.creamH += w.creamH; W.value += w.value; W.jobs++; W.hoursWorked += w.hours;
+        });
+        return {t, c, value: creamCost(jid, t.id), date: d, split, logged: logged(jid, t.id)};
+      }).filter(Boolean);
+      if (!rows.length) return;
+      const jh = rows.reduce((s, r) => s + r.c, 0), jv = rows.reduce((s, r) => s + r.value, 0);
+      hours += jh; value += jv; count += rows.length;
+      out.push({jid, rows, hours: jh, value: jv});
+    });
+    return {jobs: out.sort((a, b) => b.value - a.value), workers: Object.values(workers).sort((a, b) => b.value - a.value), hours, value, count};
+  };
   const saveCream = async (jid, tid, hours) => {
     const h = Math.round((Number(hours) || 0) * 100) / 100;
     if (!(h > 0)) { await deleteDoc(doc(db, "cream", eKey(jid, tid))); return; }
@@ -4230,6 +4280,7 @@ export default function App() {
   const assignOf = (jobId, taskId) => assigns.find(a => a.jobId===jobId && a.taskId===taskId);
   const goGantt = () => { setStack([]); setView("gantt"); setSelJob(null); setSelSec(null); setSelTask(null); };
   const goStock = () => { setStack([]); setView("stock"); setSelJob(null); setSelSec(null); setSelTask(null); };
+  const goCream = jid => { setStack([]); setView("cream"); setCreamJob(jid || "all"); setCreamOpen(jid || null); setSelJob(null); setSelSec(null); setSelTask(null); };
 
   const goCards = () => { setStack([]); setView("cards"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
@@ -5921,6 +5972,12 @@ export default function App() {
                       <div style={{flex:1,height:1,background:BDR}}/>
                       <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{o.cream.toFixed(1)}h added · {money0(o.creamCost)}</span>
                     </div>
+                    {o.cream>0 && (
+                      <button onClick={()=>goCream(selJob)}
+                        style={{width:"100%",marginBottom:10,background:CARD,border:`1px solid ${BDR2}`,borderRadius:9,padding:"9px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:1}}>
+                        SEE HOW THIS MACHINE'S CREAM SPLITS BETWEEN WORKERS →
+                      </button>
+                    )}
                     <div style={{fontSize:11,color:MUTED,lineHeight:1.5,marginBottom:10}}>
                       Jobs that came in under their planned hours. Add the difference as cream before billing — it's billed on top of the hours logged.
                     </div>
@@ -5941,6 +5998,11 @@ export default function App() {
                           <div style={{fontSize:11,color:MUTED,marginTop:3}}>
                             {t.est}h planned · {l.toFixed(1)}h logged · <span style={{color:a>0?GRN:MUTED}}>{a}h under</span>{!done && <span style={{color:AMBER}}> · not marked complete</span>}
                           </div>
+                          {c>0 && (
+                            <div style={{fontSize:10,color:MUTED,marginTop:3}}>
+                              {creamSplit(selJob, t.id).map(w => `${w.name} ${money0(w.value)}`).join(" · ")}
+                            </div>
+                          )}
                         </div>
                         {c>0 ? (
                           <button onClick={()=>setEditCream({jobId:selJob, taskId:t.id})} style={{...pBtn(Y),textAlign:"right",lineHeight:1.3}}>
@@ -7583,6 +7645,10 @@ export default function App() {
               <Stat label="NOT YET ADDED" value={`${creamTotals.availHrs.toFixed(1)}h`} col={creamTotals.availHrs>0?GRN:MUTED}
                     sub={creamTotals.availJobs ? `${money(creamTotals.availVal)} on ${creamTotals.availJobs} completed job${creamTotals.availJobs===1?"":"s"}` : "nothing waiting"}/>
             </div>
+            <button onClick={()=>goCream(dashJob==="all" ? null : dashJob)}
+              style={{width:"100%",marginTop:8,background:CARD,border:`1px solid ${BDR2}`,borderRadius:8,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:Y}}>
+              CREAM PER MACHINE & SPLIT BETWEEN WORKERS →
+            </button>
           </Section>
 
           {dashJob==="all" && stockTotals.items>0 && (
@@ -7793,6 +7859,128 @@ export default function App() {
           {view==="users"     && <AdminUsersView/>}
           {view==="cards"     && <AdminCardsView/>}
           {view==="gantt"     && <GanttView/>}
+          {view==="cream"     && (() => {
+            const pad = n => String(n).padStart(2,"0");
+            const now = new Date();
+            const ym = (y, m) => `${y}-${pad(m+1)}`;
+            const monthRange = off => {
+              const d = new Date(now.getFullYear(), now.getMonth() + off, 1);
+              const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+              return [`${ym(d.getFullYear(), d.getMonth())}-01`, `${ym(d.getFullYear(), d.getMonth())}-${pad(last)}`, d.toLocaleString("en-AU", {month: "long", year: "numeric"})];
+            };
+            const [from, to, periodName] = creamPeriod === "month" ? monthRange(0) : creamPeriod === "last" ? monthRange(-1) : ["", "", "all time"];
+            const ids = creamJob === "all" ? jobs.map(j => j.id) : [creamJob];
+            const rep = creamReport(ids, from, to);
+            const maxW = Math.max(1, ...rep.workers.map(w => w.value));
+            const chip = (v, l) => (
+              <button key={v} onClick={()=>setCreamPeriod(v)}
+                style={{flex:1,background:creamPeriod===v?Y:CARD2,border:`1px solid ${creamPeriod===v?Y:BDR2}`,borderRadius:8,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,letterSpacing:.5,color:creamPeriod===v?BG:MUTED}}>{l}</button>
+            );
+            return (
+              <div>
+                <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+                      <ChevronLeft size={18} color={TXT}/>
+                    </button>
+                    <div style={{flex:1}}>
+                      <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:Y}}>CREAM</div>
+                      <div style={{fontSize:11,color:MUTED}}>Cream per machine, and how it splits between the people who did the work</div>
+                    </div>
+                  </div>
+                  <select value={creamJob} onChange={e=>{ setCreamJob(e.target.value); setCreamOpen(e.target.value==="all"?null:e.target.value); }}
+                    style={{width:"100%",marginTop:12,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",appearance:"none"}}>
+                    <option value="all">All machines</option>
+                    {jobs.map(j => <option key={j.id} value={j.id}>{jobName(j.id)}</option>)}
+                  </select>
+                  <div style={{display:"flex",gap:6,marginTop:8}}>
+                    {chip("all","ALL TIME")}{chip("month","THIS MONTH")}{chip("last","LAST MONTH")}
+                  </div>
+                </div>
+
+                <div style={{padding: isDesktop?"16px 24px 40px":"14px 14px 40px"}}>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:16}}>
+                    {[["CREAM HOURS", `${rep.hours.toFixed(1)}h`, Y], ["CREAM VALUE", money0(rep.value), Y], ["JOBS CREAMED", `${rep.count}`, TXT]].map(([l,v,c]) => (
+                      <div key={l} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 11px"}}>
+                        <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>{l}</div>
+                        <div style={{fontFamily:MONO,fontSize:18,color:c,marginTop:3}}>{v}</div>
+                        <div style={{fontSize:10,color:MUTED,marginTop:2}}>{periodName} · +GST</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                    <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:2}}>SPLIT BETWEEN WORKERS</span>
+                    <div style={{flex:1,height:1,background:BDR}}/>
+                  </div>
+                  {rep.workers.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"18px 0"}}>No cream {creamPeriod==="all"?"added yet":`added in ${periodName}`}.</div>}
+                  {rep.workers.map(w => (
+                    <div key={w.key} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 12px",marginBottom:6}}>
+                      <div style={{display:"flex",alignItems:"baseline",gap:10}}>
+                        <span style={{flex:1,fontSize:14,fontWeight:700,color:w.name==="No hours logged"?AMBER:TXT}}>{w.name}</span>
+                        <span style={{fontFamily:MONO,fontSize:16,color:Y}}>{money0(w.value)}</span>
+                      </div>
+                      <div style={{height:5,background:CARD2,borderRadius:3,overflow:"hidden",margin:"6px 0 5px"}}>
+                        <div style={{width:`${w.value/maxW*100}%`,height:"100%",background:Y}}/>
+                      </div>
+                      <div style={{fontSize:11,color:MUTED}}>
+                        {w.creamH.toFixed(1)}h cream · {rep.value ? Math.round(w.value/rep.value*100) : 0}% of the total · worked {w.hoursWorked.toFixed(1)}h across {w.jobs} creamed job{w.jobs===1?"":"s"}
+                      </div>
+                    </div>
+                  ))}
+
+                  <div style={{display:"flex",alignItems:"center",gap:8,margin:"20px 0 8px"}}>
+                    <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:2}}>BY MACHINE</span>
+                    <div style={{flex:1,height:1,background:BDR}}/>
+                  </div>
+                  {rep.jobs.map(J => {
+                    const open = creamOpen === J.jid;
+                    return (
+                      <div key={J.jid} style={{background:CARD,border:`1px solid ${open?Y:BDR}`,borderRadius:11,marginBottom:8,overflow:"hidden"}}>
+                        <button onClick={()=>setCreamOpen(open?null:J.jid)}
+                          style={{display:"flex",width:"100%",textAlign:"left",alignItems:"baseline",gap:10,background:"none",border:"none",padding:"12px 14px",cursor:"pointer"}}>
+                          <span style={{flex:1,fontFamily:FF,fontSize:15,fontWeight:700,color:TXT}}>{jobName(J.jid)}</span>
+                          <span style={{fontFamily:MONO,fontSize:12,color:MUTED}}>{J.hours.toFixed(1)}h</span>
+                          <span style={{fontFamily:MONO,fontSize:15,color:Y}}>{money0(J.value)}</span>
+                        </button>
+                        {open && (
+                          <div style={{borderTop:`1px solid ${BDR}`,background:CARD2,padding:"4px 14px 10px"}}>
+                            {J.rows.map(r => (
+                              <div key={r.t.id} style={{padding:"9px 0",borderBottom:`1px solid ${BDR}`}}>
+                                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                                  <span style={{fontFamily:MONO,fontSize:10,color:Y,flexShrink:0}}>{r.t.id}</span>
+                                  <span style={{flex:1,minWidth:0,fontSize:12,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{r.t.desc}</span>
+                                  <span style={{fontFamily:MONO,fontSize:12,color:Y,whiteSpace:"nowrap"}}>{r.c}h · {money0(r.value)}</span>
+                                </div>
+                                <div style={{fontSize:10,color:MUTED,marginTop:2,paddingLeft:2}}>
+                                  {r.t.est}h planned · {r.logged.toFixed(1)}h worked{r.date ? ` · added ${fmtDMY(r.date)}` : ""}
+                                </div>
+                                <div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:5}}>
+                                  {r.split.map(w => (
+                                    <span key={w.key} style={{fontSize:11,color:TXT,background:CARD,border:`1px solid ${BDR2}`,borderRadius:6,padding:"3px 7px"}}>
+                                      {w.name} <span style={{fontFamily:MONO,color:Y}}>{money0(w.value)}</span>
+                                      <span style={{color:MUTED}}> ({w.creamH.toFixed(1)}h)</span>
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                            <button onClick={()=>{ setJobTab("costings"); go("job", {job: J.jid}); }}
+                              style={{width:"100%",marginTop:8,background:"none",border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,letterSpacing:1,color:Y}}>
+                              OPEN THIS MACHINE'S COSTINGS →
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <div style={{fontSize:10,color:MUTED,lineHeight:1.6,marginTop:12}}>
+                    Each job's cream is shared between the people who logged hours on it, in proportion to their hours. Cream counts in the period it was added.
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
           {view==="stock"     && (
             <div>
               <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`,display:"flex",alignItems:"center",gap:10}}>
