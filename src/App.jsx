@@ -6288,9 +6288,16 @@ export default function App() {
     // Saving / over-budget on completed jobs. Negative variance = saving.
     const plines = partsLines(job.id);
     const jf = jobFinal(job.id);
-    const varCol = v => v < -0.5 ? GRN : v > 0.5 ? RED : MUTED;
-    const varTxt = v => Math.abs(v) < 0.5 ? "on budget" : v < 0 ? `${money(-v)} saving` : `${money(v)} over`;
-    const varSigned = v => Math.abs(v) < 0.5 ? "$0" : `${v < 0 ? "−" : "+"}${money(Math.abs(v))}`;
+    // Customers see plain dollar figures with a word — no arrows, no plus/minus.
+    const outcome = v => Math.abs(v) < 0.5 ? {word: "On budget", amt: "", col: MUTED}
+                      : v < 0 ? {word: "Saving", amt: money(-v), col: GRN} : {word: "Over budget", amt: money(v), col: RED};
+    const varTxt = v => { const o = outcome(v); return o.amt ? `${o.word} ${o.amt}` : o.word; };
+    const valueTile = (label, value, col = TXT, big = false) => (
+      <div style={{background:CARD2,borderRadius:8,padding:"9px 10px",minWidth:0}}>
+        <div style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:3}}>{label}</div>
+        <div style={{fontFamily:MONO,fontSize:big?18:15,color:col,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{value}</div>
+      </div>
+    );
     const tasksIn = sid => [...tasksOf(job.id).filter(t => t.sId===sid && isIn(job.id,t)),
                             ...(customTasks[job.id]||[]).filter(t => t.sId===sid)]
                            .sort((a,b)=>a.id.localeCompare(b.id));
@@ -6351,9 +6358,11 @@ export default function App() {
                   <span style={{fontFamily:MONO,fontSize:26,color:Y}}>{money(jc.total)}</span>
                   <span style={{fontSize:11,color:MUTED}}>+GST</span>
                 </div>
-                <div style={{fontSize:11,color:MUTED,marginTop:7,lineHeight:1.6}}>
-                  {money(jc.labour)} labour + {money(jc.parts)} parts · {jc.count} jobs · all figures +GST
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:10}}>
+                  {valueTile("LABOUR", money(jc.labour))}
+                  {valueTile("PARTS", money(jc.parts))}
                 </div>
+                <div style={{fontSize:10,color:MUTED,marginTop:8}}>{jc.count} jobs · all figures +GST</div>
               </div>
 
               {jf.complete>0 && (
@@ -6362,13 +6371,10 @@ export default function App() {
                     <span style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5}}>COMPLETED JOBS · {jf.complete} OF {jf.jobs}</span>
                     <span style={{fontSize:10,color:MUTED}}>+GST</span>
                   </div>
-                  <div style={{fontFamily:MONO,fontSize:24,color:varCol(jf.variance),marginTop:6}}>{varTxt(jf.variance)}</div>
-                  <div style={{fontSize:12,color:TXT,marginTop:6}}>
-                    Quoted {money(jf.quoted)} → final {money(jf.final)}
-                  </div>
-                  <div style={{fontSize:11,color:MUTED,marginTop:4,lineHeight:1.6}}>
-                    Labour <span style={{fontFamily:MONO,color:varCol(jf.labourVar)}}>{varSigned(jf.labourVar)}</span>
-                    {" · "}Parts <span style={{fontFamily:MONO,color:varCol(jf.partsVar)}}>{varSigned(jf.partsVar)}</span>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
+                    {valueTile("QUOTED", money(jf.quoted))}
+                    {valueTile("FINAL", money(jf.final))}
+                    {(() => { const o = outcome(jf.variance); return valueTile(o.word.toUpperCase(), o.amt || "—", o.col, true); })()}
                   </div>
                 </div>
               )}
@@ -6390,14 +6396,9 @@ export default function App() {
                       <div style={{display:"flex",justifyContent:"space-between",marginTop:4,gap:8}}>
                         <span style={{fontSize:11,color:MUTED}}>{c.count} job{c.count===1?"":"s"} · {c.done} complete</span>
                         {sf.complete>0
-                          ? <span style={{fontFamily:MONO,fontSize:12,color:varCol(sf.variance),whiteSpace:"nowrap"}}>{varTxt(sf.variance)}</span>
+                          ? <span style={{fontFamily:MONO,fontSize:12,color:outcome(sf.variance).col,whiteSpace:"nowrap"}}>{varTxt(sf.variance)}</span>
                           : <span style={{fontSize:10,color:MUTED}}>+GST</span>}
                       </div>
-                      {sf.complete>0 && (
-                        <div style={{fontSize:10,color:MUTED,marginTop:3,textAlign:"right"}}>
-                          on {sf.sectionDone ? "the whole section" : `${sf.complete} completed job${sf.complete===1?"":"s"}`}: labour {varSigned(sf.labourVar)} · parts {varSigned(sf.partsVar)}
-                        </div>
-                      )}
                     </button>
 
                     {isOpen && (
@@ -6419,7 +6420,7 @@ export default function App() {
                                 </div>
                                 <div style={{display:"flex",gap:8,marginTop:4,paddingLeft:47,alignItems:"center",flexWrap:"wrap"}}>
                                   {done && <HChip label="COMPLETE" col={BG} bg={GRN}/>}
-                                  {tf?.ready && <span style={{fontFamily:MONO,fontSize:11,color:varCol(tf.variance)}}>{varTxt(tf.variance)}</span>}
+                                  {tf?.ready && <span style={{fontFamily:MONO,fontSize:11,color:outcome(tf.variance).col}}>{varTxt(tf.variance)}</span>}
                                   {tp.length>0 && <span style={{fontSize:10,color:MUTED}}>{tp.length} part{tp.length===1?"":"s"} — tap to see</span>}
                                   {tf?.ready && tp.length===0 && <span style={{fontSize:10,color:MUTED}}>tap for breakdown</span>}
                                 </div>
@@ -6429,22 +6430,35 @@ export default function App() {
                                   {!tf.ready ? (
                                     <div style={{fontSize:11,color:MUTED}}>Complete — the final cost will show here shortly.</div>
                                   ) : (<>
-                                    <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5,marginBottom:7}}>FINAL COST VS QUOTE</div>
-                                    {[
-                                      ["Labour", "", tf.quotedLabour, tf.labour, tf.labourVar],
-                                      ["Parts", "", tf.quotedParts, tf.parts, tf.partsVar],
-                                    ].filter(r => r[0]==="Labour" || r[2] || r[3]).map(([label, sub, qv, fv, v]) => (
-                                      <div key={label} style={{display:"grid",gridTemplateColumns:"1fr auto auto",gap:10,alignItems:"baseline",padding:"4px 0",borderBottom:`1px solid ${BDR}`}}>
-                                        <div><span style={{fontSize:12,color:TXT}}>{label}</span>{sub && <span style={{fontSize:10,color:MUTED}}> · {sub}</span>}</div>
-                                        <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{money(qv)} → {money(fv)}</span>
-                                        <span style={{fontFamily:MONO,fontSize:12,color:varCol(v),minWidth:62,textAlign:"right"}}>{varSigned(v)}</span>
-                                      </div>
-                                    ))}
-                                    <div style={{display:"grid",gridTemplateColumns:"1fr auto auto",gap:10,alignItems:"baseline",padding:"6px 0 0"}}>
-                                      <span style={{fontSize:12,color:TXT,fontWeight:700}}>Total</span>
-                                      <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{money(tf.quoted)} → {money(tf.final)}</span>
-                                      <span style={{fontFamily:MONO,fontSize:13,color:varCol(tf.variance),minWidth:62,textAlign:"right",fontWeight:700}}>{varSigned(tf.variance)}</span>
-                                    </div>
+                                    {(() => {
+                                      const cols = "1fr 1fr 1fr 1.25fr";
+                                      const cell = {fontFamily:MONO,fontSize:12,textAlign:"right",whiteSpace:"nowrap"};
+                                      const rowsT = [["Labour", tf.quotedLabour, tf.labour, tf.labourVar],
+                                                     ["Parts",  tf.quotedParts,  tf.parts,  tf.partsVar]].filter(r => r[0]==="Labour" || r[1] || r[2]);
+                                      const res = (v, bold) => { const o = outcome(v); return (
+                                        <span style={{...cell,color:o.col,fontWeight:bold?700:400}}>{o.amt ? <><span style={{fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.3}}>{o.word==="Saving"?"SAVED":"OVER"} </span>{o.amt}</> : <span style={{fontFamily:FF,fontSize:10}}>ON BUDGET</span>}</span>
+                                      ); };
+                                      return (<>
+                                        <div style={{display:"grid",gridTemplateColumns:cols,gap:8,paddingBottom:5,borderBottom:`1px solid ${BDR}`}}>
+                                          <span/>
+                                          {["QUOTED","FINAL",""].map((h,i)=><span key={i} style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1.2,textAlign:"right"}}>{h}</span>)}
+                                        </div>
+                                        {rowsT.map(([label, qv, fv, v]) => (
+                                          <div key={label} style={{display:"grid",gridTemplateColumns:cols,gap:8,alignItems:"baseline",padding:"6px 0",borderBottom:`1px solid ${BDR}`}}>
+                                            <span style={{fontSize:12,color:TXT}}>{label}</span>
+                                            <span style={{...cell,color:MUTED}}>{money(qv)}</span>
+                                            <span style={{...cell,color:TXT}}>{money(fv)}</span>
+                                            {res(v)}
+                                          </div>
+                                        ))}
+                                        <div style={{display:"grid",gridTemplateColumns:cols,gap:8,alignItems:"baseline",padding:"7px 0 0"}}>
+                                          <span style={{fontSize:12,color:TXT,fontWeight:700}}>Total</span>
+                                          <span style={{...cell,color:MUTED}}>{money(tf.quoted)}</span>
+                                          <span style={{...cell,color:TXT,fontWeight:700}}>{money(tf.final)}</span>
+                                          {res(tf.variance, true)}
+                                        </div>
+                                      </>);
+                                    })()}
                                   </>)}
                                 </div>
                               )}
