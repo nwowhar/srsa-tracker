@@ -246,10 +246,11 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
     ["ordered",  "ORDERED",       l => l.status === "ordered"],
     ["invoiced", "INVOICED",      l => l.status === "invoiced"],
     ["changed",  "PRICE CHANGED", l => l.status === "invoiced" && Math.abs(l.variance) >= 0.005],
+    ["tbc",      "PRICE TBC",     l => l.priceTbc && l.status !== "invoiced"],
     ["extra",    "NOT ON QUOTE",  l => l.kind === "extra"],
   ];
   const qq = q.trim().toLowerCase();
-  const matchQ = l => !qq || `${l.taskId} ${l.desc} ${l.pn} ${l.supplier} ${l.invoiceNo}`.toLowerCase().includes(qq);
+  const matchQ = l => !qq || `${l.taskId} ${l.desc} ${l.pn} ${l.alt} ${l.sheetNote} ${l.supplier} ${l.invoiceNo}`.toLowerCase().includes(qq);
   const test = (FILTERS.find(f => f[0] === filter) || FILTERS[0])[2];
   const shown = lines.filter(l => test(l) && matchQ(l));
 
@@ -352,7 +353,7 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
               </div>
               {g.lines.map(l => {
                 const st = PART_STATES[l.status] || PART_STATES.none;
-                const stock = l.pn ? stockOf(l) : null;
+                const stock = (l.pn || l.alt) ? stockOf(l) : null;
                 const changed = l.status === "invoiced" && l.kind !== "extra" && Math.abs(l.variance) >= 0.005;
                 return (
                   <div key={l.docId} style={{background: CARD, border: `1px solid ${changed ? "rgba(255,76,76,.35)" : BDR}`, borderRadius: 10, padding: "10px 12px", marginBottom: 6}}>
@@ -362,14 +363,25 @@ const PartsPanel = ({job, lines, summary, sections, onOrdered, onConfirm, onEdit
                         <div style={{flex: 1, minWidth: 0}}>
                           <div style={{fontSize: 13, color: TXT, fontWeight: 600, lineHeight: 1.3}}>{l.desc || l.pn || "Part"}</div>
                           <div style={{fontSize: 10, color: MUTED, marginTop: 2, fontFamily: MONO}}>
-                            {l.pn && l.pn !== l.desc ? `${l.pn} · ` : ""}{l.kind === "sundry" ? "freight / consumables · " : ""}{l.kind === "extra" ? "not on quote · " : ""}
+                            {l.pn && l.pn !== l.desc ? `${l.pn} · ` : ""}{l.alt ? `alt ${l.alt} · ` : ""}{l.kind === "sundry" ? "freight / consumables · " : ""}{l.kind === "extra" ? "not on quote · " : ""}
                             {l.kind === "extra" ? `${l.actualQty} × ${money2(l.actualUnit)}` : l.noPrice ? `${l.qty} × no quoted price` : `${l.qty} × ${money2(l.price)} = ${money2(l.quoted)}`}
                           </div>
                         </div>
-                        <span style={{fontFamily: FF, fontSize: 9, fontWeight: 800, letterSpacing: .5, color: st.col, border: `1px solid ${st.col}`, borderRadius: 5, padding: "2px 6px", whiteSpace: "nowrap", flexShrink: 0}}>
-                          {changed ? "PRICE CHANGED" : st.label}
-                        </span>
+                        <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3, flexShrink: 0}}>
+                          <span style={{fontFamily: FF, fontSize: 9, fontWeight: 800, letterSpacing: .5, color: st.col, border: `1px solid ${st.col}`, borderRadius: 5, padding: "2px 6px", whiteSpace: "nowrap"}}>
+                            {changed ? "PRICE CHANGED" : (l.purchased && l.status === "ordered" && !l.track) ? "PURCHASED" : st.label}
+                          </span>
+                          {l.priceTbc && l.status !== "invoiced" && (
+                            <span style={{fontFamily: FF, fontSize: 9, fontWeight: 800, letterSpacing: .5, color: AMBER, whiteSpace: "nowrap"}}>PRICE TBC</span>
+                          )}
+                        </div>
                       </div>
+                      {(l.sheetNote || (l.purchased && !l.track)) && (
+                        <div style={{fontSize: 11, color: MUTED, marginTop: 5}}>
+                          {l.purchased && !l.track ? "Already purchased (per job sheet) — confirm the invoice price" : ""}
+                          {l.purchased && !l.track && l.sheetNote ? " · " : ""}{l.sheetNote}
+                        </div>
+                      )}
                       {(l.status === "invoiced" || (l.kind === "extra" && l.status !== "none")) && (
                         <div style={{display: "flex", alignItems: "baseline", gap: 8, marginTop: 6, fontSize: 11}}>
                           <span style={{color: MUTED, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>
@@ -463,8 +475,14 @@ const PartEditor = ({line, isNew, tasks, sections, invoice, onSave, onDelete, on
             <div style={{fontFamily: FF, fontSize: 20, fontWeight: 800, color: TXT}}>{isNew ? "PART NOT ON QUOTE" : (line.desc || line.pn)}</div>
             {!extra && (
               <div style={{fontSize: 11, color: MUTED, marginTop: 3, fontFamily: MONO}}>
-                {line.taskId ? `${line.taskId} · ` : ""}{line.pn && line.pn !== line.desc ? `${line.pn} · ` : ""}
+                {line.taskId ? `${line.taskId} · ` : ""}{line.pn && line.pn !== line.desc ? `${line.pn} · ` : ""}{line.alt ? `alt ${line.alt} · ` : ""}
                 quoted {line.noPrice ? "— no price" : `${line.qty} × ${money2(line.price)} = ${money2(line.quoted)}`}
+                {line.priceTbc && <span style={{color: AMBER, fontFamily: FF, fontWeight: 800}}> · PRICE TBC</span>}
+                {(line.sheetNote || line.purchased) && (
+                  <div style={{fontFamily: "inherit", color: MUTED, marginTop: 3}}>
+                    {[line.purchased ? "Already purchased (job sheet)" : "", line.sheetNote].filter(Boolean).join(" · ")}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -844,7 +862,7 @@ const StockMoveEditor = ({mode, item: item0, rows, jobs, jobName, tasksForJob, s
   };
   // On issue: quote lines on the chosen job with the same part number.
   const key = pnKeyOf(item?.pn || npn);
-  const quoteMatches = mode === "out" && jobId && key ? quoteLinesFor(jobId).filter(l => l.kind !== "extra" && l.kind !== "orphan" && pnKeyOf(l.pn) === key) : [];
+  const quoteMatches = mode === "out" && jobId && key ? quoteLinesFor(jobId).filter(l => l.kind !== "extra" && l.kind !== "orphan" && (pnKeyOf(l.pn) === key || pnKeyOf(l.alt) === key)) : [];
   const effLine = quoteMatches.find(l => l.docId === lineKey) || (lineKey === "none" ? null : (lineKey ? null : quoteMatches[0])) || null;
   const tasks = jobId ? tasksForJob(jobId) : [];
   const secs = jobId ? secsForJob(jobId) : [];
@@ -3127,15 +3145,25 @@ export default function App() {
     const seen = {}, used = new Set(), out = [];
     const nextKey = base => { seen[base] = (seen[base] || 0) + 1; return `${base}__${seen[base]}`; };
     const lineOf = (kind, key, b, t) => {
-      const status = t?.status || "none";
+      // Lines the sheet says were already purchased start as "ordered" until
+      // someone confirms the invoice price (or sets them otherwise).
+      const defaultStatus = b.purchased ? "ordered" : "none";
+      const status = t?.status || defaultStatus;
       const qty = b.qty == null ? 1 : Number(b.qty);
       const price = b.price == null || b.price === "" ? null : Number(b.price);
       const quoted = kind === "extra" ? 0 : (price == null ? 0 : price * qty);
       const actualQty  = t && t.actualQty  != null && t.actualQty  !== "" ? Number(t.actualQty)  : qty;
       const actualUnit = t && t.actualUnit != null && t.actualUnit !== "" ? Number(t.actualUnit) : (price ?? 0);
       const actual = actualQty * actualUnit;
+      // Tidy a few sheet quirks for display only (the key above uses the raw values).
+      let desc = b.desc || "", pn = b.pn || "", sheetNote = b.note || "";
+      if (/^[\d.\-\s]+$/.test(desc) && /[a-z]/i.test(pn)) [desc, pn] = [pn, desc];   // name/number in the wrong columns
+      if (!desc && pn && !/\d/.test(pn)) [desc, pn] = [pn, ""];
+      if (pn && pn === desc) pn = "";
+      if (/per met(er|re)/i.test(pn)) { sheetNote = [sheetNote, "per metre, as required"].filter(Boolean).join(" · "); pn = ""; }
       return {kind, key, docId: t?.id || `${jid}__${key}`, track: t || null,
-        taskId: b.taskId || "", sId: b.sId ?? null, desc: b.desc || "", pn: b.pn || "",
+        taskId: b.taskId || "", sId: b.sId ?? null, desc, pn,
+        alt: b.alt || "", sheetNote, purchased: !!b.purchased, priceTbc: !!b.priceTbc, defaultStatus,
         qty, price, noPrice: kind !== "extra" && price == null, quoted,
         status, actualQty, actualUnit, actual,
         variance: status === "invoiced" ? actual - quoted : 0,
@@ -3147,7 +3175,8 @@ export default function App() {
       const key = nextKey(`q__${p.taskId}__${slugKey(p.pn || p.desc)}`);
       used.add(key);
       out.push(lineOf("quote", key, {taskId: p.taskId, sId: p.sId ?? tasks.find(t => t.id === p.taskId)?.sId,
-        desc: p.desc || p.pn, pn: p.pn, qty: qtyOf(p), price: p.price}, byKey[key]));
+        desc: p.desc || p.pn, pn: p.pn, qty: qtyOf(p), price: p.price,
+        alt: p.alt, note: p.note, purchased: p.purchased, priceTbc: p.priceTbc}, byKey[key]));
     });
     (T.sundries || []).forEach(x => {
       const key = nextKey(`s__${x.sId}__${slugKey(x.desc)}`);
@@ -3188,7 +3217,7 @@ export default function App() {
       else await addDoc(collection(db, "partsTrack"), payload);
       return;
     }
-    if (data.status === "none") { await deleteDoc(doc(db, "partsTrack", line.docId)); return; }
+    if (data.status === "none" && line.defaultStatus === "none") { await deleteDoc(doc(db, "partsTrack", line.docId)); return; }
     await setDoc(doc(db, "partsTrack", line.docId), {
       jobId: jid, kind: line.kind === "orphan" ? (line.track?.kind || "quote") : line.kind, key: line.key,
       taskId: line.taskId, sId: line.sId, desc: line.desc, pn: line.pn,
@@ -5185,7 +5214,7 @@ export default function App() {
           const lines = partsLines(j.id);
           return (
             <PartsPanel job={j} lines={lines} summary={partsSummary(lines)} sections={secsOf(j.id)}
-              stockOf={l => stockByKey(l.pn)}
+              stockOf={l => stockByKey(l.pn) || stockByKey(l.alt)}
               onFromStock={(l, row) => setStockMoveModal({mode: "out", itemId: row.item.id,
                 defaults: {jobId: j.id, taskId: l.taskId, lineDocId: l.docId, qty: l.qty, unitCost: row.stats.avgCost ? Math.round(row.stats.avgCost*100)/100 : undefined}})}
               onOrdered={l => partOrdered(j.id, l)}
