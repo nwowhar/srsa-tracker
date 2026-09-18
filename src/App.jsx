@@ -4284,6 +4284,243 @@ export default function App() {
 
   const goCards = () => { setStack([]); setView("cards"); setSelJob(null); setSelSec(null); setSelTask(null); };
 
+  const clientName   = id => clients.find(c=>c.id===id)?.name || "—";
+  const machineLabel = id => {
+    if (!id) return "Workshop / timesheet";   // no machine on this card
+    const m = machines.find(x=>x.id===id);
+    if (!m) return "—";
+    return [[m.make,m.model].filter(Boolean).join(" "), m.rego, m.serial].filter(Boolean).join(" · ");
+  };
+  // ── Job cards ──
+  // (Restored: these two views went missing in an earlier upload, along with
+  // uploadCardPhotos, so the CARDS tab had nothing to render.)
+  const TechCardsView = () => {
+    const mine = jobCards
+      .filter(c => (me?.id && c.techId === me.id) || (!c.techId && c.worker === myName))
+      .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||0)-(a.createdAt||0));
+    const byDay = {};
+    mine.forEach(c => { (byDay[c.date] = byDay[c.date] || []).push(c); });
+    const days = Object.entries(byDay).sort((a,b)=>b[0].localeCompare(a[0]));
+    const weekTotal = mine.filter(c => weekKey(c.date) === weekKey(today()))
+                          .reduce((s,c)=>s+(Number(c.hours)||0), 0);
+    return (
+      <div style={{paddingBottom:20}}>
+        <div style={{background:CARD,padding:"20px 18px 16px",borderBottom:`1px solid ${BDR}`}}>
+          <div style={{fontFamily:FF,fontSize:22,fontWeight:800,color:TXT}}>JOB CARDS</div>
+          <div style={{fontSize:12,color:MUTED,marginTop:3}}>Your day-to-day work</div>
+          <div style={{display:"flex",gap:8,marginTop:12}}>
+            <div style={{flex:1,background:CARD2,borderRadius:9,padding:"10px 12px"}}>
+              <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>THIS WEEK</div>
+              <div style={{fontFamily:MONO,fontSize:18,color:Y,marginTop:2}}>{fmtHrs(weekTotal)}</div>
+            </div>
+            <div style={{flex:1,background:CARD2,borderRadius:9,padding:"10px 12px"}}>
+              <div style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>CARDS</div>
+              <div style={{fontFamily:MONO,fontSize:18,color:TXT,marginTop:2}}>{mine.length}</div>
+            </div>
+          </div>
+        </div>
+        <div style={{padding:"14px"}}>
+          <button onClick={()=>setShowCard(true)}
+            style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,width:"100%",background:Y,border:"none",borderRadius:12,padding:16,cursor:"pointer",fontFamily:FF,fontSize:16,fontWeight:800,color:BG,letterSpacing:1,marginBottom:16}}>
+            <Plus size={18}/> NEW JOB CARD
+          </button>
+          {days.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"30px 10px",lineHeight:1.6}}>No job cards yet.<br/>Fill one in at the end of each job.</div>}
+          {days.map(([d, cards]) => (
+            <div key={d}>
+              <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 2px 10px"}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>{d}</span>
+                <div style={{flex:1,height:1,background:BDR}}/>
+                <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{fmtHrs(cards.reduce((s,c)=>s+(Number(c.hours)||0),0))}</span>
+              </div>
+              {cards.map(c => (
+                <JobCardRow key={c.id} card={c} clientName={clientName(c.clientId)}
+                  machineLabel={machineLabel(c.machineId)} onEdit={setEditCard}/>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  const AdminCardsView = () => {
+    const [from, setFrom]   = useState("");
+    const [to, setTo]       = useState("");
+    const [fTech, setFTech] = useState("");
+    const [fClient, setFClient] = useState("");
+    const [q, setQ]         = useState("");   // job # / PO search
+    const [fBiz, setFBiz]   = useState("");   // burnbank | srsa
+    const [group, setGroup] = useState("day");  // day | week | tech
+    const [confirmDel, setConfirmDel] = useState(null);
+    const [impBusy, setImpBusy] = useState(false);
+    const [impMsg, setImpMsg]   = useState("");
+    const notImported = CLIENT_SEED.filter(c =>
+      !clients.some(x => (x.name||"").trim().toLowerCase() === c.name.trim().toLowerCase())).length;
+
+    const filtered = jobCards
+      .filter(c => (!from || (c.date||"") >= from) && (!to || (c.date||"") <= to))
+      .filter(c => !fTech   || c.techId === fTech || c.worker === fTech)
+      .filter(c => !fClient || c.clientId === fClient)
+      .filter(c => !fBiz || (c.business || "burnbank") === fBiz)
+      .filter(c => {
+        const s = q.trim().toLowerCase();
+        if (!s) return true;
+        return (c.jobNo||"").toLowerCase().includes(s)
+            || (c.po||"").toLowerCase().includes(s)
+            || (c.correction||c.workDone||"").toLowerCase().includes(s)
+            || (c.complaint||"").toLowerCase().includes(s)
+            || (c.cause||"").toLowerCase().includes(s);
+      })
+      .sort((a,b)=>(b.date||"").localeCompare(a.date||"") || (b.createdAt||0)-(a.createdAt||0));
+
+    const total = filtered.reduce((s,c)=>s+(Number(c.hours)||0), 0);
+    // Per-tech totals, always shown so payroll questions are one glance away.
+    const byTech = {};
+    filtered.forEach(c => {
+      const k = c.worker || "Unassigned";
+      byTech[k] = (byTech[k]||0) + (Number(c.hours)||0);
+    });
+    const techTotals = Object.entries(byTech).sort((a,b)=>b[1]-a[1]);
+
+    const groups = {};
+    filtered.forEach(c => {
+      const k = group==="day" ? c.date
+              : group==="week" ? weekKey(c.date)
+              : (c.worker || "Unassigned");
+      (groups[k] = groups[k] || []).push(c);
+    });
+    const groupList = Object.entries(groups).sort((a,b)=>
+      group==="tech" ? a[0].localeCompare(b[0]) : b[0].localeCompare(a[0]));
+
+    const fld = {background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 10px",color:TXT,fontSize:13,outline:"none",minWidth:0};
+    return (
+      <div style={{paddingBottom:20}}>
+        <div style={{background:CARD,padding:"14px 16px",borderBottom:`1px solid ${BDR}`,position:"sticky",top:0,zIndex:10}}>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <button onClick={goHome} style={{background:BDR2,border:"none",borderRadius:8,width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
+              <ChevronLeft size={18} color={TXT}/>
+            </button>
+            <div style={{flex:1}}>
+              <div style={{fontFamily:FF,fontSize:19,fontWeight:800,color:TXT}}>TIMESHEETS</div>
+              <div style={{fontSize:11,color:MUTED}}>{filtered.length} card{filtered.length===1?"":"s"} · {fmtHrs(total)}</div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            <input type="date" value={from} onChange={e=>setFrom(e.target.value)} style={{...fld,flex:1}}/>
+            <span style={{color:MUTED,fontSize:12,alignSelf:"center"}}>to</span>
+            <input type="date" value={to} onChange={e=>setTo(e.target.value)} style={{...fld,flex:1}}/>
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            <select value={fTech} onChange={e=>setFTech(e.target.value)} style={{...fld,flex:1,appearance:"none",color:fTech?TXT:MUTED}}>
+              <option value="">All techs</option>
+              {approvedTechs.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </select>
+            <select value={fClient} onChange={e=>setFClient(e.target.value)} style={{...fld,flex:1,appearance:"none",color:fClient?TXT:MUTED}}>
+              <option value="">All clients</option>
+              {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            {[["","BOTH"],["burnbank","BURNBANK"],["srsa","SRSA"]].map(([v,l])=>(
+              <button key={v} onClick={()=>setFBiz(v)}
+                style={{flex:1,background:fBiz===v?Y:CARD2,border:`1px solid ${fBiz===v?Y:BDR2}`,borderRadius:7,padding:"7px 0",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:1,color:fBiz===v?BG:MUTED}}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search job #, PO or work done…"
+            style={{...fld,width:"100%",boxSizing:"border-box",marginBottom:8}}/>
+          <div style={{display:"flex",gap:8}}>
+            {[["day","BY DAY"],["week","BY WEEK"],["tech","BY TECH"]].map(([v,l])=>(
+              <button key={v} onClick={()=>setGroup(v)}
+                style={{flex:1,background:group===v?Y:CARD2,border:`1px solid ${group===v?Y:BDR2}`,borderRadius:7,padding:"7px 0",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:800,letterSpacing:1,color:group===v?BG:MUTED}}>
+                {l}
+              </button>
+            ))}
+            <button onClick={()=>{setFrom("");setTo("");setFTech("");setFClient("");setQ("");setFBiz("");}}
+              style={{background:CARD2,border:`1px solid ${BDR2}`,borderRadius:7,padding:"7px 11px",cursor:"pointer",fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED}}>CLEAR</button>
+          </div>
+        </div>
+
+        <div style={{padding:"14px"}}>
+          {/* Client list import — only shown while there's something left to bring in. */}
+          {notImported > 0 && (
+            <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:12,padding:"13px 14px",marginBottom:14}}>
+              <div style={{fontFamily:FF,fontSize:12,fontWeight:800,color:Y,letterSpacing:1,marginBottom:4}}>CLIENT LIST</div>
+              <div style={{fontSize:12,color:MUTED,lineHeight:1.5,marginBottom:11}}>
+                {notImported} customer{notImported===1?"":"s"} from the accounting export {notImported===1?"isn't":"aren't"} in the app yet.
+                Importing adds them with contact, phone, email and address. Existing clients are left alone.
+              </div>
+              {impMsg && <div style={{fontSize:12,color:GRN,marginBottom:10}}>{impMsg}</div>}
+              <button disabled={impBusy}
+                onClick={async()=>{
+                  setImpBusy(true); setImpMsg("");
+                  try {
+                    const n = await importClients((done,total)=>setImpMsg(`Importing ${done} of ${total}…`));
+                    setImpMsg(`Imported ${n} client${n===1?"":"s"}.`);
+                  } catch (e) { setImpMsg(`Import failed (${e?.code||"unknown"}).`); }
+                  setImpBusy(false);
+                }}
+                style={{width:"100%",background:Y,border:"none",borderRadius:9,padding:12,cursor:impBusy?"default":"pointer",fontFamily:FF,fontSize:13,fontWeight:800,color:BG,letterSpacing:1}}>
+                {impBusy ? "IMPORTING…" : `IMPORT ${notImported} CLIENTS`}
+              </button>
+            </div>
+          )}
+          {techTotals.length>0 && (
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:12,padding:"12px 14px",marginBottom:14}}>
+              <div style={{fontFamily:FF,fontSize:10,fontWeight:800,color:Y,letterSpacing:2,marginBottom:9}}>HOURS PER TECH</div>
+              {techTotals.map(([name,h])=>(
+                <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
+                  <span style={{fontSize:13,color:name==="Unassigned"?MUTED:TXT}}>{name}</span>
+                  <span style={{fontFamily:MONO,fontSize:14,color:Y}}>{fmtHrs(h)}</span>
+                </div>
+              ))}
+              <div style={{display:"flex",justifyContent:"space-between",paddingTop:8,marginTop:3,borderTop:`1px solid ${BDR}`}}>
+                <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:TXT,letterSpacing:1}}>TOTAL</span>
+                <span style={{fontFamily:MONO,fontSize:16,color:Y}}>{fmtHrs(total)}</span>
+              </div>
+            </div>
+          )}
+
+          {filtered.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"40px 10px"}}>No job cards match these filters.</div>}
+          {groupList.map(([k, cards]) => (
+            <div key={k}>
+              <div style={{display:"flex",alignItems:"center",gap:8,margin:"6px 2px 10px"}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>
+                  {group==="week" ? `WEEK ${k.split("-W")[1]||""}` : k.toUpperCase()}
+                </span>
+                {group==="week" && cards[0] && <span style={{fontSize:10,color:MUTED}}>{weekRangeLabel(cards[0].date)}</span>}
+                <div style={{flex:1,height:1,background:BDR}}/>
+                <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{fmtHrs(cards.reduce((s,c)=>s+(Number(c.hours)||0),0))}</span>
+              </div>
+              {cards.map(c => (
+                <JobCardRow key={c.id} card={c} clientName={clientName(c.clientId)}
+                  machineLabel={machineLabel(c.machineId)} showWorker={group!=="tech"}
+                  onEdit={setEditCard} onDelete={setConfirmDel}/>
+              ))}
+            </div>
+          ))}
+        </div>
+
+        {confirmDel && (
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:110,display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:14,padding:22,maxWidth:330,width:"100%"}}>
+              <div style={{fontFamily:FF,fontSize:17,fontWeight:800,color:TXT,marginBottom:8}}>DELETE JOB CARD?</div>
+              <div style={{fontSize:13,color:MUTED,marginBottom:18,lineHeight:1.5}}>
+                {confirmDel.worker}'s {fmtHrs(confirmDel.hours)} on {confirmDel.date} will be removed{confirmDel.linkedJobId?", including from the rebuild job's costings":""}.
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={()=>setConfirmDel(null)} style={{flex:1,background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:TXT}}>CANCEL</button>
+                <button onClick={()=>{delCard(confirmDel.id); setConfirmDel(null);}} style={{flex:1,background:RED,border:"none",borderRadius:8,padding:12,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:800,color:"#fff"}}>DELETE</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+
   // Work stranded on task numbers a template revision removed. Photos, hours and
   // statuses are keyed by task id, so when the client renumbers their sheet the
   // old records stop showing anywhere. This finds them so they can be moved.
