@@ -584,6 +584,14 @@ const CreamEditor = ({task, planned, loggedHrs, current, rate, onSave, onClose})
   const [busy, setBusy]   = useState(false);
   const h = Math.max(0, parseFloat(hours) || 0);
   const save = async v => { setBusy(true); await onSave(v); setBusy(false); onClose(); };
+  // Cream only ever comes out of time saved: logged + cream can't bill past the
+  // planned hours. No time saved, no cream — and the reason is spelled out.
+  const lg = Math.round(loggedHrs * 10) / 10;
+  const blocked = avail <= 0;
+  const tooMuch = !blocked && h > avail + 0.001;
+  const why = planned <= 0
+    ? "This job has no planned hours on the sheet, so there's no budget to take cream out of."
+    : `${lg}h logged against ${planned}h planned — ${Math.round((loggedHrs - planned) * 10) / 10}h over. Cream only comes out of time saved, so there's none to add here.`;
   return (
     <div style={{position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center"}}
       onClick={e => e.target === e.currentTarget && onClose()}>
@@ -603,28 +611,58 @@ const CreamEditor = ({task, planned, loggedHrs, current, rate, onSave, onClose})
             </div>
           ))}
         </div>
-        <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "14px 0 5px"}}>CREAM HOURS TO BILL</div>
-        <div style={{display: "flex", gap: 8}}>
-          <input type="number" inputMode="decimal" min="0" step="0.5" value={hours} onChange={e => setHours(e.target.value)} style={{...pFld, flex: 1, fontFamily: MONO, fontSize: 18}}/>
-          {avail > 0 && String(avail) !== hours && (
-            <button onClick={() => setHours(String(avail))} style={{...pBtn(Y), padding: "0 12px"}}>USE {avail}h</button>
-          )}
-        </div>
-        <div style={{fontSize: 12, color: TXT, marginTop: 8}}>
-          Billable: {Math.round(loggedHrs * 10) / 10}h logged + <b style={{color: Y}}>{h}h cream</b> = {Math.round((loggedHrs + h) * 10) / 10}h
-          <span style={{color: MUTED}}> · cream worth {money0(h * rate)} +GST</span>
-        </div>
-        {h > avail + 0.001 && <div style={{fontSize: 11, color: AMBER, marginTop: 4}}>That's more than the {avail}h under plan.</div>}
-        <div style={{display: "grid", gridTemplateColumns: current ? "1fr 2fr" : "1fr", gap: 8, marginTop: 16}}>
+        {blocked ? (<>
+          <div style={{background: "rgba(255,76,76,.08)", border: "1px solid rgba(255,76,76,.35)", borderRadius: 10, padding: "12px 14px", marginTop: 14}}>
+            <div style={{fontFamily: FF, fontSize: 13, fontWeight: 800, color: RED, letterSpacing: 1, marginBottom: 5}}>NO CREAM ON THIS JOB</div>
+            <div style={{fontSize: 12.5, color: TXT, lineHeight: 1.5}}>{why}</div>
+            <div style={{fontSize: 11.5, color: MUTED, lineHeight: 1.5, marginTop: 7}}>
+              Cream is capped so the hours billed never go past the hours quoted.
+            </div>
+          </div>
           {current > 0 && (
-            <button onClick={() => save(0)} disabled={busy}
-              style={{background: "rgba(255,76,76,.1)", border: "1px solid rgba(255,76,76,.3)", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 13, fontWeight: 800, color: RED}}>REMOVE</button>
+            <div style={{fontSize: 12, color: AMBER, marginTop: 10, lineHeight: 1.5}}>
+              There's already <b>{current}h</b> of cream on this job from earlier. Left there it bills{" "}
+              {Math.round((loggedHrs + current) * 10) / 10}h against {planned}h planned — take it off.
+            </div>
           )}
-          <button onClick={() => save(h)} disabled={busy}
-            style={{background: Y, border: "none", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 14, fontWeight: 800, color: BG}}>
-            {busy ? "SAVING…" : h > 0 ? `SAVE ${h}h CREAM` : "SAVE"}
-          </button>
-        </div>
+          <div style={{display: "grid", gridTemplateColumns: current > 0 ? "1fr 1fr" : "1fr", gap: 8, marginTop: 16}}>
+            {current > 0 && (
+              <button onClick={() => save(0)} disabled={busy}
+                style={{background: "rgba(255,76,76,.1)", border: "1px solid rgba(255,76,76,.3)", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 13, fontWeight: 800, color: RED}}>
+                {busy ? "REMOVING…" : "REMOVE THE CREAM"}
+              </button>
+            )}
+            <button onClick={onClose}
+              style={{background: CARD2, border: `1px solid ${BDR2}`, borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 14, fontWeight: 800, color: TXT}}>CLOSE</button>
+          </div>
+        </>) : (<>
+          <div style={{fontFamily: FF, fontSize: 10, fontWeight: 700, color: MUTED, letterSpacing: 1.5, margin: "14px 0 5px"}}>CREAM HOURS TO BILL &middot; MAX {avail}h</div>
+          <div style={{display: "flex", gap: 8}}>
+            <input type="number" inputMode="decimal" min="0" max={avail} step="0.5" value={hours} onChange={e => setHours(e.target.value)} style={{...pFld, flex: 1, fontFamily: MONO, fontSize: 18, borderColor: tooMuch ? RED : BDR2}}/>
+            {String(avail) !== hours && (
+              <button onClick={() => setHours(String(avail))} style={{...pBtn(Y), padding: "0 12px"}}>USE {avail}h</button>
+            )}
+          </div>
+          <div style={{fontSize: 12, color: TXT, marginTop: 8}}>
+            Billable: {lg}h logged + <b style={{color: Y}}>{h}h cream</b> = {Math.round((loggedHrs + h) * 10) / 10}h of {planned}h planned
+            <span style={{color: MUTED}}> &middot; cream worth {money0(h * rate)} +GST</span>
+          </div>
+          {tooMuch && (
+            <div style={{fontSize: 12, color: RED, marginTop: 6, lineHeight: 1.5}}>
+              Only {avail}h was saved on this job. {h}h of cream would bill {Math.round((loggedHrs + h) * 10) / 10}h against {planned}h planned &mdash; more than the customer was quoted.
+            </div>
+          )}
+          <div style={{display: "grid", gridTemplateColumns: current ? "1fr 2fr" : "1fr", gap: 8, marginTop: 16}}>
+            {current > 0 && (
+              <button onClick={() => save(0)} disabled={busy}
+                style={{background: "rgba(255,76,76,.1)", border: "1px solid rgba(255,76,76,.3)", borderRadius: 10, padding: 13, cursor: "pointer", fontFamily: FF, fontSize: 13, fontWeight: 800, color: RED}}>REMOVE</button>
+            )}
+            <button onClick={() => save(h)} disabled={busy || tooMuch}
+              style={{background: tooMuch ? CARD2 : Y, border: tooMuch ? `1px solid ${BDR2}` : "none", borderRadius: 10, padding: 13, cursor: tooMuch ? "not-allowed" : "pointer", fontFamily: FF, fontSize: 14, fontWeight: 800, color: tooMuch ? MUTED : BG}}>
+              {busy ? "SAVING…" : tooMuch ? `MAX IS ${avail}h` : h > 0 ? `SAVE ${h}h CREAM` : "SAVE"}
+            </button>
+          </div>
+        </>)}
       </div>
     </div>
   );
@@ -3504,7 +3542,11 @@ export default function App() {
     return {jobs: out.sort((a, b) => b.value - a.value), workers: Object.values(workers).sort((a, b) => b.value - a.value), hours, value, count};
   };
   const saveCream = async (jid, tid, hours) => {
-    const h = Math.round((Number(hours) || 0) * 100) / 100;
+    // Hard cap: cream can only use time the job came in under, so logged + cream
+    // never bills past the planned hours. Enforced here as well as in the editor.
+    const t = tasksForJob(jid).find(x => x.id === tid) || getCTById(jid, tid);
+    const room = Math.max(0, Math.round(((Number(t?.est) || 0) - logged(jid, tid)) * 100) / 100);
+    const h = Math.min(room, Math.round((Number(hours) || 0) * 100) / 100);
     if (!(h > 0)) { await deleteDoc(doc(db, "cream", eKey(jid, tid))); return; }
     await setDoc(doc(db, "cream", eKey(jid, tid)),
       {jobId: jid, taskId: tid, hours: h, rate: getLR(jid), date: today()}, {merge: true});
@@ -6363,16 +6405,31 @@ export default function App() {
           </div>
           {task.est>0&&<Bar v={l} max={task.est} h={6}/>}
           {(() => {
+            // Cream sits here permanently — one place on the hours screen to see and
+            // set it, whatever state the job's hours are in. Always tappable, so the
+            // reason it can't be added is always reachable too.
             const c = creamHrs(selJob, selTask), a = creamAvail(selJob, task);
-            if (!(c > 0) && !(l > 0 && a > 0)) return null;
+            const est = Number(task.est) || 0;
+            const under = l > 0 && a > 0;
+            const label = c > 0        ? `CREAM ${c}h ADDED`
+                        : l <= 0       ? "CREAM · NO HOURS LOGGED YET"
+                        : under        ? `${a}h UNDER PLAN · ADD CREAM`
+                        : est > 0 && l-est < 0.05 ? "CREAM · ON PLAN, NONE TO ADD"
+                        : est > 0      ? `CREAM · ${(l-est).toFixed(1)}h OVER PLAN`
+                        :                "CREAM · NO PLANNED HOURS";
+            const right = c > 0  ? `${money0(creamCost(selJob,selTask))} · billable ${(l+c).toFixed(1)}h`
+                        : l <= 0 ? "log hours first"
+                        : under  ? "tap to add"
+                        :          "no time saved · tap for why";
+            const col = c > 0 ? Y : under ? GRN : MUTED;
             return (
               <button onClick={()=>setEditCream({jobId:selJob, taskId:selTask})}
                 style={{width:"100%",marginTop:10,background:c>0?"rgba(232,176,0,.1)":CARD2,border:`1px solid ${c>0?"rgba(232,176,0,.4)":BDR2}`,borderRadius:9,padding:"10px 12px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10}}>
-                <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:c>0?Y:GRN,letterSpacing:1}}>
-                  {c>0 ? `CREAM ${c}h ADDED` : `${a}h UNDER PLAN · ADD CREAM`}
+                <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:col,letterSpacing:1}}>
+                  {label}
                 </span>
                 <span style={{fontFamily:MONO,fontSize:12,color:MUTED}}>
-                  {c>0 ? `${money0(creamCost(selJob,selTask))} · billable ${(l+c).toFixed(1)}h` : "tap to add"}
+                  {right}
                 </span>
               </button>
             );
