@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable, Users, LogIn, Package } from "lucide-react";
+import { Camera, Clock, ChevronRight, ChevronLeft, BarChart3, Plus, X, Home, Trash2, AlertTriangle, Lock, LogOut, Edit2, Wrench, Cable, Users, LogIn, Package, Download } from "lucide-react";
 import { initializeApp } from "firebase/app";
 import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc, writeBatch } from "firebase/firestore";
 import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
@@ -218,6 +218,168 @@ const partsUI = { q: "", filter: "all", invoice: { supplier: "", number: "", dat
 const slugKey = s => String(s || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "x";
 const money2 = n => `${n < 0 ? "−" : ""}$${Math.abs(Number(n) || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 const money0 = n => `${n < 0 ? "−" : ""}$${Math.round(Math.abs(Number(n) || 0)).toLocaleString()}`;
+// "2026-09-18" → "18/09/2026"
+const fmtDate = iso => { const [y, m, d] = String(iso || "").split("-"); return y && m && d ? `${Number(d)}/${m}/${y}` : String(iso || ""); };
+// ── Excel export ──
+// A small .xlsx writer so the office can pull a machine's jobs, labour and
+// parts into Excel without adding a library. Sheets are lists of rows; a cell
+// is a number, a string, null, or {v, s, f} for a style and/or a formula.
+// Styles: "head" header row, "b" bold, "title", "$" money, "$b" bold money,
+// "h" hours, "hb" bold hours, "date" (ISO string in), "pct".
+const XL_STYLE = {"": 0, head: 1, "$": 2, h: 3, date: 4, b: 5, "$b": 6, hb: 7, title: 8, pct: 9, note: 10};
+const xlCrcTable = (() => {
+  let t = null;
+  return () => {
+    if (t) return t;
+    t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  };
+})();
+const xlCrc = bytes => {
+  const t = xlCrcTable();
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = t[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+};
+// Uncompressed zip — an .xlsx is just a zip of XML files.
+const xlZip = files => {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const parts = [], central = [];
+  let offset = 0;
+  files.forEach(f => {
+    const name = enc.encode(f.name);
+    const data = typeof f.data === "string" ? enc.encode(f.data) : f.data;
+    const crc = xlCrc(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+    lh.setUint16(8, 0, true); lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true);
+    lh.setUint32(14, crc, true); lh.setUint32(18, data.length, true); lh.setUint32(22, data.length, true);
+    lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+    parts.push(new Uint8Array(lh.buffer), name, data);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true);
+    ch.setUint16(10, 0, true); ch.setUint16(12, dosTime, true); ch.setUint16(14, dosDate, true);
+    ch.setUint32(16, crc, true); ch.setUint32(20, data.length, true); ch.setUint32(24, data.length, true);
+    ch.setUint16(28, name.length, true); ch.setUint32(42, offset, true);
+    central.push(new Uint8Array(ch.buffer), name);
+    offset += 30 + name.length + data.length;
+  });
+  const cdSize = central.reduce((s, c) => s + c.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+  const all = [...parts, ...central, new Uint8Array(end.buffer)];
+  const out = new Uint8Array(all.reduce((s, a) => s + a.length, 0));
+  let p = 0;
+  all.forEach(a => { out.set(a, p); p += a.length; });
+  return out;
+};
+const xlEsc = v => String(v).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const xlCol = i => { let s = ""; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+const xlSerial = iso => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso || ""));
+  return m ? (Date.UTC(+m[1], +m[2] - 1, +m[3]) - Date.UTC(1899, 11, 30)) / 86400000 : null;
+};
+const xlSheetName = (n, used) => {
+  let base = String(n).replace(/[[\]:*?/\\]/g, " ").slice(0, 31).trim() || "Sheet";
+  let name = base, i = 2;
+  while (used.has(name.toLowerCase())) name = `${base.slice(0, 28)} ${i++}`;
+  used.add(name.toLowerCase());
+  return name;
+};
+// sheets: [{name, rows, cols:[widths], header: rowIndex to freeze/filter below (optional)}]
+const xlsxBytes = sheets => {
+  const used = new Set();
+  const named = sheets.map(sh => ({...sh, name: xlSheetName(sh.name, used)}));
+  const cellXml = (cell, ref) => {
+    if (cell == null || cell === "") return "";
+    const o = typeof cell === "object" ? cell : {v: cell};
+    const st = XL_STYLE[o.s || ""] || 0;
+    const sAttr = st ? ` s="${st}"` : "";
+    let v = o.v;
+    if (o.s === "date") {
+      const n = xlSerial(v);
+      if (n == null) v = v == null ? "" : String(v); else v = n;
+    }
+    if (o.f) {
+      const num = typeof v === "number" && isFinite(v) ? `<v>${Math.round(v * 10000) / 10000}</v>` : "";
+      return `<c r="${ref}"${sAttr}><f>${xlEsc(o.f)}</f>${num}</c>`;
+    }
+    if (typeof v === "number") {
+      if (!isFinite(v)) return "";
+      return `<c r="${ref}"${sAttr}><v>${Math.round(v * 10000) / 10000}</v></c>`;
+    }
+    if (v == null || v === "") return sAttr ? `<c r="${ref}"${sAttr}/>` : "";
+    const txt = String(v);
+    const sp = /^\s|\s$|\n/.test(txt) ? ` xml:space="preserve"` : "";
+    return `<c r="${ref}"${sAttr} t="inlineStr"><is><t${sp}>${xlEsc(txt)}</t></is></c>`;
+  };
+  const sheetXml = (sh, idx) => {
+    const rows = sh.rows || [];
+    const width = Math.max(1, ...rows.map(r => r.length));
+    const h = sh.header;
+    const view = h != null
+      ? `<sheetView workbookViewId="0"${idx === 0 ? ` tabSelected="1"` : ""}><pane ySplit="${h + 1}" topLeftCell="A${h + 2}" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft"/></sheetView>`
+      : `<sheetView workbookViewId="0"${idx === 0 ? ` tabSelected="1"` : ""}/>`;
+    const cols = (sh.cols || []).length
+      ? `<cols>${sh.cols.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join("")}</cols>` : "";
+    const data = rows.map((r, ri) => {
+      const cells = (r || []).map((c, ci) => cellXml(c, `${xlCol(ci)}${ri + 1}`)).join("");
+      return cells ? `<row r="${ri + 1}">${cells}</row>` : "";
+    }).join("");
+    const lastData = sh.filterTo != null ? sh.filterTo : rows.length - 1;
+    const filter = h != null && lastData > h ? `<autoFilter ref="A${h + 1}:${xlCol(width - 1)}${lastData + 1}"/>` : "";
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:${xlCol(width - 1)}${Math.max(1, rows.length)}"/><sheetViews>${view}</sheetViews><sheetFormatPr defaultRowHeight="15"/>${cols}<sheetData>${data}</sheetData>${filter}<pageMargins left="0.5" right="0.5" top="0.6" bottom="0.6" header="0.3" footer="0.3"/><pageSetup orientation="landscape" fitToWidth="1" fitToHeight="0"/></worksheet>`;
+  };
+  const defined = named.map((sh, i) => {
+    const h = sh.header, rows = sh.rows || [];
+    const lastData = sh.filterTo != null ? sh.filterTo : rows.length - 1;
+    if (h == null || !(lastData > h)) return "";
+    const width = Math.max(1, ...rows.map(r => r.length));
+    return `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">'${xlEsc(sh.name.replace(/'/g, "''"))}'!$A$${h + 1}:$${xlCol(width - 1)}$${lastData + 1}</definedName>`;
+  }).join("");
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="3"><numFmt numFmtId="164" formatCode="&quot;$&quot;#,##0.00;\\-&quot;$&quot;#,##0.00"/><numFmt numFmtId="165" formatCode="0.0#"/><numFmt numFmtId="166" formatCode="d/mm/yyyy"/></numFmts><fonts count="3"><font><sz val="11"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="11"/><name val="Calibri"/><family val="2"/></font><font><b/><sz val="14"/><name val="Calibri"/><family val="2"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE8B000"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left/><right/><top/><bottom style="thin"><color auto="1"/></bottom><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="11"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment vertical="center" wrapText="1"/></xf><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment horizontal="left"/></xf><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/><xf numFmtId="165" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/><xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="9" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+  const files = [
+    {name: "[Content_Types].xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${named.map((s, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}</Types>`},
+    {name: "_rels/.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`},
+    {name: "xl/workbook.xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${named.map((s, i) => `<sheet name="${xlEsc(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("")}</sheets>${defined ? `<definedNames>${defined}</definedNames>` : ""}<calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`},
+    {name: "xl/_rels/workbook.xml.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${named.map((s, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}<Relationship Id="rId${named.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`},
+    {name: "xl/styles.xml", data: styles},
+    ...named.map((sh, i) => ({name: `xl/worksheets/sheet${i + 1}.xml`, data: sheetXml(sh, i)})),
+  ];
+  return xlZip(files);
+};
+// Hand the file to the browser. On iPhone/iPad the share sheet is the reliable
+// way to get a file out (Save to Files, Mail, etc.); elsewhere it downloads.
+const saveXlsx = async (bytes, filename) => {
+  const type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  const blob = new Blob([bytes], {type});
+  const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (ios && typeof File !== "undefined" && navigator.canShare) {
+    try {
+      const file = new File([blob], filename, {type});
+      if (navigator.canShare({files: [file]})) { await navigator.share({files: [file], title: filename}); return; }
+    } catch (e) {
+      if (e && e.name === "AbortError") return;           // they closed the share sheet
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+};
+
 const signed0 = n => Math.abs(n) < 0.5 ? "$0" : `${n > 0 ? "+" : "−"}$${Math.round(Math.abs(n)).toLocaleString()}`;
 const PART_STATES = {
   none:     {label: "NOT ORDERED", col: MUTED},
@@ -225,6 +387,7 @@ const PART_STATES = {
   invoiced: {label: "INVOICED",    col: GRN},
 };
 const AMBER = "#F5A524";
+const INV_COL = "#A78BFA";                 // invoiced jobs
 const pBtn = (col = TXT) => ({background: CARD2, border: `1px solid ${BDR2}`, borderRadius: 7, padding: "6px 10px", cursor: "pointer",
   fontFamily: FF, fontSize: 11, fontWeight: 800, letterSpacing: .5, color: col, whiteSpace: "nowrap"});
 const pFld = {width: "100%", background: CARD2, border: `1px solid ${BDR2}`, borderRadius: 8, padding: "10px 12px", color: TXT,
@@ -2970,12 +3133,17 @@ export default function App() {
       setTechNotes(n);
     }));
     unsubs.push(onSnapshot(collection(db,"taskStatus"), snap => {
-      const s = {};
+      // Invoiced is a flag on a completed job, so everything that counts
+      // completed jobs (progress, the customer's savings, cream) still does.
+      const s = {}, inv = {};
       snap.docs.forEach(d => {
         const data = d.data();
-        s[eKey(data.jobId, data.taskId)] = data.status || "ongoing";
+        const k = eKey(data.jobId, data.taskId);
+        s[k] = data.status || "ongoing";
+        if (data.invoiced && s[k] === "completed") inv[k] = data.invoicedDate || "";
       });
       setTaskStatus(s);
+      setTaskInvoiced(inv);
     }));
     unsubs.push(onSnapshot(collection(db,"exclusions"), snap => {
       const ex = {};
@@ -3062,11 +3230,13 @@ export default function App() {
   const [exclMap, setExclMap]     = useState({});
   const [techNotes, setTechNotes] = useState({});  // eKey(jid,tid) -> string
   const [taskStatus, setTaskStatus] = useState({});
+  const [taskInvoiced, setTaskInvoiced] = useState({}); // eKey(jid,tid) -> invoiced date ("" if none recorded)
   const [hourlyRate, setHourlyRate]   = useState(145);     // global default rate $/hr
   const [showRateModal, setShowRateModal] = useState(false);
   const [rateInput, setRateInput]     = useState("145");
   const [jobTab, setJobTab]           = useState("progress"); // "progress" | "costings" | "photos"
   const [clientPhotoFilter, setClientPhotoFilter] = useState("all"); // CLIENT PHOTOS tab: all | shown | hidden
+  const [showInvoicedList, setShowInvoicedList] = useState(false);    // COSTINGS tab: expand the invoiced jobs
   const [customTasks, setCustomTasks] = useState({});   // jid -> [{id,sId,parentId,desc,est,cost,opt}]
   const [hoses, setHoses]             = useState([]);    // hose records (Hoses feature)
   const [schedOv, setSchedOv]         = useState({});    // `${jobId}_${taskId}` -> schedule override
@@ -3170,10 +3340,11 @@ export default function App() {
     }
   };
   const toggleClientPhoto = (job, ph) => setClientPhotos(job, [ph], !clientSees(job, ph));
-  // Task lookup spanning every machine template. Job-scoped code should prefer
-  // tasksOf(jobId); this is for contexts where only a task id is available.
-  const taskMap = useMemo(() => Object.fromEntries(
-    MACHINE_LIST.flatMap(m => m.tasks).map(t => [t.id, t])), []);
+  // A task on a particular machine. Job numbers repeat across machine types
+  // (the sprayer and the Quad Trac both have a 1.01), so the task screens must
+  // look up the job's own template — the all-machines map above returned the
+  // Quad Trac task for sprayer job numbers.
+  const jobTask = (jid, tid) => tasksOf(jid).find(t => t.id === tid) || getCTById(jid, tid);
 
   const getExcl = jid => exclMap[jid] || new Set();
   // ── Machine template resolution ──
@@ -3444,6 +3615,10 @@ export default function App() {
 
   const getLR     = jid => jobs.find(j=>j.id===jid)?.lockedRate || 145;
   const getStatus = (jid, tid) => taskStatus[eKey(jid,tid)] || "ongoing";
+  const isInvoiced = (jid, tid) => eKey(jid,tid) in taskInvoiced;
+  const invoicedOn = (jid, tid) => taskInvoiced[eKey(jid,tid)] || "";
+  // Status as shown on admin screens: ongoing | on_hold | completed | invoiced.
+  const statusKey  = (jid, tid) => isInvoiced(jid, tid) ? "invoiced" : getStatus(jid, tid);
   const getCTById = (jid, tid) => (customTasks[jid] || []).find(t => t.id === tid);
   const isCustom  = (jid, tid) => !!(customTasks[jid] || []).find(t => t.id === tid);
   const subTasks  = (jid, tid) => (customTasks[jid] || []).filter(t => t.parentId === tid);
@@ -3897,6 +4072,7 @@ export default function App() {
       total:      ts.length,
       photos:     ts.reduce((s,t)=>s+getPh(jid,t.id).length,0),
       completed:  ts.filter(t=>getStatus(jid,t.id)==='completed').length,
+      invoiced:   ts.filter(t=>isInvoiced(jid,t.id)).length,
     };
   };
   const jStats = jid => {
@@ -3914,6 +4090,235 @@ export default function App() {
       creamCost:  ts.reduce((s,t)=>s+creamCost(jid,t.id),0),
       lr,
     };
+  };
+
+  // ── Excel export of one machine ──
+  // Everything the office needs for an overview: the machine, every job with its
+  // hours and money, each timesheet entry, hours per tech, sections, parts and
+  // cream. Internal — it has hours, rates and cream in it, so it isn't for KLK.
+  const machineWorkbook = jid => {
+    const j = jobs.find(x => x.id === jid) || {};
+    const T = tmplOf(jid);
+    const secs = secsOf(jid);
+    const secName = sid => secs.find(s => s.id === sid)?.name || "";
+    const byId = (a, b) => String(a).localeCompare(String(b), undefined, {numeric: true});
+    const tasks = [...tasksForJob(jid)].sort((a, b) => (Number(a.sId) - Number(b.sId)) || byId(a.id, b.id));
+    const allTasks = [...tasksOf(jid), ...(customTasks[jid] || [])];
+    const taskOf = tid => allTasks.find(t => t.id === tid);
+    const ls = partsLines(jid);
+    const rate = getLR(jid);
+    const LABEL = {ongoing: "Ongoing", on_hold: "On hold", completed: "Completed", invoiced: "Invoiced"};
+    const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+    const H = t => ({v: t, s: "head"});
+    const $ = n => ({v: r2(n), s: "$"});
+    const hrs = n => ({v: r2(n), s: "h"});
+    const dt = iso => iso ? {v: iso, s: "date"} : null;
+    const workerOf = e => {
+      const nm = String(e.worker || "").trim();
+      const tech = (e.workerId && users.find(u => u.id === e.workerId)) || (nm && users.find(u => (u.name || "").trim().toLowerCase() === nm.toLowerCase()));
+      return tech?.name || nm || "Unassigned";
+    };
+    const jobEntries = Object.values(entries).flat().filter(e => e.jobId === jid);
+    // Totals row under a table: SUBTOTAL so it follows any filter in Excel.
+    const totalsRow = (width, first, last, sumCols, styles, label = "TOTAL") => {
+      const row = new Array(width).fill(null);
+      row[0] = {v: label, s: "b"};
+      sumCols.forEach(c => {
+        const col = xlCol(c);
+        row[c] = {f: `SUBTOTAL(9,${col}${first + 1}:${col}${last + 1})`, v: styles[c]?.val ?? null, s: styles[c]?.s || "$b"};
+      });
+      return row;
+    };
+
+    // Jobs
+    const jobRows = tasks.map(t => {
+      const ents = getEnt(jid, t.id);
+      const f = taskFinal(jid, t, ls);
+      const byTech = {};
+      ents.forEach(e => { const w = workerOf(e); byTech[w] = (byTech[w] || 0) + (Number(e.hours) || 0); });
+      const techTxt = Object.entries(byTech).sort((a, b) => b[1] - a[1]).map(([w, h]) => `${w} ${r2(h)}h`).join(", ");
+      const dates = ents.map(e => e.date).filter(Boolean).sort();
+      const est = Number(t.est) || 0;
+      return {t, f, techTxt, first: dates[0] || "", last: dates[dates.length - 1] || "", est,
+              status: statusKey(jid, t.id), invDate: invoicedOn(jid, t.id), note: techNotes[eKey(jid, t.id)] || ""};
+    });
+    const jobHead = ["Section", "Section name", "Job no", "Description", "Status", "Invoiced", "Planned hrs", "Logged hrs", "Cream hrs",
+      "Billable hrs", "Hours saved (− = over)", "Technicians", "First worked", "Last worked", "Quoted labour", "Labour billed",
+      "Quoted parts", "Parts", "Quoted total", "Total", "Saving (− = over)", "Tech notes"];
+    const jobsSheet = [jobHead.map(H), ...jobRows.map(r => [
+      Number(r.t.sId), secName(r.t.sId), r.t.id, r.t.desc || "", LABEL[r.status] || r.status, dt(r.invDate),
+      hrs(r.est), hrs(r.f.loggedH), r.f.creamH ? hrs(r.f.creamH) : null, hrs(r.f.hrs),
+      r.f.loggedH > 0 ? hrs(r.est - r.f.loggedH) : null,
+      r.techTxt, dt(r.first), dt(r.last),
+      $(r.f.quotedLabour), $(r.f.labour), $(r.f.quotedParts), $(r.f.parts), $(r.f.quoted), $(r.f.final),
+      r.f.ready ? $(-r.f.variance) : null, r.note ? {v: r.note, s: "note"} : null,
+    ])];
+    const jobLast = jobsSheet.length - 1;
+    const jSum = (key) => jobRows.reduce((s, r) => s + (typeof key === "function" ? key(r) : 0), 0);
+    jobsSheet.push([], totalsRow(jobHead.length, 1, jobLast, [6, 7, 8, 9, 14, 15, 16, 17, 18, 19, 20], {
+      6: {s: "hb", val: jSum(r => r.est)}, 7: {s: "hb", val: jSum(r => r.f.loggedH)}, 8: {s: "hb", val: jSum(r => r.f.creamH)},
+      9: {s: "hb", val: jSum(r => r.f.hrs)}, 14: {val: jSum(r => r.f.quotedLabour)}, 15: {val: jSum(r => r.f.labour)},
+      16: {val: jSum(r => r.f.quotedParts)}, 17: {val: jSum(r => r.f.parts)}, 18: {val: jSum(r => r.f.quoted)},
+      19: {val: jSum(r => r.f.final)}, 20: {val: jSum(r => r.f.ready ? -r.f.variance : 0)}}));
+
+    // Labour — one line per timesheet entry
+    const ents = [...jobEntries].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || byId(a.taskId, b.taskId));
+    const labHead = ["Date", "Section", "Section name", "Job no", "Job description", "Technician", "Hours", "Rate", "Cost", "Notes", "Job status"];
+    const labSheet = [labHead.map(H), ...ents.map(e => {
+      const t = taskOf(e.taskId);
+      const h = Number(e.hours) || 0, rt = Number(e.rate) || rate;
+      return [dt(e.date), t ? Number(t.sId) : null, t ? secName(t.sId) : "", e.taskId || "", t ? t.desc : "(no longer on the sheet)",
+        workerOf(e), hrs(h), $(rt), $(h * rt), e.notes || "", LABEL[statusKey(jid, e.taskId)] || ""];
+    })];
+    const labLast = labSheet.length - 1;
+    labSheet.push([], totalsRow(labHead.length, 1, labLast, [6, 8], {
+      6: {s: "hb", val: ents.reduce((s, e) => s + (Number(e.hours) || 0), 0)},
+      8: {val: ents.reduce((s, e) => s + (Number(e.hours) || 0) * (Number(e.rate) || rate), 0)}}));
+
+    // Hours per tech per job
+    const techNames = [...new Set(jobEntries.map(workerOf))].sort((a, b) => a.localeCompare(b));
+    const worked = [...new Set(jobEntries.map(e => e.taskId))].sort((a, b) => {
+      const ta = taskOf(a), tb = taskOf(b);
+      return (Number(ta?.sId ?? 999) - Number(tb?.sId ?? 999)) || byId(a, b);
+    });
+    const thHead = ["Section", "Job no", "Description", "Planned hrs", ...techNames, "Total logged", "Cream hrs"];
+    const thSheet = [thHead.map(H), ...worked.map(tid => {
+      const t = taskOf(tid);
+      const es = jobEntries.filter(e => e.taskId === tid);
+      const per = techNames.map(n => { const h = es.filter(e => workerOf(e) === n).reduce((s, e) => s + (Number(e.hours) || 0), 0); return h ? hrs(h) : null; });
+      return [t ? Number(t.sId) : null, tid, t ? t.desc : "(no longer on the sheet)", t ? hrs(t.est) : null, ...per,
+        hrs(es.reduce((s, e) => s + (Number(e.hours) || 0), 0)), creamHrs(jid, tid) ? hrs(creamHrs(jid, tid)) : null];
+    })];
+    const thLast = thSheet.length - 1;
+    const thCols = [3, ...techNames.map((_, i) => 4 + i), 4 + techNames.length, 5 + techNames.length];
+    const thVals = {};
+    thCols.forEach(c => { thVals[c] = {s: "hb", val: thSheet.slice(1).reduce((s, row) => s + (Number(row[c]?.v) || 0), 0)}; });
+    thSheet.push([], totalsRow(thHead.length, 1, thLast, thCols, thVals));
+
+    // Sections
+    const secHead = ["Section", "Name", "Jobs", "Completed", "Invoiced", "Planned hrs", "Logged hrs", "Cream hrs",
+      "Quoted labour", "incl parts handling", "Labour billed", "Quoted parts", "incl freight & consumables", "Parts", "Quoted total",
+      "Completed jobs", "Saving on completed (− = over)"];
+    const secRows = secs.map(sec => {
+      const c = sectionCost(jid, sec.id), st = sStats(jid, sec.id), sf = sectionFinal(jid, sec.id, ls);
+      const parts = ls.filter(l => l.sId === sec.id && l.kind !== "orphan")
+        .reduce((s, l) => s + (l.kind === "extra" ? (l.status !== "none" ? l.actual : 0) : l.status === "invoiced" ? l.actual : l.quoted), 0);
+      return [Number(sec.id), sec.name, st.total, st.completed, st.invoiced, hrs(st.est), hrs(st.actual), st.cream ? hrs(st.cream) : null,
+        $(c.labour), c.handling ? $(c.handling) : null, $(st.actualCost + st.creamCost), $(c.parts), c.sundries ? $(c.sundries) : null,
+        $(parts), $(c.total), sf.complete, sf.complete ? $(-sf.variance) : null];
+    });
+    const secSheet = [secHead.map(H), ...secRows];
+    const secLast = secSheet.length - 1;
+    const secCols = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+    const secVals = {};
+    secCols.forEach(c => {
+      const val = secRows.reduce((s, row) => s + (Number(typeof row[c] === "object" ? row[c]?.v : row[c]) || 0), 0);
+      secVals[c] = {val, s: [2, 3, 4, 15].includes(c) ? "b" : [5, 6, 7].includes(c) ? "hb" : "$b"};
+    });
+    secSheet.push([], totalsRow(secHead.length, 1, secLast, secCols, secVals));
+
+    // Parts
+    const KIND = {quote: "Quoted", sundry: "Freight/consumables", extra: "Extra (not quoted)", orphan: "Removed from sheet"};
+    const PST = {none: "Not ordered", ordered: "Ordered", invoiced: "Invoiced"};
+    const partRows = [...ls].sort((a, b) => (Number(a.sId ?? 999) - Number(b.sId ?? 999)) || byId(a.taskId || "zzz", b.taskId || "zzz"));
+    const partHead = ["Section", "Job no", "Type", "Part no", "Description", "Qty", "Unit price", "Quoted", "Status", "Ordered",
+      "Supplier", "Invoice no", "Invoice date", "Invoiced qty", "Invoiced unit", "Invoiced", "Invoiced vs quote", "Notes"];
+    const partSheet = [partHead.map(H), ...partRows.map(l => {
+      const inv = l.status === "invoiced";
+      return [l.sId != null ? Number(l.sId) : null, l.taskId || "", KIND[l.kind] || l.kind, l.pn || "", l.desc || "",
+        l.kind === "extra" ? null : l.qty, l.price != null ? $(l.price) : (l.kind === "extra" ? null : "TBC"), l.kind === "extra" ? null : $(l.quoted),
+        PST[l.status] || l.status, dt(l.orderedDate), l.supplier || "", l.invoiceNo || "", dt(l.invoiceDate),
+        inv || l.kind === "extra" ? l.actualQty : null, inv || l.kind === "extra" ? $(l.actualUnit) : null, inv || (l.kind === "extra" && l.status !== "none") ? $(l.actual) : null,
+        inv ? $(l.kind === "extra" ? l.actual : l.variance) : null,
+        [l.sheetNote, l.notes, l.alt ? `alt: ${l.alt}` : "", l.purchased ? "bought before the job" : "", l.track?.receivedToStock ? "received into stock" : ""].filter(Boolean).join(" · ")];
+    })];
+    const partLast = partSheet.length - 1;
+    const pVal = fn => partRows.reduce((s, l) => s + (fn(l) || 0), 0);
+    partSheet.push([], totalsRow(partHead.length, 1, partLast, [7, 15, 16], {
+      7: {val: pVal(l => l.kind === "extra" ? 0 : l.quoted)},
+      15: {val: pVal(l => l.status === "invoiced" || (l.kind === "extra" && l.status !== "none") ? l.actual : 0)},
+      16: {val: pVal(l => l.status === "invoiced" ? (l.kind === "extra" ? l.actual : l.variance) : 0)}}));
+
+    // Cream, split between the people who worked each job
+    const creamHead = ["Section", "Job no", "Description", "Cream added", "Cream hrs", "Rate", "Cream $", "Worker", "Worker's logged hrs", "Share", "Worker cream hrs", "Worker cream $"];
+    const creamRowsX = [];
+    tasks.forEach(t => {
+      const c = creamHrs(jid, t.id);
+      if (!(c > 0)) return;
+      const rec = cream[eKey(jid, t.id)] || {};
+      creamSplit(jid, t.id).forEach((w, i) => creamRowsX.push([
+        Number(t.sId), t.id, t.desc || "", i === 0 ? dt(rec.date) : null, i === 0 ? hrs(c) : null, i === 0 ? $(Number(rec.rate) || rate) : null,
+        i === 0 ? $(creamCost(jid, t.id)) : null, w.name, hrs(w.hours), {v: Math.round(w.share * 1000) / 1000, s: "pct"}, hrs(w.creamH), $(w.value)]));
+    });
+    const creamSheet = [creamHead.map(H), ...creamRowsX];
+    const creamLast = creamSheet.length - 1;
+    if (creamRowsX.length) creamSheet.push([], totalsRow(creamHead.length, 1, creamLast, [4, 6, 10, 11], {
+      4: {s: "hb", val: tasks.reduce((s, t) => s + creamHrs(jid, t.id), 0)}, 6: {val: tasks.reduce((s, t) => s + creamCost(jid, t.id), 0)},
+      10: {s: "hb", val: tasks.reduce((s, t) => s + creamHrs(jid, t.id), 0)}, 11: {val: tasks.reduce((s, t) => s + creamCost(jid, t.id), 0)}}));
+
+    // Summary
+    const jc = jobCost(jid), o = jStats(jid), jf = jobFinal(jid), ps = partsSummary(ls);
+    const count = k => jobRows.filter(r => r.status === k).length;
+    const doneRows = jobRows.filter(r => r.status === "completed" || r.status === "invoiced");
+    const val = rows => rows.reduce((s, r) => s + r.f.final, 0);
+    const machine = [j.make, j.model].filter(Boolean).join(" ");
+    const B = t => ({v: t, s: "b"});
+    const summary = [
+      [{v: `SRSA · ${T.name}${j.serial ? ` · ${j.serial}` : ""}`, s: "title"}],
+      ["Exported", dt(today())],
+      [],
+      [B("MACHINE")],
+      ["Client", j.client || ""], ["Machine", machine], ["Serial", j.serial || ""], ["Machine type", T.name],
+      ["Started", dt(j.started)], ["Labour rate", $(rate)],
+      [],
+      [B("JOBS")],
+      ["Jobs on the sheet", jobRows.length], ["Ongoing", count("ongoing")], ["On hold", count("on_hold")],
+      ["Completed, not invoiced", count("completed")], ["Invoiced", count("invoiced")],
+      [],
+      [B("HOURS")],
+      ["Planned", hrs(o.est)], ["Logged", hrs(o.actual)], ["Cream", hrs(o.cream)], ["Billable (logged + cream)", hrs(o.actual + o.cream)],
+      [],
+      [B("MONEY")],
+      ["Quoted labour", $(jc.labour)], ["  incl parts handling", $(jc.handling)],
+      ["Quoted parts", $(jc.parts)], ["  incl freight & consumables", $(jc.sundries)],
+      [B("Quoted total"), {v: r2(jc.total), s: "$b"}],
+      [],
+      ["Labour logged", $(o.actualCost)], ["Cream", $(o.creamCost)], [B("Labour billed so far"), {v: r2(o.actualCost + o.creamCost), s: "$b"}],
+      ["Parts invoiced so far", $(ps.invoicedActual + ps.extras)], ["Parts forecast (invoiced price where known, else quoted)", $(ps.forecast)],
+      [],
+      [B("COMPLETED JOBS (what KLK sees)")],
+      ["Jobs counted", `${jf.complete} of ${jf.jobs}`],
+      ["Quoted", $(jf.quoted)], ["Final", $(jf.final)],
+      ["Labour saving (− = over)", $(-jf.labourVar)], ["Parts saving (− = over)", $(-jf.partsVar)],
+      [B("Total saving (− = over)"), {v: r2(-jf.variance), s: "$b"}],
+      [],
+      [B("INVOICING"), B("Jobs"), B("Value")],
+      ["Invoiced", count("invoiced"), $(val(doneRows.filter(r => r.status === "invoiced")))],
+      ["Completed, not invoiced", count("completed"), $(val(doneRows.filter(r => r.status === "completed")))],
+      [],
+      [{v: "All money ex GST. Job money = hours billed (logged + cream) at the job's rate, plus parts at invoiced price where invoiced, otherwise quoted. " +
+          "Section freight/consumables and parts handling sit on the Sections sheet, not against a job. Internal — includes hours, rates and cream.", s: "note"}],
+    ];
+
+    return [
+      {name: "Summary", cols: [46, 18, 16], rows: summary},
+      {name: "Jobs", header: 0, filterTo: jobLast, cols: [8, 18, 8, 44, 11, 11, 9, 9, 9, 9, 11, 30, 11, 11, 12, 12, 12, 12, 12, 12, 12, 40], rows: jobsSheet},
+      {name: "Labour entries", header: 0, filterTo: labLast, cols: [11, 8, 18, 8, 40, 16, 8, 10, 11, 40, 11], rows: labSheet},
+      {name: "Hours by tech", header: 0, filterTo: thLast, cols: [8, 8, 40, 9, ...techNames.map(() => 12), 10, 9], rows: thSheet},
+      {name: "Sections", header: 0, filterTo: secLast, cols: [8, 22, 7, 10, 9, 9, 9, 9, 13, 12, 13, 13, 13, 13, 13, 10, 14], rows: secSheet},
+      {name: "Parts", header: 0, filterTo: partLast, cols: [8, 8, 16, 18, 40, 6, 11, 11, 11, 11, 16, 12, 11, 9, 11, 11, 12, 40], rows: partSheet},
+      {name: "Cream", header: 0, filterTo: creamLast, cols: [8, 8, 40, 11, 9, 9, 11, 16, 11, 8, 11, 11], rows: creamSheet},
+    ];
+  };
+  const exportMachine = async jid => {
+    const j = jobs.find(x => x.id === jid) || {};
+    const name = `SRSA ${getTemplate(j.templateId).name} ${j.serial || ""} ${today()}`.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim();
+    try {
+      await saveXlsx(xlsxBytes(machineWorkbook(jid)), `${name}.xlsx`);
+    } catch (e) {
+      console.error(e);
+      window.alert("Couldn't build the spreadsheet — " + (e?.message || e));
+    }
   };
 
   const go = (v, p={}) => {
@@ -4076,8 +4481,24 @@ export default function App() {
     setConfirmDel(null); goHome();
   };
 
+  // "invoiced" saves the job as completed with an invoiced flag and date.
   const setStatus = async (jid, tid, val) => {
-    await setDoc(doc(db,"taskStatus",`${jid}_${tid}`), {jobId:jid, taskId:tid, status:val});
+    const ref = doc(db,"taskStatus",`${jid}_${tid}`);
+    if (val === "invoiced") {
+      await setDoc(ref, {jobId:jid, taskId:tid, status:"completed", invoiced:true, invoicedDate: invoicedOn(jid, tid) || today()});
+      return;
+    }
+    await setDoc(ref, {jobId:jid, taskId:tid, status:val});
+  };
+  // Mark a list of completed jobs invoiced in one go.
+  const markInvoiced = async (jid, tids) => {
+    const d = today();
+    for (let i = 0; i < tids.length; i += 400) {
+      const b = writeBatch(db);
+      tids.slice(i, i + 400).forEach(tid => b.set(doc(db,"taskStatus",`${jid}_${tid}`),
+        {jobId:jid, taskId:tid, status:"completed", invoiced:true, invoicedDate:d}));
+      await b.commit();
+    }
   };
 
   // ── Hoses feature handlers ──
@@ -4607,7 +5028,8 @@ export default function App() {
     // Status lives in a doc keyed by job+task, so it has to be rewritten.
     const st = taskStatus[eKey(jid,fromId)];
     if (st && st !== "ongoing") {
-      await setDoc(doc(db,"taskStatus",`${jid}_${toId}`), {jobId:jid, taskId:toId, status:st});
+      const inv = isInvoiced(jid, fromId) ? {invoiced:true, invoicedDate: invoicedOn(jid, fromId) || today()} : {};
+      await setDoc(doc(db,"taskStatus",`${jid}_${toId}`), {jobId:jid, taskId:toId, status:st, ...inv});
       await deleteDoc(doc(db,"taskStatus",`${jid}_${fromId}`)).catch(()=>{});
     }
     return batchOps.length;
@@ -5480,28 +5902,39 @@ export default function App() {
     {val:"ongoing",   label:"Ongoing",   col:"#378ADD", bg:"rgba(55,138,221,0.15)", bdr:"rgba(55,138,221,0.4)"},
     {val:"on_hold",   label:"On Hold",   col:"#EF9F27", bg:"rgba(239,159,39,0.15)", bdr:"rgba(239,159,39,0.4)"},
     {val:"completed", label:"Completed", col:"#28C76F", bg:"rgba(40,199,111,0.15)", bdr:"rgba(40,199,111,0.4)"},
+    {val:"invoiced",  label:"Invoiced",  col:INV_COL,   bg:"rgba(167,139,250,0.15)", bdr:"rgba(167,139,250,0.45)"},
   ];
   const statusStyle = val => STATUS_OPTS.find(o => o.val===val) || STATUS_OPTS[0];
 
+  // Invoiced = completed and billed. Technicians and the customer only ever see
+  // "completed"; the invoiced flag is for the office.
   const StatusToggle = ({jid, tid}) => {
-    const cur = getStatus(jid, tid);
+    const cur = statusKey(jid, tid);
+    const invDate = invoicedOn(jid, tid);
+    const pick = val => {
+      if (val === cur) return;
+      if (cur === "invoiced" && !window.confirm(`This job is marked invoiced${invDate ? ` (${fmtDate(invDate)})` : ""}. Change it to ${statusStyle(val).label}? It will go back on the not-yet-invoiced list.`)) return;
+      setStatus(jid, tid, val);
+    };
     return (
       <div style={{marginTop:14, background:CARD2, borderRadius:10, padding:"12px 14px"}}>
         <div style={{fontFamily:FF, fontSize:10, fontWeight:700, color:MUTED, letterSpacing:1.5, marginBottom:10}}>TASK STATUS</div>
-        <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6}}>
+        <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:5}}>
           {STATUS_OPTS.map(o => (
-            <button key={o.val} onClick={() => setStatus(jid, tid, o.val)}
-              style={{background:cur===o.val?o.bg:"transparent", border:`1px solid ${cur===o.val?o.bdr:BDR2}`, borderRadius:8, padding:"9px 4px", cursor:"pointer", transition:"all .15s"}}>
-              <div style={{fontFamily:FF, fontSize:11, fontWeight:700, color:cur===o.val?o.col:MUTED, letterSpacing:.5}}>{o.label}</div>
+            <button key={o.val} onClick={() => pick(o.val)}
+              style={{background:cur===o.val?o.bg:"transparent", border:`1px solid ${cur===o.val?o.bdr:BDR2}`, borderRadius:8, padding:"9px 2px", cursor:"pointer", transition:"all .15s", minWidth:0}}>
+              <div style={{fontFamily:FF, fontSize:11, fontWeight:700, color:cur===o.val?o.col:MUTED, letterSpacing:.3}}>{o.label}</div>
             </button>
           ))}
         </div>
+        {cur === "invoiced" && <div style={{fontSize:11, color:INV_COL, marginTop:8}}>Invoiced{invDate ? ` ${fmtDate(invDate)}` : ""} · still counts as completed</div>}
+        {cur === "completed" && <div style={{fontSize:11, color:MUTED, marginTop:8}}>Completed, not invoiced yet — tap Invoiced once it's billed.</div>}
       </div>
     );
   };
 
   const StatusChip = ({jid, tid}) => {
-    const s = statusStyle(getStatus(jid, tid));
+    const s = statusStyle(statusKey(jid, tid));
     return <span style={{fontFamily:FF, fontSize:10, fontWeight:700, letterSpacing:.6, background:s.bg, color:s.col, borderRadius:4, padding:"2px 7px", whiteSpace:"nowrap", border:`1px solid ${s.bdr}`}}>{s.label}</span>;
   };
 
@@ -5534,7 +5967,7 @@ export default function App() {
   };
 
   const CustomTaskModal = () => {
-    const parentTask = ctParentId ? (taskMap[ctParentId] || getCTById(selJob, ctParentId)) : null;
+    const parentTask = ctParentId ? jobTask(selJob, ctParentId) : null;
     const sectionTasks = [
       ...tasksOf(selJob).filter(t => t.sId===selSec && isIn(selJob,t)),
       ...(customTasks[selJob]||[]).filter(t => t.sId===selSec && !t.parentId),
@@ -5762,7 +6195,7 @@ export default function App() {
 
   const TechTaskView = () => {
     const cameraRef = useRef();
-    const task = taskMap[selTask] || getCTById(selJob, selTask);
+    const task = jobTask(selJob, selTask);
     if (!task) return null;
     const sec  = secsOf(selJob).find(s => s.id===task.sId);
     const ph   = getPh(selJob, selTask);
@@ -5906,14 +6339,20 @@ export default function App() {
     const j = jobs.find(x => x.id===selJob);
     const o = jStats(selJob);
     const tab = jobTab;
-    const fmt = n => n>=1000?`$${(n/1000).toFixed(1)}k`:`$${Math.round(n)}`;
+    const fmt = n => { const a = Math.abs(n); const t = a>=1000?`$${(a/1000).toFixed(1)}k`:`$${Math.round(a)}`; return n < 0 ? `−${t}` : t; };
     return (
       <div>
         <TopBar title={j?.serial||""} sub={j?.client}
-          action={<button onClick={()=>{setEditJob(j);setJForm({client:j.client,serial:j.serial,make:j.make,model:j.model||"",started:j.started,lockedRate:j.lockedRate,accessCode:j.accessCode||""});setShowJob(true);}}
-            style={{background:BDR2,border:"none",borderRadius:8,padding:"6px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
-            <Edit2 size={13} color={Y}/><span style={{fontFamily:FF,fontSize:12,fontWeight:700,color:Y}}>EDIT</span>
-          </button>}/>
+          action={<div style={{display:"flex",gap:6,flexShrink:0}}>
+            <button onClick={()=>exportMachine(selJob)} title="Download this machine's jobs, labour and parts as an Excel file"
+              style={{background:BDR2,border:"none",borderRadius:8,padding:"6px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+              <Download size={13} color={GRN}/><span style={{fontFamily:FF,fontSize:12,fontWeight:700,color:GRN}}>EXCEL</span>
+            </button>
+            <button onClick={()=>{setEditJob(j);setJForm({client:j.client,serial:j.serial,make:j.make,model:j.model||"",started:j.started,lockedRate:j.lockedRate,accessCode:j.accessCode||""});setShowJob(true);}}
+              style={{background:BDR2,border:"none",borderRadius:8,padding:"6px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+              <Edit2 size={13} color={Y}/><span style={{fontFamily:FF,fontSize:12,fontWeight:700,color:Y}}>EDIT</span>
+            </button>
+          </div>}/>
         <div style={{background:CARD,borderBottom:`1px solid ${BDR}`}}>
           <div style={{display:"flex",overflowX:"auto"}}>
             {[["progress","PROGRESS"],["costings","COSTINGS"],["parts","PARTS"],["photos","CLIENT PHOTOS"]].map(([t,l])=>(
@@ -6096,6 +6535,7 @@ export default function App() {
                           <span>{st.total} tasks</span>
                           <span style={{color:BDR2}}>·</span>
                           <span style={{color:st.completed===st.total&&st.total>0?GRN:st.completed>0?Y:MUTED,fontWeight:st.completed>0?600:400}}>{st.completed}/{st.total} complete</span>
+                          {st.completed>0&&<><span style={{color:BDR2}}>·</span><span style={{color:st.invoiced===st.completed?INV_COL:MUTED}}>{st.invoiced===st.completed?"all invoiced":`${st.completed-st.invoiced} to invoice`}</span></>}
                         </div>
                       </div>
                       <div style={{textAlign:"right",flexShrink:0}}>
@@ -6169,7 +6609,7 @@ export default function App() {
                       <span style={{fontFamily:MONO,fontSize:15,color:vc(f.variance)}}>{Math.abs(f.variance)<0.5?"on budget":f.variance<0?`${money0(-f.variance)} saving`:`${money0(f.variance)} over`}</span>
                     </div>
                     <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.6}}>
-                      Quoted {money0(f.quoted)} → final {money0(f.final)} · labour <span style={{color:vc(f.labourVar)}}>{vs(f.labourVar)}</span> ({(Math.round(f.hrs*10)/10)}h incl cream vs {f.quotedHrs}h) · parts <span style={{color:vc(f.partsVar)}}>{vs(f.partsVar)}</span>
+                      They see labour <span style={{color:vc(f.labourVar)}}>{vs(f.labourVar)}</span> and parts <span style={{color:vc(f.partsVar)}}>{vs(f.partsVar)}</span> as dollar amounts only. Behind that: quoted {money0(f.quoted)} → final {money0(f.final)}, {(Math.round(f.hrs*10)/10)}h incl cream vs {f.quotedHrs}h planned.
                     </div>
                   </div>
                 );
@@ -6217,7 +6657,7 @@ export default function App() {
                       </div>
                       <div>
                         <div style={{fontFamily:FF,fontSize:13,fontWeight:700,color:TXT}}>{sec.name}</div>
-                        <div style={{fontSize:10,color:MUTED}}>{st.completed}/{st.total} done</div>
+                        <div style={{fontSize:10,color:MUTED}}>{st.completed}/{st.total} done{st.completed>0?` · ${st.invoiced} invoiced`:""}</div>
                       </div>
                     </div>
                     <div style={{fontFamily:MONO,fontSize:11,color:MUTED,textAlign:"right",paddingTop:3}}>{fmt(st.estCost)}</div>
@@ -6234,6 +6674,79 @@ export default function App() {
                 <div style={{fontFamily:MONO,fontSize:11,color:o.actual>0?(o.actualCost>o.estCost?RED:TXT):MUTED,textAlign:"right"}}>{o.actual>0?fmt(o.actualCost):"—"}</div>
                 <div style={{fontFamily:MONO,fontSize:11,color:o.actual>0?(o.actualCost>o.estCost?RED:GRN):MUTED,textAlign:"right"}}>{o.actual>0?((o.actualCost-o.estCost>=0?"+":"")+fmt(o.actualCost-o.estCost)):"—"}</div>
               </div>
+
+              {/* Invoicing: completed jobs not billed yet, and what has been */}
+              {(() => {
+                const ls = partsLines(selJob);
+                const rows = tasksForJob(selJob)
+                  .filter(t => getStatus(selJob, t.id) === "completed")
+                  .map(t => ({t, inv: isInvoiced(selJob, t.id), date: invoicedOn(selJob, t.id), f: taskFinal(selJob, t, ls),
+                              creamLeft: creamHrs(selJob, t.id) > 0 ? 0 : creamAvail(selJob, t)}));
+                const todo = rows.filter(r => !r.inv);
+                const billed = rows.filter(r => r.inv).sort((a, b) => String(b.date).localeCompare(String(a.date)) || a.t.id.localeCompare(b.t.id));
+                const sum = a => a.reduce((s, r) => s + r.f.final, 0);
+                if (!rows.length) return null;
+                return (
+                  <div style={{marginTop:22}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                      <span style={{fontFamily:FF,fontSize:12,fontWeight:800,color:INV_COL,letterSpacing:2}}>INVOICING</span>
+                      <div style={{flex:1,height:1,background:BDR}}/>
+                      <span style={{fontFamily:MONO,fontSize:11,color:MUTED}}>{billed.length}/{rows.length} completed invoiced</span>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                      <div style={{background:CARD,border:`1px solid ${todo.length?"rgba(245,165,36,.4)":BDR}`,borderRadius:9,padding:"9px 11px"}}>
+                        <div style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1.5}}>TO INVOICE · {todo.length} JOB{todo.length===1?"":"S"}</div>
+                        <div style={{fontFamily:MONO,fontSize:17,color:todo.length?AMBER:MUTED,marginTop:2}}>{money0(sum(todo))}</div>
+                      </div>
+                      <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:9,padding:"9px 11px"}}>
+                        <div style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1.5}}>INVOICED · {billed.length} JOB{billed.length===1?"":"S"}</div>
+                        <div style={{fontFamily:MONO,fontSize:17,color:INV_COL,marginTop:2}}>{money0(sum(billed))}</div>
+                      </div>
+                    </div>
+                    <div style={{fontSize:11,color:MUTED,lineHeight:1.5,marginBottom:10}}>
+                      Job figures are hours billed (logged + cream) plus parts, +GST. Section freight, consumables and parts handling aren't in them.
+                    </div>
+                    {todo.length>1 && (
+                      <button onClick={()=>{ if (window.confirm(`Mark all ${todo.length} completed jobs (${money0(sum(todo))}) as invoiced today?`)) markInvoiced(selJob, todo.map(r => r.t.id)); }}
+                        style={{width:"100%",marginBottom:10,background:"rgba(167,139,250,.1)",border:"1px solid rgba(167,139,250,.45)",borderRadius:9,padding:"10px 0",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:INV_COL,letterSpacing:1}}>
+                        MARK ALL {todo.length} INVOICED · {money0(sum(todo))}
+                      </button>
+                    )}
+                    {todo.length===0 && <div style={{textAlign:"center",color:MUTED,fontSize:12,padding:"10px 0 14px"}}>Every completed job is invoiced.</div>}
+                    {todo.map(({t, f, creamLeft}) => (
+                      <div key={t.id} style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"10px 12px",marginBottom:6,display:"flex",alignItems:"center",gap:10}}>
+                        <div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>go("task",{sec:t.sId, task:t.id})}>
+                          <div style={{display:"flex",gap:7,alignItems:"baseline"}}>
+                            <span style={{fontFamily:MONO,fontSize:10,color:Y,flexShrink:0}}>{t.id}</span>
+                            <span style={{fontSize:13,color:TXT,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</span>
+                          </div>
+                          <div style={{fontSize:11,color:MUTED,marginTop:3}}>
+                            {money0(f.labour)} labour ({(Math.round(f.hrs*10)/10)}h) · {money0(f.parts)} parts · <b style={{color:TXT}}>{money0(f.final)}</b>
+                          </div>
+                          {f.hrs <= 0 && f.quotedLabour > 0 && <div style={{fontSize:10,color:AMBER,marginTop:3}}>No hours logged yet</div>}
+                          {creamLeft > 0 && <div style={{fontSize:10,color:AMBER,marginTop:3}}>{creamLeft}h under plan — no cream added yet</div>}
+                        </div>
+                        <button onClick={()=>setStatus(selJob, t.id, "invoiced")} style={{...pBtn(INV_COL),borderColor:"rgba(167,139,250,.45)"}}>INVOICED</button>
+                      </div>
+                    ))}
+                    {billed.length>0 && (
+                      <button onClick={()=>setShowInvoicedList(v => !v)}
+                        style={{width:"100%",marginTop:4,background:"none",border:`1px dashed ${BDR2}`,borderRadius:9,padding:"9px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,color:MUTED,letterSpacing:1}}>
+                        {showInvoicedList ? "HIDE" : "SHOW"} {billed.length} INVOICED JOB{billed.length===1?"":"S"}
+                      </button>
+                    )}
+                    {showInvoicedList && billed.map(({t, f, date}) => (
+                      <div key={t.id} onClick={()=>go("task",{sec:t.sId, task:t.id})}
+                        style={{background:CARD2,border:`1px solid ${BDR}`,borderRadius:9,padding:"8px 12px",marginTop:5,display:"flex",alignItems:"center",gap:10,cursor:"pointer"}}>
+                        <span style={{fontFamily:MONO,fontSize:10,color:INV_COL,flexShrink:0}}>{t.id}</span>
+                        <span style={{flex:1,minWidth:0,fontSize:12,color:TXT,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.desc}</span>
+                        <span style={{fontFamily:MONO,fontSize:11,color:MUTED,flexShrink:0}}>{date ? fmtDate(date) : ""}</span>
+                        <span style={{fontFamily:MONO,fontSize:12,color:TXT,flexShrink:0}}>{money0(f.final)}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
 
               {/* Cream: jobs done under plan — add the difference on before billing */}
               {(() => {
@@ -6369,6 +6882,23 @@ export default function App() {
             <StatBox label="EST COST" val={`$${Math.round(st.estCost).toLocaleString()}`} col={Y}/>
           </div>
           <Bar v={st.actual} max={st.est} h={5}/>
+          {(() => {
+            const toBill = tasksForJob(selJob).filter(t => t.sId===selSec && getStatus(selJob,t.id)==="completed" && !isInvoiced(selJob,t.id));
+            if (!st.completed) return null;
+            return (
+              <div style={{display:"flex",alignItems:"center",gap:10,marginTop:10}}>
+                <span style={{flex:1,fontSize:11,color:toBill.length?MUTED:INV_COL}}>
+                  {toBill.length ? `${st.invoiced} of ${st.completed} completed jobs invoiced` : `All ${st.completed} completed jobs invoiced`}
+                </span>
+                {toBill.length>0 && (
+                  <button onClick={()=>{ if (window.confirm(`Mark ${toBill.length} completed job${toBill.length===1?"":"s"} in this section as invoiced today?\n\n${toBill.map(t=>`${t.id} ${t.desc}`).join("\n")}`)) markInvoiced(selJob, toBill.map(t=>t.id)); }}
+                    style={{...pBtn(INV_COL),borderColor:"rgba(167,139,250,.45)"}}>
+                    MARK {toBill.length} INVOICED
+                  </button>
+                )}
+              </div>
+            );
+          })()}
         </div>
         <div style={{padding: isDesktop?"12px 24px":"12px 14px"}}>
           {builtIn.map(t=><TaskCard key={t.id} t={t}/>)}
@@ -6384,7 +6914,7 @@ export default function App() {
 
   const AdminTaskView = () => {
     const adminCamRef = useRef();
-    const task = taskMap[selTask] || getCTById(selJob, selTask);
+    const task = jobTask(selJob, selTask);
     if (!task) return null;
     const isCT = isCustom(selJob, selTask);
     const sec = secsOf(selJob).find(s => s.id===task.sId);
@@ -6484,14 +7014,16 @@ export default function App() {
             return (
               <div style={{marginTop:10,background:CARD2,border:`1px solid ${f.ready?"rgba(232,176,0,.35)":BDR}`,borderRadius:10,padding:"11px 13px"}}>
                 <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:6}}>WHAT {who.toUpperCase()} SEES</div>
-                {!f.done && <div style={{fontSize:12,color:MUTED}}>Only the quoted price until you mark this complete.</div>}
-                {f.done && !f.ready && <div style={{fontSize:12,color:AMBER}}>Marked complete but no hours are in yet — they'll see the final cost once hours are entered.</div>}
+                {!f.done && <div style={{fontSize:12,color:MUTED}}>Only the job price until you mark this complete.</div>}
+                {f.done && !f.ready && <div style={{fontSize:12,color:AMBER}}>Marked complete but no hours are in yet — they'll see the saving once hours are entered.</div>}
                 {f.ready && (<>
-                  <div style={{fontSize:13,color:TXT,lineHeight:1.5}}>
-                    Done in <b style={{fontFamily:MONO,color:Y}}>{Math.round(f.hrs*10)/10}h</b> vs {f.quotedHrs}h quoted · <b style={{color:vc(f.variance)}}>{Math.abs(f.variance)<0.5?"on budget":f.variance<0?`${money0(-f.variance)} saving`:`${money0(f.variance)} over`}</b>
+                  <div style={{fontSize:13,color:TXT,lineHeight:1.6}}>
+                    {[["Labour", f.labourVar], ...(f.quotedParts || f.parts ? [["Parts", f.partsVar]] : [])].map(([l, v], i) => (
+                      <span key={l}>{i>0 && " · "}{l} <b style={{color:vc(v)}}>{Math.abs(v)<0.5?"on budget":v<0?`${money0(-v)} saving`:`${money0(v)} over`}</b></span>
+                    ))}
                   </div>
                   <div style={{fontSize:11,color:MUTED,marginTop:4,lineHeight:1.5}}>
-                    Labour <span style={{fontFamily:MONO,color:vc(f.labourVar)}}>{vs(f.labourVar)}</span> · Parts <span style={{fontFamily:MONO,color:vc(f.partsVar)}}>{vs(f.partsVar)}</span>
+                    Dollar amounts only — no hours, rate or quoted figures. Behind it: {Math.round(f.hrs*10)/10}h billed vs {f.quotedHrs}h planned, total <span style={{fontFamily:MONO,color:vc(f.variance)}}>{vs(f.variance)}</span>
                     {f.pendingParts>0 && ` · ${f.pendingParts} part${f.pendingParts===1?"":"s"} not invoiced (at quote)`}
                   </div>
                   {f.creamH>0 && (
@@ -6648,6 +7180,13 @@ export default function App() {
     const outcome = v => Math.abs(v) < 0.5 ? {word: "On budget", amt: "", col: MUTED}
                       : v < 0 ? {word: "Saving", amt: money(-v), col: GRN} : {word: "Over budget", amt: money(v), col: RED};
     const varTxt = v => { const o = outcome(v); return o.amt ? `${o.word} ${o.amt}` : o.word; };
+    // KLK were quoted a price per job, not a labour/parts split — so they see
+    // the saving (or overspend) on labour and on parts, never a "quoted" figure.
+    const savingTile = (label, v, big = false) => {
+      const o = outcome(v);
+      const head = o.amt ? `${label} ${o.word === "Saving" ? "SAVING" : "OVER"}` : label;
+      return valueTile(head, o.amt || "On budget", o.col, big);
+    };
     const valueTile = (label, value, col = TXT, big = false) => (
       <div style={{background:CARD2,borderRadius:8,padding:"9px 10px",minWidth:0}}>
         <div style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:3}}>{label}</div>
@@ -6709,16 +7248,12 @@ export default function App() {
           {tab==="costings" && (
             <div style={{padding:"16px 14px"}}>
               <div style={{background:CARD,border:`1px solid ${Y}`,borderRadius:12,padding:"15px",marginBottom:16}}>
-                <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:8}}>QUOTED TOTAL</div>
+                <div style={{fontFamily:FF,fontSize:10,fontWeight:700,color:MUTED,letterSpacing:1.5,marginBottom:8}}>REBUILD TOTAL</div>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
                   <span style={{fontFamily:MONO,fontSize:26,color:Y}}>{money(jc.total)}</span>
                   <span style={{fontSize:11,color:MUTED}}>+GST</span>
                 </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:10}}>
-                  {valueTile("LABOUR", money(jc.labour))}
-                  {valueTile("PARTS", money(jc.parts))}
-                </div>
-                <div style={{fontSize:10,color:MUTED,marginTop:8}}>{jc.count} jobs · all figures +GST</div>
+                <div style={{fontSize:10,color:MUTED,marginTop:8}}>{jc.count} jobs · parts and labour · all figures +GST</div>
               </div>
 
               {jf.complete>0 && (
@@ -6728,9 +7263,9 @@ export default function App() {
                     <span style={{fontSize:10,color:MUTED}}>+GST</span>
                   </div>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:10}}>
-                    {valueTile("QUOTED", money(jf.quoted))}
-                    {valueTile("FINAL", money(jf.final))}
-                    {(() => { const o = outcome(jf.variance); return valueTile(o.word.toUpperCase(), o.amt || "—", o.col, true); })()}
+                    {savingTile("LABOUR", jf.labourVar)}
+                    {savingTile("PARTS", jf.partsVar)}
+                    {savingTile("TOTAL", jf.variance, true)}
                   </div>
                 </div>
               )}
@@ -6784,35 +7319,25 @@ export default function App() {
                               {tOpen && tf && (
                                 <div style={{margin:"0 14px 10px 47px",background:CARD,border:`1px solid ${BDR}`,borderRadius:9,padding:"10px 12px"}}>
                                   {!tf.ready ? (
-                                    <div style={{fontSize:11,color:MUTED}}>Complete — the final cost will show here shortly.</div>
+                                    <div style={{fontSize:11,color:MUTED}}>Complete — any saving will show here shortly.</div>
                                   ) : (<>
                                     {(() => {
-                                      const cols = "1fr 1fr 1fr 1.25fr";
+                                      // Saving or overspend on labour and on parts — dollar amounts only.
                                       const cell = {fontFamily:MONO,fontSize:12,textAlign:"right",whiteSpace:"nowrap"};
-                                      const rowsT = [["Labour", tf.quotedLabour, tf.labour, tf.labourVar],
-                                                     ["Parts",  tf.quotedParts,  tf.parts,  tf.partsVar]].filter(r => r[0]==="Labour" || r[1] || r[2]);
+                                      const rowsT = [["Labour", tf.labourVar, true],
+                                                     ["Parts",  tf.partsVar,  !!(tf.quotedParts || tf.parts)]].filter(r => r[2]);
                                       const res = (v, bold) => { const o = outcome(v); return (
                                         <span style={{...cell,color:o.col,fontWeight:bold?700:400}}>{o.amt ? <><span style={{fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.3}}>{o.word==="Saving"?"SAVED":"OVER"} </span>{o.amt}</> : <span style={{fontFamily:FF,fontSize:10}}>ON BUDGET</span>}</span>
                                       ); };
+                                      const line = (label, v, bold, last) => (
+                                        <div key={label} style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,padding:last?"7px 0 0":"6px 0",borderBottom:last?"none":`1px solid ${BDR}`}}>
+                                          <span style={{fontSize:12,color:TXT,fontWeight:bold?700:400}}>{label}</span>
+                                          {res(v, bold)}
+                                        </div>
+                                      );
                                       return (<>
-                                        <div style={{display:"grid",gridTemplateColumns:cols,gap:8,paddingBottom:5,borderBottom:`1px solid ${BDR}`}}>
-                                          <span/>
-                                          {["QUOTED","FINAL",""].map((h,i)=><span key={i} style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1.2,textAlign:"right"}}>{h}</span>)}
-                                        </div>
-                                        {rowsT.map(([label, qv, fv, v]) => (
-                                          <div key={label} style={{display:"grid",gridTemplateColumns:cols,gap:8,alignItems:"baseline",padding:"6px 0",borderBottom:`1px solid ${BDR}`}}>
-                                            <span style={{fontSize:12,color:TXT}}>{label}</span>
-                                            <span style={{...cell,color:MUTED}}>{money(qv)}</span>
-                                            <span style={{...cell,color:TXT}}>{money(fv)}</span>
-                                            {res(v)}
-                                          </div>
-                                        ))}
-                                        <div style={{display:"grid",gridTemplateColumns:cols,gap:8,alignItems:"baseline",padding:"7px 0 0"}}>
-                                          <span style={{fontSize:12,color:TXT,fontWeight:700}}>Total</span>
-                                          <span style={{...cell,color:MUTED}}>{money(tf.quoted)}</span>
-                                          <span style={{...cell,color:TXT,fontWeight:700}}>{money(tf.final)}</span>
-                                          {res(tf.variance, true)}
-                                        </div>
+                                        {rowsT.map(([label, v]) => line(label, v, false, rowsT.length === 1))}
+                                        {rowsT.length > 1 && line("Total", tf.variance, true, true)}
                                       </>);
                                     })()}
                                   </>)}
@@ -6830,7 +7355,7 @@ export default function App() {
                                   ))}
                                 </div>
                               )}
-                              {tOpen && tp.length===0 && (
+                              {tOpen && tp.length===0 && !(tf?.parts > 0) && (
                                 <div style={{padding:"0 14px 12px 47px",fontSize:11,color:MUTED}}>No parts on this job — labour only.</div>
                               )}
                             </div>
@@ -6874,7 +7399,7 @@ export default function App() {
                 );
               })}
               <div style={{fontSize:10,color:MUTED,marginTop:14,lineHeight:1.6,padding:"0 2px"}}>
-                Quoted figures based on the agreed job sheet. Once a job is complete, its final cost and any saving or overspend show against the quote — parts not yet invoiced are counted at the quoted price. Talk to SRSA about anything that doesn't look right.
+                Prices are from the agreed job sheet. Once a job is complete, any saving or overspend on its labour and parts shows here — parts still to be invoiced count at the agreed price. Talk to SRSA about anything that doesn't look right.
               </div>
             </div>
           )}
@@ -7619,7 +8144,7 @@ export default function App() {
     // ── Task completion across all jobs ──
     const taskCounts = scopeJobs.reduce((a,j) => {
       const ts = [...tasksOf(j.id).filter(t=>isIn(j.id,t)), ...(customTasks[j.id]||[])];
-      ts.forEach(t => { a[getStatus(j.id,t.id)] = (a[getStatus(j.id,t.id)]||0)+1; a.total++; });
+      ts.forEach(t => { const k = statusKey(j.id,t.id); a[k] = (a[k]||0)+1; a.total++; });
       return a;
     }, {total:0});
 
@@ -7710,6 +8235,7 @@ export default function App() {
     const StatusDonut = ({counts}) => {
       const segs = [
         {k:"completed", label:"Completed", v:counts.completed||0, c:GRN},
+        {k:"invoiced",  label:"Invoiced",  v:counts.invoiced||0,  c:INV_COL},
         {k:"ongoing",   label:"Ongoing",   v:counts.ongoing||0,   c:Y},
         {k:"on_hold",   label:"On hold",   v:counts.on_hold||0,   c:"#F5A524"},
       ];
@@ -7717,7 +8243,7 @@ export default function App() {
       if (!total) return null;
       const R=42, C=2*Math.PI*R;
       let offset = 0;
-      const pct = total ? Math.round((counts.completed||0)/total*100) : 0;
+      const pct = total ? Math.round(((counts.completed||0)+(counts.invoiced||0))/total*100) : 0;
       return (
         <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"14px",display:"flex",alignItems:"center",gap:18}}>
           <svg viewBox="0 0 110 110" style={{width:104,height:104,flexShrink:0}}>
