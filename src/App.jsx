@@ -219,6 +219,9 @@ const slugKey = s => String(s || "").trim().toLowerCase().replace(/[^a-z0-9]+/g,
 const money2 = n => `${n < 0 ? "−" : ""}$${Math.abs(Number(n) || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
 const money0 = n => `${n < 0 ? "−" : ""}$${Math.round(Math.abs(Number(n) || 0)).toLocaleString()}`;
 // "2026-09-18" → "18/09/2026"
+// Job numbers off the sheet: 1.01, 8.09A, 11.20B. Anything else (a Firestore id
+// on an older added task) isn't worth showing.
+const isJobNo = id => /^\d+(\.\d+)?[A-Za-z]?$/.test(String(id || ""));
 const fmtDate = iso => { const [y, m, d] = String(iso || "").split("-"); return y && m && d ? `${Number(d)}/${m}/${y}` : String(iso || ""); };
 // ── Excel export ──
 // A small .xlsx writer so the office can pull a machine's jobs, labour and
@@ -6257,7 +6260,7 @@ export default function App() {
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:3}}>
-                      {/^\d+\.\d+$/.test(t.id||"")&&<span style={{fontFamily:MONO,fontSize:10,color:MUTED}}>{t.id}</span>}
+                      {isJobNo(t.id)&&<span style={{fontFamily:MONO,fontSize:11,color:Y}}>{t.id}</span>}
                       <PhaseChip jid={selJob} tid={t.id}/>
                     </div>
                     <div style={{fontSize:13,fontWeight:600,color:TXT,lineHeight:1.3}}>{t.desc}</div>
@@ -6969,7 +6972,7 @@ export default function App() {
             <div style={{display:"flex",justifyContent:"space-between",gap:10}}>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{display:"flex",gap:5,alignItems:"center",marginBottom:3,flexWrap:"wrap"}}>
-                  {t.id&&/^\d+\.\d+$/.test(t.id)&&<span style={{fontFamily:MONO,fontSize:10,color:MUTED}}>{t.id}</span>}
+                  {isJobNo(t.id)&&<span style={{fontFamily:MONO,fontSize:11,color:Y}}>{t.id}</span>}
 
                   {t.opt&&<Chip label={excl?"EXCL":"OPT"} col={excl?MUTED:Y} bg={excl?BDR2:"rgba(232,176,0,.12)"}/>}
                   <PhaseChip jid={selJob} tid={t.id}/>
@@ -7308,6 +7311,7 @@ export default function App() {
     const [tab, setTab]         = useState("costings");   // costings | progress
     const [openSec, setOpenSec] = useState(null);
     const [openTask, setOpenTask] = useState(null);
+    const [cPhase, setCPhase]   = useState("all");        // build phase being looked at
     const [lightbox, setLightbox] = useState(null);
     const job = visible.find(j => j.id === openJob) || visible[0];
 
@@ -7347,6 +7351,36 @@ export default function App() {
     const tasksIn = sid => [...tasksOf(job.id).filter(t => t.sId===sid && isIn(job.id,t)),
                             ...(customTasks[job.id]||[]).filter(t => t.sId===sid)]
                            .sort((a,b)=>a.id.localeCompare(b.id));
+    // ── Build phases ──
+    // The machine is built in stages. Customers see each stage's price, how far
+    // through it is, and the saving once jobs in it are finished.
+    const cPhases = phasesOf(job.id);
+    const phaseOK = t => cPhase === "all" || phaseOf(job.id, t.id) === cPhase;
+    const phaseSummary = ph => {
+      const ts = tasksForJob(job.id).filter(t => phaseOf(job.id, t.id) === ph);
+      const r = {jobs: ts.length, price: 0, complete: 0, ready: 0, variance: 0};
+      ts.forEach(t => {
+        r.price += taskCost(job.id, t).total;
+        const f = taskFinal(job.id, t, plines);
+        if (f.done) r.complete++;
+        if (f.ready) { r.ready++; r.variance += f.variance; }
+      });
+      return r;
+    };
+    // A section as the chosen phase sees it: its jobs, their price, and how they finished.
+    const secView = (sec, c) => {
+      const ts = tasksIn(sec.id).filter(phaseOK);
+      if (cPhase === "all") return {ts, total: c.total, count: c.count, done: c.done,
+        ready: sectionFinal(job.id, sec.id, plines).complete, variance: sectionFinal(job.id, sec.id, plines).variance, extras: true};
+      const r = {ts, total: 0, count: ts.length, done: 0, ready: 0, variance: 0, extras: false};
+      ts.forEach(t => {
+        r.total += taskCost(job.id, t).total;
+        const f = taskFinal(job.id, t, plines);
+        if (f.done) r.done++;
+        if (f.ready) { r.ready++; r.variance += f.variance; }
+      });
+      return r;
+    };
     // Photos the supervisor has picked on the CLIENT PHOTOS tab (every photo,
     // until they pick), grouped by section so the gallery reads as a story.
     const shared = jobPhotos(job.id).filter(p => clientSees(job, p));
@@ -7421,22 +7455,68 @@ export default function App() {
                 </div>
               )}
 
-              <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2,marginBottom:10}}>BY SECTION</div>
+              {cPhases.list.length>0 && (<>
+                <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2,marginBottom:10}}>BUILD PHASES</div>
+                <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.min(2,cPhases.list.length)},1fr)`,gap:8,marginBottom:16}}>
+                  {cPhases.list.map(ph => {
+                    const st = phaseSummary(ph);
+                    const on = cPhase === ph;
+                    const o = outcome(st.variance);
+                    return (
+                      <button key={ph} onClick={()=>{ setCPhase(on?"all":ph); setOpenSec(null); setOpenTask(null); }}
+                        style={{textAlign:"left",background:CARD,border:`1px solid ${on?Y:BDR}`,borderRadius:11,padding:"12px 13px",cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8}}>
+                          <span style={{fontFamily:FF,fontSize:14,fontWeight:800,color:TXT}}>PHASE {ph}</span>
+                          <span style={{fontFamily:MONO,fontSize:13,color:Y,whiteSpace:"nowrap"}}>{money(st.price)}</span>
+                        </div>
+                        <div style={{fontSize:11,color:MUTED,margin:"5px 0 7px"}}>{st.jobs} jobs · {st.complete} complete</div>
+                        <Bar v={st.complete} max={st.jobs} h={4}/>
+                        <div style={{fontFamily:MONO,fontSize:11,color:st.ready?o.col:MUTED,marginTop:6}}>
+                          {st.ready ? varTxt(st.variance) : "nothing finished yet"}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{fontSize:11,color:MUTED,marginTop:-8,marginBottom:16,lineHeight:1.5}}>
+                  The rebuild runs in stages. Tap a phase to see just that stage's jobs, or EVERYTHING for the whole machine. Freight, consumables and parts handling sit across the whole build, so they only show under EVERYTHING.
+                </div>
+              </>)}
+
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,marginBottom:10}}>
+                <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:Y,letterSpacing:2}}>BY SECTION</span>
+                {cPhase!=="all" && <span style={{fontSize:11,color:MUTED}}>phase {cPhase} only</span>}
+              </div>
+              {cPhases.list.length>0 && (
+                <div style={{display:"flex",gap:6,marginBottom:10}}>
+                  {[["all","EVERYTHING"], ...cPhases.list.map(ph => [ph, `PHASE ${ph}`])].map(([v,l]) => {
+                    const on = cPhase === v;
+                    return (
+                      <button key={String(v)} onClick={()=>{ setCPhase(v); setOpenSec(null); setOpenTask(null); }}
+                        style={{flex:1,minWidth:0,background:on?Y:CARD,border:`1px solid ${on?Y:BDR2}`,borderRadius:8,padding:"8px 4px",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:800,letterSpacing:.5,color:on?BG:MUTED}}>
+                        {l}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               {secsOf(job.id).map(sec => {
                 const c = sectionCost(job.id, sec.id);
                 if (!c.count) return null;
+                const v = secView(sec, c);
+                if (!v.count) return null;
                 const isOpen = openSec === sec.id;
-                const sf = sectionFinal(job.id, sec.id, plines);
+                const sf = {complete: v.ready, variance: v.variance};
                 return (
                   <div key={sec.id} style={{background:CARD,border:`1px solid ${isOpen?Y:BDR}`,borderRadius:11,marginBottom:8,overflow:"hidden"}}>
                     <button onClick={()=>{setOpenSec(isOpen?null:sec.id); setOpenTask(null);}}
                       style={{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",padding:"13px 14px",cursor:"pointer"}}>
                       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
                         <span style={{fontFamily:FF,fontSize:15,fontWeight:700,color:TXT}}>{sec.id}. {sec.name}</span>
-                        <span style={{fontFamily:MONO,fontSize:15,color:Y,whiteSpace:"nowrap"}}>{money(c.total)}</span>
+                        <span style={{fontFamily:MONO,fontSize:15,color:Y,whiteSpace:"nowrap"}}>{money(v.total)}</span>
                       </div>
                       <div style={{display:"flex",justifyContent:"space-between",marginTop:4,gap:8}}>
-                        <span style={{fontSize:11,color:MUTED}}>{c.count} job{c.count===1?"":"s"} · {c.done} complete</span>
+                        <span style={{fontSize:11,color:MUTED}}>{v.count} job{v.count===1?"":"s"} · {v.done} complete</span>
                         {sf.complete>0
                           ? <span style={{fontFamily:MONO,fontSize:12,color:outcome(sf.variance).col,whiteSpace:"nowrap"}}>{varTxt(sf.variance)}</span>
                           : <span style={{fontSize:10,color:MUTED}}>+GST</span>}
@@ -7445,7 +7525,7 @@ export default function App() {
 
                     {isOpen && (
                       <div style={{borderTop:`1px solid ${BDR}`,background:CARD2}}>
-                        {tasksIn(sec.id).map(t => {
+                        {v.ts.map(t => {
                           const tc = taskCost(job.id, t);
                           const tp = partsOf(job.id, t.id);
                           const done = getStatus(job.id, t.id)==="completed";
@@ -7457,6 +7537,7 @@ export default function App() {
                                 style={{display:"block",width:"100%",textAlign:"left",background:"none",border:"none",padding:"11px 14px",cursor:"pointer"}}>
                                 <div style={{display:"flex",alignItems:"center",gap:9}}>
                                   <span style={{fontFamily:MONO,fontSize:11,color:done?GRN:MUTED,minWidth:38}}>{t.id}</span>
+                                  {cPhase==="all" && phaseOf(job.id, t.id)>0 && <span style={{fontFamily:MONO,fontSize:10,color:"#5AA0FF"}}>P{phaseOf(job.id, t.id)}</span>}
                                   <span style={{flex:1,fontSize:13,color:TXT,lineHeight:1.35}}>{t.desc}</span>
                                   <span style={{fontFamily:MONO,fontSize:13,color:TXT,whiteSpace:"nowrap"}}>{money(tc.total)}</span>
                                 </div>
@@ -7512,7 +7593,7 @@ export default function App() {
                             </div>
                           );
                         })}
-                        {c.sundries>0 && (() => {
+                        {v.extras && c.sundries>0 && (() => {
                           const sOpen = openTask === `sundries-${sec.id}`;
                           return (
                             <div style={{borderBottom:`1px solid ${BDR}`}}>
@@ -7537,7 +7618,7 @@ export default function App() {
                             </div>
                           );
                         })()}
-                        {c.handling>0 && (
+                        {v.extras && c.handling>0 && (
                           <div style={{borderBottom:`1px solid ${BDR}`,padding:"11px 14px",display:"flex",alignItems:"center",gap:9}}>
                             <span style={{fontFamily:MONO,fontSize:11,color:MUTED,minWidth:38}}>—</span>
                             <span style={{flex:1,fontSize:13,color:TXT,lineHeight:1.35}}>{tmplOf(job.id).handling?.desc || "Parts handling"}</span>
