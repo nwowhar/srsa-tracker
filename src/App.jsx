@@ -3145,6 +3145,14 @@ export default function App() {
       setTaskStatus(s);
       setTaskInvoiced(inv);
     }));
+    unsubs.push(onSnapshot(collection(db,"taskPhase"), snap => {
+      const ph = {};
+      snap.docs.forEach(d => {
+        const data = d.data();
+        ph[eKey(data.jobId, data.taskId)] = Number(data.phase) || 0;
+      });
+      setTaskPhase(ph);
+    }));
     unsubs.push(onSnapshot(collection(db,"exclusions"), snap => {
       const ex = {};
       snap.docs.forEach(d => {
@@ -3231,6 +3239,8 @@ export default function App() {
   const [techNotes, setTechNotes] = useState({});  // eKey(jid,tid) -> string
   const [taskStatus, setTaskStatus] = useState({});
   const [taskInvoiced, setTaskInvoiced] = useState({}); // eKey(jid,tid) -> invoiced date ("" if none recorded)
+  const [taskPhase, setTaskPhase] = useState({});      // eKey(jid,tid) -> build phase, overriding the sheet
+  const [phaseFilter, setPhaseFilter] = useState("all"); // machine screens: "all" | phase number | 0 (not set)
   const [hourlyRate, setHourlyRate]   = useState(145);     // global default rate $/hr
   const [showRateModal, setShowRateModal] = useState(false);
   const [rateInput, setRateInput]     = useState("145");
@@ -3619,6 +3629,42 @@ export default function App() {
   const invoicedOn = (jid, tid) => taskInvoiced[eKey(jid,tid)] || "";
   // Status as shown on admin screens: ongoing | on_hold | completed | invoiced.
   const statusKey  = (jid, tid) => isInvoiced(jid, tid) ? "invoiced" : getStatus(jid, tid);
+  // ── Build phases ──
+  // Which stage of the rebuild a job belongs to. The job sheet sets it (the
+  // Quad Trac is split into phase 1 and 2); anything changed in the app is
+  // saved against the job and wins. 0 means no phase set.
+  const phaseOf = (jid, tid) => {
+    const ov = taskPhase[eKey(jid, tid)];
+    if (ov != null) return ov;
+    const t = tasksOf(jid).find(x => x.id === tid) || getCTById(jid, tid);
+    return Number(t?.phase) || 0;
+  };
+  const setPhase = async (jid, tid, ph) => {
+    await setDoc(doc(db,"taskPhase",`${jid}_${tid}`), {jobId:jid, taskId:tid, phase: Number(ph) || 0});
+  };
+  const phaseLabel = ph => ph ? `Phase ${ph}` : "No phase";
+  const phaseShort = ph => ph ? `P${ph}` : "—";
+  // Phases in use on a machine, lowest first, plus whether anything is unset.
+  const phasesOf = jid => {
+    const set = new Set();
+    let unset = false;
+    tasksForJob(jid).forEach(t => { const p = phaseOf(jid, t.id); if (p) set.add(p); else unset = true; });
+    return {list: [...set].sort((a,b) => a-b), unset};
+  };
+  const inPhase = (jid, tid, f) => f === "all" || phaseOf(jid, tid) === f;
+  // Jobs, hours and money in one phase of a machine.
+  const phaseStats = (jid, ph) => {
+    const ts = tasksForJob(jid).filter(t => phaseOf(jid, t.id) === ph);
+    return ts.reduce((a, t) => {
+      const c = taskCost(jid, t);
+      a.jobs++; a.est += Number(t.est) || 0; a.logged += logged(jid, t.id); a.cream += creamHrs(jid, t.id);
+      a.labour += c.labour; a.parts += c.parts; a.total += c.total;
+      const st = statusKey(jid, t.id);
+      if (st === "completed" || st === "invoiced") a.done++;
+      if (st === "invoiced") a.invoiced++;
+      return a;
+    }, {jobs:0, est:0, logged:0, cream:0, labour:0, parts:0, total:0, done:0, invoiced:0});
+  };
   const getCTById = (jid, tid) => (customTasks[jid] || []).find(t => t.id === tid);
   const isCustom  = (jid, tid) => !!(customTasks[jid] || []).find(t => t.id === tid);
   const subTasks  = (jid, tid) => (customTasks[jid] || []).filter(t => t.parentId === tid);
@@ -4056,11 +4102,11 @@ export default function App() {
     }
   };
 
-  const sStats = (jid, sid) => {
+  const sStats = (jid, sid, ph = "all") => {
     const lr      = getLR(jid);
     const builtin = tasksOf(jid).filter(t => t.sId === sid && isIn(jid,t));
     const custom  = (customTasks[jid]||[]).filter(t => t.sId === sid);
-    const ts = [...builtin, ...custom];
+    const ts = [...builtin, ...custom].filter(t => inPhase(jid, t.id, ph));
     const act = ts.reduce((s,t)=>s+logged(jid,t.id),0);
     return {
       est:        ts.reduce((s,t)=>s+t.est,0),
@@ -4075,11 +4121,11 @@ export default function App() {
       invoiced:   ts.filter(t=>isInvoiced(jid,t.id)).length,
     };
   };
-  const jStats = jid => {
+  const jStats = (jid, ph = "all") => {
     const lr = getLR(jid);
     const builtin = tasksOf(jid).filter(t => isIn(jid,t));
     const custom  = customTasks[jid]||[];
-    const ts = [...builtin, ...custom];
+    const ts = [...builtin, ...custom].filter(t => inPhase(jid, t.id, ph));
     const act = ts.reduce((s,t)=>s+logged(jid,t.id),0);
     return {
       est:        ts.reduce((s,t)=>s+t.est,0),
@@ -4142,11 +4188,11 @@ export default function App() {
       return {t, f, techTxt, first: dates[0] || "", last: dates[dates.length - 1] || "", est,
               status: statusKey(jid, t.id), invDate: invoicedOn(jid, t.id), note: techNotes[eKey(jid, t.id)] || ""};
     });
-    const jobHead = ["Section", "Section name", "Job no", "Description", "Status", "Invoiced", "Planned hrs", "Logged hrs", "Cream hrs",
+    const jobHead = ["Section", "Section name", "Phase", "Job no", "Description", "Status", "Invoiced", "Planned hrs", "Logged hrs", "Cream hrs",
       "Billable hrs", "Hours saved (− = over)", "Technicians", "First worked", "Last worked", "Quoted labour", "Labour billed",
       "Quoted parts", "Parts", "Quoted total", "Total", "Saving (− = over)", "Tech notes"];
     const jobsSheet = [jobHead.map(H), ...jobRows.map(r => [
-      Number(r.t.sId), secName(r.t.sId), r.t.id, r.t.desc || "", LABEL[r.status] || r.status, dt(r.invDate),
+      Number(r.t.sId), secName(r.t.sId), phaseOf(jid, r.t.id) || "", r.t.id, r.t.desc || "", LABEL[r.status] || r.status, dt(r.invDate),
       hrs(r.est), hrs(r.f.loggedH), r.f.creamH ? hrs(r.f.creamH) : null, hrs(r.f.hrs),
       r.f.loggedH > 0 ? hrs(r.est - r.f.loggedH) : null,
       r.techTxt, dt(r.first), dt(r.last),
@@ -4155,11 +4201,11 @@ export default function App() {
     ])];
     const jobLast = jobsSheet.length - 1;
     const jSum = (key) => jobRows.reduce((s, r) => s + (typeof key === "function" ? key(r) : 0), 0);
-    jobsSheet.push([], totalsRow(jobHead.length, 1, jobLast, [6, 7, 8, 9, 14, 15, 16, 17, 18, 19, 20], {
-      6: {s: "hb", val: jSum(r => r.est)}, 7: {s: "hb", val: jSum(r => r.f.loggedH)}, 8: {s: "hb", val: jSum(r => r.f.creamH)},
-      9: {s: "hb", val: jSum(r => r.f.hrs)}, 14: {val: jSum(r => r.f.quotedLabour)}, 15: {val: jSum(r => r.f.labour)},
-      16: {val: jSum(r => r.f.quotedParts)}, 17: {val: jSum(r => r.f.parts)}, 18: {val: jSum(r => r.f.quoted)},
-      19: {val: jSum(r => r.f.final)}, 20: {val: jSum(r => r.f.ready ? -r.f.variance : 0)}}));
+    jobsSheet.push([], totalsRow(jobHead.length, 1, jobLast, [7, 8, 9, 10, 15, 16, 17, 18, 19, 20, 21], {
+      7: {s: "hb", val: jSum(r => r.est)}, 8: {s: "hb", val: jSum(r => r.f.loggedH)}, 9: {s: "hb", val: jSum(r => r.f.creamH)},
+      10: {s: "hb", val: jSum(r => r.f.hrs)}, 15: {val: jSum(r => r.f.quotedLabour)}, 16: {val: jSum(r => r.f.labour)},
+      17: {val: jSum(r => r.f.quotedParts)}, 18: {val: jSum(r => r.f.parts)}, 19: {val: jSum(r => r.f.quoted)},
+      20: {val: jSum(r => r.f.final)}, 21: {val: jSum(r => r.f.ready ? -r.f.variance : 0)}}));
 
     // Labour — one line per timesheet entry
     const ents = [...jobEntries].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")) || byId(a.taskId, b.taskId));
@@ -4221,11 +4267,11 @@ export default function App() {
     const KIND = {quote: "Quoted", sundry: "Freight/consumables", extra: "Extra (not quoted)", orphan: "Removed from sheet"};
     const PST = {none: "Not ordered", ordered: "Ordered", invoiced: "Invoiced"};
     const partRows = [...ls].sort((a, b) => (Number(a.sId ?? 999) - Number(b.sId ?? 999)) || byId(a.taskId || "zzz", b.taskId || "zzz"));
-    const partHead = ["Section", "Job no", "Type", "Part no", "Description", "Qty", "Unit price", "Quoted", "Status", "Ordered",
+    const partHead = ["Section", "Job no", "Phase", "Type", "Part no", "Description", "Qty", "Unit price", "Quoted", "Status", "Ordered",
       "Supplier", "Invoice no", "Invoice date", "Invoiced qty", "Invoiced unit", "Invoiced", "Invoiced vs quote", "Notes"];
     const partSheet = [partHead.map(H), ...partRows.map(l => {
       const inv = l.status === "invoiced";
-      return [l.sId != null ? Number(l.sId) : null, l.taskId || "", KIND[l.kind] || l.kind, l.pn || "", l.desc || "",
+      return [l.sId != null ? Number(l.sId) : null, l.taskId || "", (l.taskId && phaseOf(jid, l.taskId)) || "", KIND[l.kind] || l.kind, l.pn || "", l.desc || "",
         l.kind === "extra" ? null : l.qty, l.price != null ? $(l.price) : (l.kind === "extra" ? null : "TBC"), l.kind === "extra" ? null : $(l.quoted),
         PST[l.status] || l.status, dt(l.orderedDate), l.supplier || "", l.invoiceNo || "", dt(l.invoiceDate),
         inv || l.kind === "extra" ? l.actualQty : null, inv || l.kind === "extra" ? $(l.actualUnit) : null, inv || (l.kind === "extra" && l.status !== "none") ? $(l.actual) : null,
@@ -4234,10 +4280,10 @@ export default function App() {
     })];
     const partLast = partSheet.length - 1;
     const pVal = fn => partRows.reduce((s, l) => s + (fn(l) || 0), 0);
-    partSheet.push([], totalsRow(partHead.length, 1, partLast, [7, 15, 16], {
-      7: {val: pVal(l => l.kind === "extra" ? 0 : l.quoted)},
-      15: {val: pVal(l => l.status === "invoiced" || (l.kind === "extra" && l.status !== "none") ? l.actual : 0)},
-      16: {val: pVal(l => l.status === "invoiced" ? (l.kind === "extra" ? l.actual : l.variance) : 0)}}));
+    partSheet.push([], totalsRow(partHead.length, 1, partLast, [8, 16, 17], {
+      8: {val: pVal(l => l.kind === "extra" ? 0 : l.quoted)},
+      16: {val: pVal(l => l.status === "invoiced" || (l.kind === "extra" && l.status !== "none") ? l.actual : 0)},
+      17: {val: pVal(l => l.status === "invoiced" ? (l.kind === "extra" ? l.actual : l.variance) : 0)}}));
 
     // Cream, split between the people who worked each job
     const creamHead = ["Section", "Job no", "Description", "Cream added", "Cream hrs", "Rate", "Cream $", "Worker", "Worker's logged hrs", "Share", "Worker cream hrs", "Worker cream $"];
@@ -4275,6 +4321,14 @@ export default function App() {
       ["Jobs on the sheet", jobRows.length], ["Ongoing", count("ongoing")], ["On hold", count("on_hold")],
       ["Completed, not invoiced", count("completed")], ["Invoiced", count("invoiced")],
       [],
+      ...(() => {
+        const ph = phasesOf(jid);
+        if (!ph.list.length) return [];
+        const row = p => { const st = phaseStats(jid, p); return [p ? `Phase ${p}` : "No phase set", st.jobs, hrs(st.est), $(st.total), `${st.done} done, ${st.invoiced} invoiced`]; };
+        return [[B("BUILD PHASES"), B("Jobs"), B("Planned hrs"), B("Labour + parts"), B("Progress")],
+          ...ph.list.map(row), ...(ph.unset ? [row(0)] : []),
+          ["", "", "", "", "Phase money excludes section freight, consumables and parts handling"], []];
+      })(),
       [B("HOURS")],
       ["Planned", hrs(o.est)], ["Logged", hrs(o.actual)], ["Cream", hrs(o.cream)], ["Billable (logged + cream)", hrs(o.actual + o.cream)],
       [],
@@ -4301,12 +4355,12 @@ export default function App() {
     ];
 
     return [
-      {name: "Summary", cols: [46, 18, 16], rows: summary},
-      {name: "Jobs", header: 0, filterTo: jobLast, cols: [8, 18, 8, 44, 11, 11, 9, 9, 9, 9, 11, 30, 11, 11, 12, 12, 12, 12, 12, 12, 12, 40], rows: jobsSheet},
+      {name: "Summary", cols: [46, 12, 14, 16, 34], rows: summary},
+      {name: "Jobs", header: 0, filterTo: jobLast, cols: [8, 18, 7, 8, 44, 11, 11, 9, 9, 9, 9, 11, 30, 11, 11, 12, 12, 12, 12, 12, 12, 12, 40], rows: jobsSheet},
       {name: "Labour entries", header: 0, filterTo: labLast, cols: [11, 8, 18, 8, 40, 16, 8, 10, 11, 40, 11], rows: labSheet},
       {name: "Hours by tech", header: 0, filterTo: thLast, cols: [8, 8, 40, 9, ...techNames.map(() => 12), 10, 9], rows: thSheet},
       {name: "Sections", header: 0, filterTo: secLast, cols: [8, 22, 7, 10, 9, 9, 9, 9, 13, 12, 13, 13, 13, 13, 13, 10, 14], rows: secSheet},
-      {name: "Parts", header: 0, filterTo: partLast, cols: [8, 8, 16, 18, 40, 6, 11, 11, 11, 11, 16, 12, 11, 9, 11, 11, 12, 40], rows: partSheet},
+      {name: "Parts", header: 0, filterTo: partLast, cols: [8, 8, 7, 16, 18, 40, 6, 11, 11, 11, 11, 16, 12, 11, 9, 11, 11, 12, 40], rows: partSheet},
       {name: "Cream", header: 0, filterTo: creamLast, cols: [8, 8, 40, 11, 9, 9, 11, 16, 11, 8, 11, 11], rows: creamSheet},
     ];
   };
@@ -5933,6 +5987,32 @@ export default function App() {
     );
   };
 
+  // Phase filter chips shown on the machine and section screens.
+  const PhaseChips = ({jid, style}) => {
+    const {list, unset} = phasesOf(jid);
+    if (!list.length) return null;
+    const opts = [["all", "ALL", null], ...list.map(p => [p, `PHASE ${p}`, phaseStats(jid, p)]), ...(unset ? [[0, "NOT SET", phaseStats(jid, 0)]] : [])];
+    return (
+      <div style={{display:"flex",gap:6,...style}}>
+        {opts.map(([v, l, st]) => {
+          const on = phaseFilter === v;
+          return (
+            <button key={String(v)} onClick={()=>setPhaseFilter(v)}
+              style={{flex:1,minWidth:0,background:on?Y:CARD2,border:`1px solid ${on?Y:BDR2}`,borderRadius:8,padding:"7px 4px",cursor:"pointer"}}>
+              <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:on?BG:MUTED,letterSpacing:.5}}>{l}</div>
+              {st && <div style={{fontFamily:MONO,fontSize:9,color:on?BG:MUTED,marginTop:1}}>{st.jobs} · {st.est}h</div>}
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+  const PhaseChip = ({jid, tid}) => {
+    const p = phaseOf(jid, tid);
+    if (!p) return null;
+    return <span style={{fontFamily:FF,fontSize:10,fontWeight:700,letterSpacing:.6,background:"rgba(90,160,255,.12)",color:"#5AA0FF",borderRadius:4,padding:"2px 6px",whiteSpace:"nowrap",border:"1px solid rgba(90,160,255,.35)"}}>P{p}</span>;
+  };
+
   const StatusChip = ({jid, tid}) => {
     const s = statusStyle(statusKey(jid, tid));
     return <span style={{fontFamily:FF, fontSize:10, fontWeight:700, letterSpacing:.6, background:s.bg, color:s.col, borderRadius:4, padding:"2px 7px", whiteSpace:"nowrap", border:`1px solid ${s.bdr}`}}>{s.label}</span>;
@@ -6176,7 +6256,10 @@ export default function App() {
               <div key={t.id} onClick={()=>go("task",{task:t.id})} style={{background:CARD,borderRadius:10,padding:"12px 14px",marginBottom:7,border:`1px solid ${BDR}`,cursor:"pointer"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <div style={{flex:1,minWidth:0}}>
-                    {/^\d+\.\d+$/.test(t.id||"")&&<div style={{fontFamily:MONO,fontSize:10,color:MUTED,marginBottom:3}}>{t.id}</div>}
+                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:3}}>
+                      {/^\d+\.\d+$/.test(t.id||"")&&<span style={{fontFamily:MONO,fontSize:10,color:MUTED}}>{t.id}</span>}
+                      <PhaseChip jid={selJob} tid={t.id}/>
+                    </div>
                     <div style={{fontSize:13,fontWeight:600,color:TXT,lineHeight:1.3}}>{t.desc}</div>
                     <div style={{display:"flex",gap:10,marginTop:6}}>
                       {ph.length>0 && <span style={{fontSize:11,color:Y,display:"flex",alignItems:"center",gap:3}}><Camera size={10}/>{ph.length} photo{ph.length>1?"s":""}</span>}
@@ -6337,7 +6420,10 @@ export default function App() {
 
   const AdminJobView = () => {
     const j = jobs.find(x => x.id===selJob);
-    const o = jStats(selJob);
+    const phases = phasesOf(selJob);
+    const pf = phases.list.length ? phaseFilter : "all";      // no phases on this machine: never filter
+    const o = jStats(selJob, pf);
+    const phTxt = pf === "all" ? "" : pf === 0 ? " · jobs with no phase" : ` · phase ${pf} only`;
     const tab = jobTab;
     const fmt = n => { const a = Math.abs(n); const t = a>=1000?`$${(a/1000).toFixed(1)}k`:`$${Math.round(a)}`; return n < 0 ? `−${t}` : t; };
     return (
@@ -6513,14 +6599,40 @@ export default function App() {
           <div>
             <div style={{background:CARD,padding:"12px 16px 14px",borderBottom:`1px solid ${BDR}`}}>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:MUTED,marginBottom:6}}>
-                <span>Overall progress</span><span style={{fontFamily:MONO}}>{o.actual.toFixed(1)} / {o.est}h</span>
+                <span>Overall progress{phTxt}</span><span style={{fontFamily:MONO}}>{o.actual.toFixed(1)} / {o.est}h</span>
               </div>
               <Bar v={o.actual} max={o.est} h={6}/>
+              <PhaseChips jid={selJob} style={{marginTop:10}}/>
             </div>
+            {phases.list.length>0 && (
+              <div style={{padding: isDesktop?"12px 24px 0":"12px 14px 0"}}>
+                <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.min(2, phases.list.length)},1fr)`,gap:8}}>
+                  {phases.list.map(ph => {
+                    const st = phaseStats(selJob, ph);
+                    const pct = st.jobs ? Math.round(st.done/st.jobs*100) : 0;
+                    return (
+                      <button key={ph} onClick={()=>setPhaseFilter(phaseFilter===ph?"all":ph)}
+                        style={{textAlign:"left",background:CARD,border:`1px solid ${phaseFilter===ph?Y:BDR}`,borderRadius:10,padding:"11px 13px",cursor:"pointer"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8}}>
+                          <span style={{fontFamily:FF,fontSize:13,fontWeight:800,color:TXT,letterSpacing:.5}}>PHASE {ph}</span>
+                          <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{money0(st.total)}</span>
+                        </div>
+                        <div style={{fontSize:11,color:MUTED,margin:"4px 0 6px"}}>
+                          {st.jobs} jobs · {st.est}h planned · {st.done} done{st.invoiced?` · ${st.invoiced} invoiced`:""}
+                        </div>
+                        <Bar v={st.done} max={st.jobs} h={4}/>
+                        <div style={{fontSize:10,color:MUTED,marginTop:4}}>{pct}% of jobs complete · {st.logged.toFixed(1)}h logged</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div style={{padding: isDesktop?"12px 24px":"12px 14px"}}>
               <div style={{display:"grid",gridTemplateColumns: isDesktop?"repeat(3,1fr)":"1fr",gap:10}}>
               {secsOf(selJob).map(sec => {
-                const st = sStats(selJob, sec.id);
+                const st = sStats(selJob, sec.id, pf);
+                if (!st.total) return null;
                 const over = st.actual>st.est&&st.est>0;
                 const pct = st.est>0?(st.actual/st.est*100).toFixed(0):0;
                 return (
@@ -6577,14 +6689,30 @@ export default function App() {
                   <div style={{fontSize:10,color:MUTED,marginTop:2}}>+GST all figures</div>
                 </div>
               </div>
+              <PhaseChips jid={selJob} style={{marginBottom:8}}/>
               <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <span style={{fontSize:12,color:MUTED}}>Locked rate for this job</span>
                 <span style={{fontFamily:MONO,fontSize:14,color:Y}}>${j?.lockedRate||145}/hr +GST</span>
               </div>
               {(() => {
+                const m = n => `$${Math.round(n).toLocaleString()}`;
+                if (pf !== "all") {                       // just the phase being looked at
+                  const st = phaseStats(selJob, pf);
+                  if (!st.jobs) return null;
+                  return (
+                    <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${BDR2}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                        <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>{pf ? `PHASE ${pf}` : "NO PHASE"} · LABOUR + PARTS</span>
+                        <span style={{fontFamily:MONO,fontSize:17,color:Y}}>{m(st.total)}</span>
+                      </div>
+                      <div style={{fontSize:10,color:MUTED,marginTop:5,lineHeight:1.6}}>
+                        {m(st.labour)} labour ({st.est}h) + {m(st.parts)} parts · {st.jobs} jobs · +GST · freight, consumables and parts handling sit outside the phases
+                      </div>
+                    </div>
+                  );
+                }
                 const q = jobCost(selJob);
                 if (!q.total) return null;
-                const m = n => `$${Math.round(n).toLocaleString()}`;
                 return (
                   <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${BDR2}`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
@@ -6605,7 +6733,7 @@ export default function App() {
                 return (
                   <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${BDR2}`}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
-                      <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>CLIENT SEES · {f.complete} COMPLETED JOB{f.complete===1?"":"S"}</span>
+                      <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>CLIENT SEES · {f.complete} COMPLETED JOB{f.complete===1?"":"S"}{pf!=="all"?" · WHOLE MACHINE":""}</span>
                       <span style={{fontFamily:MONO,fontSize:15,color:vc(f.variance)}}>{Math.abs(f.variance)<0.5?"on budget":f.variance<0?`${money0(-f.variance)} saving`:`${money0(f.variance)} over`}</span>
                     </div>
                     <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.6}}>
@@ -6617,7 +6745,7 @@ export default function App() {
               {/* Billing: hours the boys logged + cream hours added on top */}
               <div style={{background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${o.cream>0?"rgba(232,176,0,.35)":BDR2}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
-                  <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>BILLABLE LABOUR · LOGGED + CREAM</span>
+                  <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>BILLABLE LABOUR · LOGGED + CREAM{pf!=="all"?` · PHASE ${pf||"—"}`:""}</span>
                   <span style={{fontFamily:MONO,fontSize:17,color:Y}}>{money0(o.actualCost + o.creamCost)}</span>
                 </div>
                 <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.6}}>
@@ -6631,7 +6759,7 @@ export default function App() {
                   <button onClick={()=>setJobTab("parts")}
                     style={{display:"block",width:"100%",textAlign:"left",background:CARD2,borderRadius:8,padding:"10px 12px",marginTop:8,border:`1px solid ${ps.variance>0.5?"rgba(255,76,76,.35)":BDR2}`,cursor:"pointer"}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
-                      <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>PARTS · QUOTED VS INVOICED</span>
+                      <span style={{fontFamily:FF,fontSize:9,color:MUTED,letterSpacing:1.5}}>PARTS · QUOTED VS INVOICED{pf!=="all"?" · WHOLE MACHINE":""}</span>
                       <span style={{fontFamily:MONO,fontSize:15,color:ps.variance>0.5?RED:ps.variance<-0.5?GRN:MUTED}}>{signed0(ps.variance)}</span>
                     </div>
                     <div style={{fontSize:11,color:MUTED,marginTop:5,lineHeight:1.6}}>
@@ -6646,7 +6774,8 @@ export default function App() {
                 {["SECTION","EST","ACT","VAR"].map(h=><div key={h} style={{fontFamily:FF,fontSize:9,fontWeight:700,color:MUTED,letterSpacing:1,textAlign:h!=="SECTION"?"right":"left"}}>{h}</div>)}
               </div>
               {secsOf(j.id).map(sec=>{
-                const st = sStats(selJob, sec.id);
+                const st = sStats(selJob, sec.id, pf);
+                if (!st.total) return null;
                 const vari = st.actualCost-st.estCost;
                 const over = st.actual>0&&vari>0;
                 return (
@@ -6679,7 +6808,7 @@ export default function App() {
               {(() => {
                 const ls = partsLines(selJob);
                 const rows = tasksForJob(selJob)
-                  .filter(t => getStatus(selJob, t.id) === "completed")
+                  .filter(t => inPhase(selJob, t.id, pf) && getStatus(selJob, t.id) === "completed")
                   .map(t => ({t, inv: isInvoiced(selJob, t.id), date: invoicedOn(selJob, t.id), f: taskFinal(selJob, t, ls),
                               creamLeft: creamHrs(selJob, t.id) > 0 ? 0 : creamAvail(selJob, t)}));
                 const todo = rows.filter(r => !r.inv);
@@ -6750,7 +6879,7 @@ export default function App() {
 
               {/* Cream: jobs done under plan — add the difference on before billing */}
               {(() => {
-                const tasks = tasksForJob(selJob);
+                const tasks = tasksForJob(selJob).filter(t => inPhase(selJob, t.id, pf));
                 const rows = tasks
                   .map(t => ({t, l: logged(selJob, t.id), c: creamHrs(selJob, t.id), a: creamAvail(selJob, t), done: getStatus(selJob, t.id)==="completed"}))
                   .filter(r => r.c > 0 || (r.l > 0 && r.a > 0))
@@ -6821,9 +6950,10 @@ export default function App() {
 
   const AdminSectionView = () => {
     const sec = secsOf(selJob).find(s => s.id===selSec);
-    const st = sStats(selJob, selSec);
-    const builtIn = tasksOf(selJob).filter(t => t.sId===selSec);
-    const ctTop   = (customTasks[selJob]||[]).filter(t => t.sId===selSec && !t.parentId);
+    const pf  = phasesOf(selJob).list.length ? phaseFilter : "all";
+    const st = sStats(selJob, selSec, pf);
+    const builtIn = tasksOf(selJob).filter(t => t.sId===selSec && inPhase(selJob, t.id, pf));
+    const ctTop   = (customTasks[selJob]||[]).filter(t => t.sId===selSec && !t.parentId && inPhase(selJob, t.id, pf));
 
     const TaskCard = ({t, indent=false}) => {
       const excl = !isCustom(selJob, t.id) && getExcl(selJob).has(t.id);
@@ -6842,6 +6972,7 @@ export default function App() {
                   {t.id&&/^\d+\.\d+$/.test(t.id)&&<span style={{fontFamily:MONO,fontSize:10,color:MUTED}}>{t.id}</span>}
 
                   {t.opt&&<Chip label={excl?"EXCL":"OPT"} col={excl?MUTED:Y} bg={excl?BDR2:"rgba(232,176,0,.12)"}/>}
+                  <PhaseChip jid={selJob} tid={t.id}/>
                   <StatusChip jid={selJob} tid={t.id}/>
                 </div>
                 <div style={{fontSize:13,fontWeight:600,color:excl?MUTED:TXT,lineHeight:1.3}}>{t.desc}</div>
@@ -6874,7 +7005,7 @@ export default function App() {
 
     return (
       <div>
-        <TopBar title={sec?.name} sub={`${st.total} tasks · ${st.est}h est`}/>
+        <TopBar title={sec?.name} sub={`${st.total} tasks · ${st.est}h est${pf==="all"?"":pf?` · phase ${pf} only`:" · no phase set"}`}/>
         <div style={{background:CARD,padding:"12px 16px 14px",borderBottom:`1px solid ${BDR}`}}>
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:10}}>
             <StatBox label="EST" val={`${st.est}h`} col={Y}/>
@@ -6882,8 +7013,9 @@ export default function App() {
             <StatBox label="EST COST" val={`$${Math.round(st.estCost).toLocaleString()}`} col={Y}/>
           </div>
           <Bar v={st.actual} max={st.est} h={5}/>
+          <PhaseChips jid={selJob} style={{marginTop:10}}/>
           {(() => {
-            const toBill = tasksForJob(selJob).filter(t => t.sId===selSec && getStatus(selJob,t.id)==="completed" && !isInvoiced(selJob,t.id));
+            const toBill = tasksForJob(selJob).filter(t => t.sId===selSec && inPhase(selJob, t.id, pf) && getStatus(selJob,t.id)==="completed" && !isInvoiced(selJob,t.id));
             if (!st.completed) return null;
             return (
               <div style={{display:"flex",alignItems:"center",gap:10,marginTop:10}}>
@@ -6973,6 +7105,25 @@ export default function App() {
             </div>
           )}
           <StatusToggle jid={selJob} tid={selTask}/>
+          {(() => {
+            // Which phase of the build this job belongs to. The sheet sets it;
+            // changing it here only affects this machine.
+            const cur = phaseOf(selJob, selTask);
+            const opts = [...new Set([...phasesOf(selJob).list, 1, 2, cur].filter(Boolean))].sort((a,b)=>a-b);
+            return (
+              <div style={{marginTop:10, background:CARD2, borderRadius:10, padding:"12px 14px"}}>
+                <div style={{fontFamily:FF, fontSize:10, fontWeight:700, color:MUTED, letterSpacing:1.5, marginBottom:10}}>BUILD PHASE</div>
+                <div style={{display:"grid", gridTemplateColumns:`repeat(${opts.length+1},1fr)`, gap:5}}>
+                  {[...opts.map(p => [p, `Phase ${p}`]), [0, "Not set"]].map(([v, l]) => (
+                    <button key={v} onClick={()=>setPhase(selJob, selTask, v)}
+                      style={{background:cur===v?"rgba(90,160,255,.15)":"transparent", border:`1px solid ${cur===v?"rgba(90,160,255,.45)":BDR2}`, borderRadius:8, padding:"9px 2px", cursor:"pointer", minWidth:0}}>
+                      <div style={{fontFamily:FF, fontSize:11, fontWeight:700, color:cur===v?"#5AA0FF":MUTED, letterSpacing:.3}}>{l}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
           {(() => {
             // Parts used on this job from stock — allocate here when the job's done.
             const moves = stockMoves.filter(m => m.type === "out" && m.jobId === selJob && m.taskId === selTask)
@@ -7636,9 +7787,15 @@ export default function App() {
     // Filters the chart live as you type by hiding rows straight in the page —
     // no re-render, so the box keeps focus (this view remounts on every save).
     const secNameOf = sid => secsOf(job.id).find(s => s.id === sid)?.name || "";
-    const searchText = r => `${r.taskId} ${r.desc||""} ${secNameOf(r.sId)}`.toLowerCase();
+    // "p1" / "phase 1" filter the chart through the same search box as the chips below.
+    const phaseTag = r => { const p = phaseOf(job.id, r.taskId); return p ? ` p${p} phase${p} phase ${p}` : " nophase no phase"; };
+    const searchText = r => `${r.taskId} ${r.desc||""} ${secNameOf(r.sId)}${phaseTag(r)}`.toLowerCase();
     const q0 = ganttUI.query.trim().toLowerCase();
-    const hit0 = r => !q0 || searchText(r).includes(q0);
+    // The phase chips filter the chart too — kept on ganttUI so the live search
+    // below (which hides rows straight in the page) honours it as well.
+    const gPhase = phasesOf(job?.id).list.length ? phaseFilter : "all";
+    ganttUI.phase = gPhase;
+    const hit0 = r => (gPhase === "all" || phaseOf(job.id, r.taskId) === gPhase) && (!q0 || searchText(r).includes(q0));
     const nHits0 = ordered.filter(hit0).length;
     const applySearch = value => {
       ganttUI.query = value;
@@ -7646,7 +7803,8 @@ export default function App() {
       const box = ganttUI.el;
       let n = 0, firstId = null;
       if (box) box.querySelectorAll("[data-gantt-row]").forEach(el => {
-        const hit = !q || (el.dataset.search || "").includes(q);
+        const okPhase = ganttUI.phase === "all" || Number(el.dataset.phase || 0) === ganttUI.phase;
+        const hit = okPhase && (!q || (el.dataset.search || "").includes(q));
         el.style.display = hit ? "" : "none";
         if (hit && el.tagName === "BUTTON") { n++; if (!firstId) firstId = el.dataset.ganttRow; }
       });
@@ -7666,9 +7824,10 @@ export default function App() {
     // where it'll drop; the chart scrolls when you reach the top or bottom edge.
     const startRowDrag = (e, r) => {
       if (e.button !== undefined && e.button !== 0) return;
-      if (ganttUI.query.trim()) {                     // positions don't line up while rows are hidden
+      if (ganttUI.query.trim() || gPhase !== "all") {  // positions don't line up while rows are hidden
         e.preventDefault(); e.stopPropagation();
-        flashGantt({text: "Clear the search to move jobs up or down", jobId: job.id, taskId: r.taskId, before: undefined, noUndo: true});
+        flashGantt({text: ganttUI.query.trim() ? "Clear the search to move jobs up or down" : "Show ALL phases to move jobs up or down",
+          jobId: job.id, taskId: r.taskId, before: undefined, noUndo: true});
         return;
       }
       e.preventDefault(); e.stopPropagation();
@@ -7893,7 +8052,7 @@ export default function App() {
           )}
           {job && rows.length>0 && (
             <div style={{position:"relative",marginTop:8}}>
-              <input type="search" defaultValue={ganttUI.query} key={job.id}
+              <input type="search" defaultValue={ganttUI.query} key={job.id} data-gantt-search
                 placeholder="Search jobs — e.g. 8.09, a/c, cab"
                 autoCorrect="off" autoCapitalize="none" spellCheck={false} enterKeyHint="search"
                 ref={el => { if (el && ganttUI.searchFocus && document.activeElement !== el) { el.focus(); const v = el.value; el.value = ""; el.value = v; } }}
@@ -7902,7 +8061,7 @@ export default function App() {
                 onKeyDown={e=>{ if (e.key==="Escape") { e.currentTarget.value = ""; applySearch(""); } if (e.key==="Enter") e.currentTarget.blur(); }}
                 style={{width:"100%",background:CARD2,border:`1px solid ${BDR2}`,borderRadius:8,padding:"9px 110px 9px 12px",color:TXT,fontSize:14,boxSizing:"border-box",outline:"none"}}/>
               <span data-gantt-count style={{position:"absolute",right:44,top:"50%",transform:"translateY(-50%)",fontFamily:MONO,fontSize:11,color:Y,pointerEvents:"none"}}>
-                {q0 ? `${nHits0} of ${ordered.length}` : ""}
+                {q0 || gPhase !== "all" ? `${nHits0} of ${ordered.length}` : ""}
               </span>
               <button data-gantt-clear aria-label="Clear search"
                 onClick={e=>{ const inp = e.currentTarget.parentElement.querySelector("input"); inp.value = ""; applySearch(""); }}
@@ -7911,6 +8070,7 @@ export default function App() {
               </button>
             </div>
           )}
+          {job && rows.length>0 && <PhaseChips jid={job.id} style={{marginTop:8}}/>}
           {job && savedCount>0 && (
             <button onClick={resetAll} disabled={busy}
               style={{marginTop:8,width:"100%",background:"none",border:`1px solid ${BDR2}`,borderRadius:8,padding:"8px 0",cursor:"pointer",fontFamily:FF,fontSize:11,fontWeight:700,color:MUTED,letterSpacing:1}}>
@@ -7988,7 +8148,7 @@ export default function App() {
                   {ordered.map(r => {
                     const t = taskOf(r.taskId);
                     return (
-                      <button key={r.taskId} data-ladder-row data-gantt-row={r.taskId} data-search={searchText(r)}
+                      <button key={r.taskId} data-ladder-row data-gantt-row={r.taskId} data-search={searchText(r)} data-phase={phaseOf(job.id, r.taskId)}
                         onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
                         style={{display:hit0(r)?"flex":"none",alignItems:"center",gap:6,width:"100%",height:ROW,boxSizing:"border-box",background:"none",border:"none",borderBottom:`1px solid ${BDR}`,padding:"0 10px 0 0",cursor:"pointer",textAlign:"left"}}>
                         {/* grip: drag up/down to change the job's place in the ladder */}
@@ -7996,6 +8156,7 @@ export default function App() {
                           onClick={e=>e.stopPropagation()}
                           style={{alignSelf:"stretch",width:20,flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center",cursor:"grab",touchAction:"none",color:MUTED,fontSize:12,letterSpacing:-1,lineHeight:1}}>⋮⋮</span>
                         <span style={{fontFamily:MONO,fontSize:10,color:colFor(r.taskId),minWidth:38,flexShrink:0}}>{r.taskId}</span>
+                        {phaseOf(job.id, r.taskId)>0 && <span style={{fontFamily:MONO,fontSize:9,color:"#5AA0FF",flexShrink:0}}>P{phaseOf(job.id, r.taskId)}</span>}
                         <span style={{fontSize:11,color:TXT,flex:1,minWidth:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t?.desc||r.taskId}</span>
                         <span style={{fontFamily:MONO,fontSize:9,color:r.startDate?Y:MUTED,flexShrink:0}}>{fmtDM(whenOf(r).from)}</span>
                       </button>
@@ -8029,7 +8190,7 @@ export default function App() {
                       const task = taskOf(r.taskId);
                       const label = `${fmtH(r.hours)}${r.techs>1?` ×${r.techs}`:""}${r.edited?" *":""}`;
                       return (
-                        <div key={r.taskId} data-gantt-row={r.taskId} data-search={searchText(r)} data-left={Math.round(left)}
+                        <div key={r.taskId} data-gantt-row={r.taskId} data-search={searchText(r)} data-phase={phaseOf(job.id, r.taskId)} data-left={Math.round(left)}
                           style={{display:hit0(r)?"":"none",height:ROW,boxSizing:"border-box",borderBottom:`1px solid ${BDR}`,position:"relative"}}>
                           <button onPointerDown={e=>startBarDrag(e, r, "move")}
                             onClick={()=>{ if (ganttUI.suppressClick) { ganttUI.suppressClick = false; return; } setEditSched({job, row:r}); }}
