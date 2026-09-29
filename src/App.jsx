@@ -5991,19 +5991,26 @@ export default function App() {
   };
 
   // Phase filter chips shown on the machine and section screens.
-  const PhaseChips = ({jid, style}) => {
+  // The one phase control. On a section screen it counts that section's jobs,
+  // so a phase with nothing in this section reads as empty before it's tapped.
+  const PhaseChips = ({jid, sid = null, style}) => {
     const {list, unset} = phasesOf(jid);
     if (!list.length) return null;
-    const opts = [["all", "ALL", null], ...list.map(p => [p, `PHASE ${p}`, phaseStats(jid, p)]), ...(unset ? [[0, "NOT SET", phaseStats(jid, 0)]] : [])];
+    const scope = ph => {
+      const ts = tasksForJob(jid).filter(t => (sid == null || t.sId === sid) && phaseOf(jid, t.id) === ph);
+      return {jobs: ts.length, est: Math.round(ts.reduce((a,t) => a + (Number(t.est)||0), 0) * 10) / 10};
+    };
+    const opts = [["all", "ALL", null], ...list.map(p => [p, `PHASE ${p}`, scope(p)]), ...(unset ? [[0, "NOT SET", scope(0)]] : [])];
     return (
       <div style={{display:"flex",gap:6,...style}}>
         {opts.map(([v, l, st]) => {
           const on = phaseFilter === v;
+          const none = st && !st.jobs;
           return (
             <button key={String(v)} onClick={()=>setPhaseFilter(v)}
-              style={{flex:1,minWidth:0,background:on?Y:CARD2,border:`1px solid ${on?Y:BDR2}`,borderRadius:8,padding:"7px 4px",cursor:"pointer"}}>
+              style={{flex:1,minWidth:0,background:on?Y:CARD2,border:`1px solid ${on?Y:BDR2}`,borderRadius:8,padding:"7px 4px",cursor:"pointer",opacity:none&&!on?.45:1}}>
               <div style={{fontFamily:FF,fontSize:11,fontWeight:800,color:on?BG:MUTED,letterSpacing:.5}}>{l}</div>
-              {st && <div style={{fontFamily:MONO,fontSize:9,color:on?BG:MUTED,marginTop:1}}>{st.jobs} · {st.est}h</div>}
+              {st && <div style={{fontFamily:MONO,fontSize:9,color:on?BG:MUTED,marginTop:1}}>{none ? "none here" : `${st.jobs} · ${st.est}h`}</div>}
             </button>
           );
         })}
@@ -6609,13 +6616,17 @@ export default function App() {
             </div>
             {phases.list.length>0 && (
               <div style={{padding: isDesktop?"12px 24px 0":"12px 14px 0"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                  <span style={{fontFamily:FF,fontSize:11,fontWeight:800,color:MUTED,letterSpacing:2}}>BUILD PHASES</span>
+                  <div style={{flex:1,height:1,background:BDR}}/>
+                  <span style={{fontSize:10,color:MUTED}}>filter with the buttons above</span>
+                </div>
                 <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.min(2, phases.list.length)},1fr)`,gap:8}}>
                   {phases.list.map(ph => {
                     const st = phaseStats(selJob, ph);
                     const pct = st.jobs ? Math.round(st.done/st.jobs*100) : 0;
                     return (
-                      <button key={ph} onClick={()=>setPhaseFilter(phaseFilter===ph?"all":ph)}
-                        style={{textAlign:"left",background:CARD,border:`1px solid ${phaseFilter===ph?Y:BDR}`,borderRadius:10,padding:"11px 13px",cursor:"pointer"}}>
+                      <div key={ph} style={{background:CARD,border:`1px solid ${phaseFilter===ph?Y:BDR}`,borderRadius:10,padding:"11px 13px"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8}}>
                           <span style={{fontFamily:FF,fontSize:13,fontWeight:800,color:TXT,letterSpacing:.5}}>PHASE {ph}</span>
                           <span style={{fontFamily:MONO,fontSize:12,color:Y}}>{money0(st.total)}</span>
@@ -6625,7 +6636,7 @@ export default function App() {
                         </div>
                         <Bar v={st.done} max={st.jobs} h={4}/>
                         <div style={{fontSize:10,color:MUTED,marginTop:4}}>{pct}% of jobs complete · {st.logged.toFixed(1)}h logged</div>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -6663,6 +6674,11 @@ export default function App() {
                 );
               })}
               </div>
+              {pf!=="all" && !secsOf(selJob).some(sec => sStats(selJob, sec.id, pf).total) && (
+                <div style={{textAlign:"center",color:MUTED,fontSize:13,padding:"24px 20px"}}>
+                  No jobs in {pf ? `phase ${pf}` : "the unset phase"} on this machine.
+                </div>
+              )}
               <button onClick={()=>setConfirmDel(selJob)} style={{width:"100%",marginTop:8,background:"rgba(255,76,76,.08)",border:"1px solid rgba(255,76,76,.25)",borderRadius:10,padding:14,cursor:"pointer",fontFamily:FF,fontSize:14,fontWeight:700,color:RED}}>
                 DELETE THIS JOB
               </button>
@@ -7016,7 +7032,7 @@ export default function App() {
             <StatBox label="EST COST" val={`$${Math.round(st.estCost).toLocaleString()}`} col={Y}/>
           </div>
           <Bar v={st.actual} max={st.est} h={5}/>
-          <PhaseChips jid={selJob} style={{marginTop:10}}/>
+          <PhaseChips jid={selJob} sid={selSec} style={{marginTop:10}}/>
           {(() => {
             const toBill = tasksForJob(selJob).filter(t => t.sId===selSec && inPhase(selJob, t.id, pf) && getStatus(selJob,t.id)==="completed" && !isInvoiced(selJob,t.id));
             if (!st.completed) return null;
@@ -7036,6 +7052,25 @@ export default function App() {
           })()}
         </div>
         <div style={{padding: isDesktop?"12px 24px":"12px 14px"}}>
+          {!builtIn.length && !ctTop.length && pf!=="all" && (
+            <div style={{background:CARD,border:`1px solid ${BDR}`,borderRadius:10,padding:"18px 16px",marginBottom:8,textAlign:"center"}}>
+              <div style={{fontSize:13,color:TXT,lineHeight:1.5}}>
+                Nothing in {pf ? `phase ${pf}` : "the unset phase"} in {sec?.name || "this section"}.
+              </div>
+              <div style={{fontSize:11,color:MUTED,marginTop:5}}>
+                {(() => {
+                  const here = tasksForJob(selJob).filter(t => t.sId===selSec);
+                  const names = [...new Set(here.map(t => phaseOf(selJob, t.id)))].sort((a,b)=>a-b)
+                    .map(p => p ? `phase ${p}` : "no phase set");
+                  return `All ${here.length} job${here.length===1?"":"s"} in this section are in ${names.join(" and ")}.`;
+                })()}
+              </div>
+              <button onClick={()=>setPhaseFilter("all")}
+                style={{marginTop:12,background:Y,border:"none",borderRadius:8,padding:"9px 18px",cursor:"pointer",fontFamily:FF,fontSize:12,fontWeight:800,color:BG,letterSpacing:1}}>
+                SHOW ALL PHASES
+              </button>
+            </div>
+          )}
           {builtIn.map(t=><TaskCard key={t.id} t={t}/>)}
           {ctTop.map(t=><TaskCard key={t.id} t={t}/>)}
           <button onClick={()=>{setCtParentId(null);setCtForm({desc:"",est:"",cost:"",opt:false});setShowCtModal(true);}}
@@ -7463,8 +7498,7 @@ export default function App() {
                     const on = cPhase === ph;
                     const o = outcome(st.variance);
                     return (
-                      <button key={ph} onClick={()=>{ setCPhase(on?"all":ph); setOpenSec(null); setOpenTask(null); }}
-                        style={{textAlign:"left",background:CARD,border:`1px solid ${on?Y:BDR}`,borderRadius:11,padding:"12px 13px",cursor:"pointer"}}>
+                      <div key={ph} style={{background:CARD,border:`1px solid ${on?Y:BDR}`,borderRadius:11,padding:"12px 13px"}}>
                         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8}}>
                           <span style={{fontFamily:FF,fontSize:14,fontWeight:800,color:TXT}}>PHASE {ph}</span>
                           <span style={{fontFamily:MONO,fontSize:13,color:Y,whiteSpace:"nowrap"}}>{money(st.price)}</span>
@@ -7474,7 +7508,7 @@ export default function App() {
                         <div style={{fontFamily:MONO,fontSize:11,color:st.ready?o.col:MUTED,marginTop:6}}>
                           {st.ready ? varTxt(st.variance) : "nothing finished yet"}
                         </div>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
